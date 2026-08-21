@@ -15,6 +15,7 @@ const sandboxes: string[] = [];
 
 interface Env {
   configDir: string;
+  homeDir: string;
   presetsDir: string;
   opencodePath: string;
   ohMyPath: string;
@@ -30,7 +31,9 @@ function makeEnv(now?: () => Date): Env {
   fs.copyFileSync(path.join(FIXTURES_DIR, "opencode.jsonc"), path.join(configDir, "opencode.json"));
   fs.copyFileSync(path.join(FIXTURES_DIR, "oh-my-opencode.json"), path.join(configDir, "oh-my-opencode.json"));
 
-  const store = new ConfigStore({ configDirOverride: configDir });
+  const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "ps-home-"));
+  sandboxes.push(homeDir);
+  const store = new ConfigStore({ configDirOverride: configDir, homeDir });
   const backup = new BackupService({
     configDir,
     hostname: "test-host",
@@ -44,6 +47,7 @@ function makeEnv(now?: () => Date): Env {
   });
   return {
     configDir,
+    homeDir,
     presetsDir: discovered.presetsDir,
     opencodePath: discovered.opencodeJson,
     ohMyPath: discovered.ohMyOpencodeJson,
@@ -69,6 +73,30 @@ function readOhMy(env: Env): string {
 
 function readOpencode(env: Env): string {
   return fs.readFileSync(env.opencodePath, "utf8");
+}
+
+const OMO_SEED = `// unified omo config
+{
+  "[opencode]": {
+    "agents": {
+      "oracle": { "model": "old/old", "variant": "low" },
+      "explore": { "models": [{ "model": "a/b", "reasoning": "max" }, { "model": "c/d" }] },
+      "librarian": { "model": "keep/keep", "reasoning": "high" },
+    },
+    "categories": {},
+  },
+}
+`;
+
+function seedOmoMachine(env: Env): Env {
+  fs.rmSync(env.ohMyPath);
+  fs.mkdirSync(path.join(env.homeDir, ".omo"), { recursive: true });
+  fs.writeFileSync(path.join(env.homeDir, ".omo", "omo.jsonc"), OMO_SEED);
+  return env;
+}
+
+function readOmo(env: Env): string {
+  return fs.readFileSync(path.join(env.homeDir, ".omo", "omo.jsonc"), "utf8");
 }
 
 afterEach(() => {
@@ -329,5 +357,90 @@ describe("PresetService.currentPresetName", () => {
     env.service.apply("b");
     env.service.apply("a");
     expect(env.service.currentPresetName()).toBe("a");
+  });
+});
+
+describe("PresetService.apply — omo target", () => {
+  it("writes into ~/.omo/omo.jsonc [opencode] with reasoning, clearing variant/models conflicts; untouched entries preserved", () => {
+    const env = seedOmoMachine(makeEnv());
+    env.service.save({
+      name: "switch",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      appliedAt: null,
+      defaults: { model: "p/m" },
+      agents: {
+        oracle: { model: "x/y", variant: "max" },
+        explore: { model: "e/f" },
+      },
+      categories: { quick: { model: "q/q", variant: "low" } },
+    });
+
+    const result = env.service.apply("switch");
+
+    const text = readOmo(env);
+    expect(validate(text)).toEqual([]);
+    expect(getValue(text, ["[opencode]", "agents", "oracle", "model"])).toBe("x/y");
+    expect(getValue(text, ["[opencode]", "agents", "oracle", "reasoning"])).toBe("max");
+    expect(getValue(text, ["[opencode]", "agents", "oracle", "variant"])).toBeUndefined();
+    expect(getValue(text, ["[opencode]", "agents", "explore", "model"])).toBe("e/f");
+    expect(getValue(text, ["[opencode]", "agents", "explore", "models"])).toBeUndefined();
+    expect(getValue(text, ["[opencode]", "agents", "explore", "reasoning"])).toBeUndefined();
+    expect(getValue(text, ["[opencode]", "agents", "librarian"])).toEqual({
+      model: "keep/keep",
+      reasoning: "high",
+    });
+    expect(getValue(text, ["[opencode]", "categories", "quick"])).toEqual({ model: "q/q", reasoning: "low" });
+    // comment survived the round-trip
+    expect(text).toContain("// unified omo config");
+    // legacy file stays absent — nothing written there
+    expect(fs.existsSync(env.ohMyPath)).toBe(false);
+    // defaults.model lands in opencode.json
+    expect(getValue(readOpencode(env), ["model"])).toBe("p/m");
+
+    const files = result.changes.map((c) => c.file);
+    expect(files).toContain("omo.jsonc");
+    expect(files).toContain("opencode.json");
+    expect(files).not.toContain("oh-my-opencode.json");
+    expect(result.changes).toContainEqual({
+      file: "omo.jsonc",
+      path: ["[opencode]", "agents", "oracle", "model"],
+      from: "old/old",
+      to: "x/y",
+    });
+  });
+
+  it("captures an omo machine: reasoning→variant, chain head from models[]", () => {
+    const env = seedOmoMachine(makeEnv(() => new Date("2026-08-22T00:00:00.000Z")));
+
+    const preset = env.service.capture("omo-snap");
+
+    expect(preset.agents).toEqual({
+      oracle: { model: "old/old", variant: "low" },
+      explore: { model: "a/b", variant: "max" },
+      librarian: { model: "keep/keep", variant: "high" },
+    });
+    expect(preset.categories).toEqual({});
+    expect(preset.defaults.model).toBeNull();
+  });
+
+  it("creates ~/.omo/omo.jsonc from scratch when the machine hints at omo but the file is missing", () => {
+    const env = makeEnv();
+    fs.rmSync(env.ohMyPath);
+    fs.mkdirSync(path.join(env.homeDir, ".omo"), { recursive: true });
+    env.service.save({
+      name: "fresh",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      appliedAt: null,
+      defaults: { model: null },
+      agents: { oracle: { model: "x/y", variant: "high" } },
+      categories: {},
+    });
+
+    env.service.apply("fresh");
+
+    const created = path.join(env.homeDir, ".omo", "omo.jsonc");
+    const text = fs.readFileSync(created, "utf8");
+    expect(validate(text)).toEqual([]);
+    expect(getValue(text, ["[opencode]", "agents", "oracle"])).toEqual({ model: "x/y", reasoning: "high" });
   });
 });

@@ -17,6 +17,7 @@ const sandboxes: string[] = [];
 
 interface PipelineEnv {
   configDir: string;
+  homeDir: string;
   presetsDir: string;
   backupsDir: string;
   opencodePath: string;
@@ -45,7 +46,9 @@ function makeEnv(opts: EnvOptions = {}): PipelineEnv {
   fs.mkdirSync(path.join(configDir, "presets"), { recursive: true });
   fs.writeFileSync(path.join(configDir, "presets", "seeded.json"), '{"name":"seeded"}');
 
-  const store = new ConfigStore({ configDirOverride: configDir });
+  const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "pipeline-home-"));
+  sandboxes.push(homeDir);
+  const store = new ConfigStore({ configDirOverride: configDir, homeDir });
   const backup = new BackupService({
     configDir,
     hostname: "pipeline-test-host",
@@ -59,6 +62,7 @@ function makeEnv(opts: EnvOptions = {}): PipelineEnv {
   });
   return {
     configDir,
+    homeDir,
     presetsDir: discovered.presetsDir,
     backupsDir: discovered.backupsDir,
     opencodePath: discovered.opencodeJson,
@@ -221,5 +225,55 @@ describe("integration: core pipeline (capture → mutate → apply → backup �
     expect(env.backup.list()).toEqual([]);
 
     expect(env.service.load("snap").appliedAt).toBeNull();
+  });
+
+  it("scenario E: omo machine — preset lifecycle targets ~/.omo/omo.jsonc end to end", () => {
+    const env = makeEnv({ now: seqNow("2026-08-22T10:00:00.000Z") });
+    fs.rmSync(env.ohMyPath);
+    const omoPath = path.join(env.homeDir, ".omo", "omo.jsonc");
+    fs.mkdirSync(path.dirname(omoPath), { recursive: true });
+    fs.writeFileSync(
+      omoPath,
+      '{\n  "[opencode]": {\n    "agents": {\n      "oracle": { "model": "old/old", "reasoning": "low" }\n    },\n    "categories": {}\n  }\n}\n',
+    );
+    const backup = new BackupService({
+      configDir: env.configDir,
+      hostname: "pipeline-test-host",
+      managedFiles: [env.opencodePath, omoPath, env.agentsMdPath],
+    });
+
+    const captured = env.service.capture("omo-base");
+    expect(captured.agents.oracle).toEqual({ model: "old/old", variant: "low" });
+
+    const drifted = applyEdits(fs.readFileSync(omoPath, "utf8"), [
+      { path: ["[opencode]", "agents", "oracle", "model"], value: "x/drifted", op: "set" },
+    ]);
+    env.store.writeAtomic(omoPath, drifted);
+
+    const applied = env.service.apply("omo-base");
+    expect(applied.changes).toEqual([
+      {
+        file: "omo.jsonc",
+        path: ["[opencode]", "agents", "oracle", "model"],
+        from: "x/drifted",
+        to: "old/old",
+      },
+    ]);
+    const appliedText = fs.readFileSync(omoPath, "utf8");
+    expect(getValue(appliedText, ["[opencode]", "agents", "oracle", "reasoning"])).toBe("low");
+    expect(fs.existsSync(env.ohMyPath)).toBe(false);
+
+    const manual = backup.create("manual");
+    expect(fs.existsSync(path.join(manual.dir, "omo.jsonc"))).toBe(true);
+
+    env.store.writeAtomic(omoPath, applyEdits(appliedText, [
+      { path: ["[opencode]", "agents", "oracle", "model"], value: "y/mutated", op: "set" },
+    ]));
+    const pairs = backup.diffPairs(manual);
+    expect(pairs.map((p) => p.label)).toContain("omo.jsonc");
+    expect(pairs.find((p) => p.label === "omo.jsonc")?.current).toBe(omoPath);
+
+    backup.restore(manual.dirName);
+    expect(fs.readFileSync(omoPath, "utf8")).toBe(appliedText);
   });
 });

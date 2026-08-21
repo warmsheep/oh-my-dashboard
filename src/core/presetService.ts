@@ -21,7 +21,8 @@ export interface PresetServiceOptions {
 }
 
 export interface ApplyChange {
-  file: "oh-my-opencode.json" | "opencode.json";
+  /** Basename of the file actually written (e.g. "omo.jsonc", "oh-my-opencode.json", "opencode.json"). */
+  file: string;
   path: (string | number)[];
   from: unknown;
   to: unknown;
@@ -157,32 +158,39 @@ export class PresetService {
   apply(name: string): ApplyResult {
     const preset = this.load(name);
     const discovered = this.configStore.discover();
+    const target = discovered.agentConfig;
     const changes: ApplyChange[] = [];
 
-    // One edit batch for oh-my-opencode.json: for every listed key, set model and
-    // set-or-remove variant. Keys NOT present in the preset are never touched.
+    // One edit batch for the agent config: for every listed key, set model, set-or-remove the
+    // target's reasoning key, and drop the deprecated sibling key plus any `models` chain —
+    // otherwise the preset's single-model assignment would silently lose to them. Keys NOT
+    // present in the preset are never touched.
     const edits: JsoncEdit[] = [];
+    const otherReasoningKey = target.reasoningKey === "reasoning" ? "variant" : "reasoning";
     const collect = (section: "agents" | "categories", settings: Record<string, ModelSetting>): void => {
       for (const [key, setting] of Object.entries(settings)) {
-        edits.push({ path: [section, key, "model"], value: setting.model, op: "set" });
+        const base = [...target.sectionPath, section, key];
+        edits.push({ path: [...base, "model"], value: setting.model, op: "set" });
         if (setting.variant != null) {
-          edits.push({ path: [section, key, "variant"], value: setting.variant, op: "set" });
+          edits.push({ path: [...base, target.reasoningKey], value: setting.variant, op: "set" });
         } else {
-          edits.push({ path: [section, key, "variant"], value: undefined, op: "remove" });
+          edits.push({ path: [...base, target.reasoningKey], value: undefined, op: "remove" });
         }
+        edits.push({ path: [...base, otherReasoningKey], value: undefined, op: "remove" });
+        edits.push({ path: [...base, "models"], value: undefined, op: "remove" });
       }
     };
     collect("agents", preset.agents);
     collect("categories", preset.categories);
 
-    const ohMyText = this.configStore.readTextOrEmpty(discovered.ohMyOpencodeJson);
-    const ohMyParse = this.editor.parseSafe<unknown>(ohMyText);
-    if (ohMyParse.errors.length > 0) {
+    const agentText = this.configStore.readTextOrEmpty(target.path);
+    const agentParse = this.editor.parseSafe<unknown>(agentText);
+    if (agentParse.errors.length > 0) {
       // Never touch a broken file.
-      throw new realEditor.JsoncSyntaxError(ohMyParse.errors);
+      throw new realEditor.JsoncSyntaxError(agentParse.errors);
     }
 
-    const recordChanges = (file: ApplyChange["file"], fileEdits: JsoncEdit[], text: string): void => {
+    const recordChanges = (file: string, fileEdits: JsoncEdit[], text: string): void => {
       for (const edit of fileEdits) {
         const from = this.editor.getValue(text, edit.path);
         const isRemove = (edit.op ?? "set") === "remove";
@@ -191,23 +199,25 @@ export class PresetService {
         }
       }
     };
-    recordChanges("oh-my-opencode.json", edits, ohMyText);
+    recordChanges(path.basename(target.path), edits, agentText);
 
-    const newOhMyText = this.editor.applyEdits(ohMyText, edits);
-    if (newOhMyText !== ohMyText) {
-      this.configStore.writeAtomic(discovered.ohMyOpencodeJson, newOhMyText);
+    const newAgentText = this.editor.applyEdits(agentText.length > 0 ? agentText : "{}", edits);
+    if (newAgentText !== agentText) {
+      this.fs.mkdirSync(path.dirname(target.path), { recursive: true });
+      this.configStore.writeAtomic(target.path, newAgentText);
     }
 
-    const opencodeText = this.configStore.readTextOrEmpty(discovered.opencodeJson);
+    const opencodePath = discovered.opencodeJson;
+    const opencodeText = this.configStore.readTextOrEmpty(opencodePath);
     const model = preset.defaults?.model ?? null;
     const modelEdit: JsoncEdit =
       model != null
         ? { path: ["model"], value: model, op: "set" }
         : { path: ["model"], value: undefined, op: "remove" };
-    recordChanges("opencode.json", [modelEdit], opencodeText);
+    recordChanges(path.basename(opencodePath), [modelEdit], opencodeText);
     const newOpencodeText = this.editor.applyEdits(opencodeText, [modelEdit]);
     if (newOpencodeText !== opencodeText) {
-      this.configStore.writeAtomic(discovered.opencodeJson, newOpencodeText);
+      this.configStore.writeAtomic(opencodePath, newOpencodeText);
     }
 
     preset.appliedAt = this.now().toISOString();
