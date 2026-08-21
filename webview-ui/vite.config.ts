@@ -1,9 +1,12 @@
-import { defineConfig } from "vite";
-import react from "@vitejs/plugin-react";
-import { fileURLToPath } from "node:url";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
+import react from "@vitejs/plugin-react";
+import { defineConfig } from "vite";
 
-const rootDir = path.resolve(fileURLToPath(new URL(".", import.meta.url)), "..");
+const rootDir = path.resolve(
+  fileURLToPath(new URL(".", import.meta.url)),
+  "..",
+);
 
 export default defineConfig({
   plugins: [react()],
@@ -21,7 +24,12 @@ export default defineConfig({
       output: {
         entryFileNames: "index.js",
         chunkFileNames: "[name].js",
-        assetFileNames: "[name].[ext]",
+        assetFileNames: (assetInfo) => {
+          const isCss =
+            assetInfo.names.some((n) => n.endsWith(".css")) ||
+            assetInfo.originalFileNames.some((f) => f.endsWith(".css"));
+          return isCss ? "main.css" : "[name].[ext]";
+        },
         inlineDynamicImports: true,
       },
     },
