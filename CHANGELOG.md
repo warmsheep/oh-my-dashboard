@@ -25,3 +25,9 @@
   首次使用时生成 `~/.config/opencode/models.json`（可手动编辑，损坏自愈）
 - 模型列表双源合并：opencode.json providers + 本地清单，同名 id 合并为一（opencode.json 优先）
 - 构建产物统一输出到 `build/packages/`（`npm run package`）
+
+## 0.4.0 (2026-08-21)
+
+- 内置模型清单按 models.dev（opencode 官方模型目录）2026-08-21 数据全量刷新，15 → 33 项，
+  每系列收录最新主力：GLM-5.3、Kimi K3、MiniMax M3、MiMo v2.5 Pro、DeepSeek V4、
+  GPT-5.6、Claude Opus 5 / Sonnet 5、Grok 4.6、Gemini 3.7 Flash 等

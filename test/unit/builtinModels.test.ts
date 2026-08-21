@@ -77,7 +77,7 @@ describe("ensureLocalModelsFile", () => {
       Kimi: /^moonshotai\/kimi-/,
       MiniMax: /^minimax-cn-coding-plan\/MiniMax-/,
       Mimo: /^xiaomi\/mimo-/,
-      Deepseek: /^deepseek\/DeepSeek-/,
+      Deepseek: /^deepseek\/deepseek-/,
       GPT: /^openai\/gpt-/,
       Claude: /^anthropic\/claude-/,
       Grok: /^xai\/grok-/,

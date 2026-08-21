@@ -139,12 +139,12 @@ describe("ConfigStore.listModels", () => {
     const dir = seedConfigDir({ opencode: true });
     const models = new ConfigStore({ configDirOverride: dir }).listModels();
 
-    expect(models).toHaveLength(38);
+    expect(models).toHaveLength(54);
     const ids = models.map((m) => m.id);
     expect(ids).toContain("WindsurfAI/claude-opus-4.6");
     expect(ids).toContain("zhipuai-coding-plan/glm-5");
-    expect(ids).toContain("xai/grok-4.1");
-    expect(ids).toContain("google/gemini-3-pro");
+    expect(ids).toContain("xai/grok-4.6");
+    expect(ids).toContain("google/gemini-3.7-flash");
     expect(ids).toEqual([...ids].sort());
     expect(new Set(ids).size).toBe(ids.length);
 
@@ -163,7 +163,7 @@ describe("ConfigStore.listModels", () => {
     const dir = sandbox();
     const models = new ConfigStore({ configDirOverride: dir }).listModels();
     expect(models.length).toBe(BUILTIN_MODELS.length);
-    expect(models.map((m) => m.id)).toContain("anthropic/claude-opus-4.6");
+    expect(models.map((m) => m.id)).toContain("anthropic/claude-opus-5");
     expect(existsSync(path.join(dir, "models.json"))).toBe(true);
   });
 });
