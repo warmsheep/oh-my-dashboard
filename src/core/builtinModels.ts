@@ -123,3 +123,43 @@ export function mergeModelOptions(primary: readonly ModelOption[], secondary: re
   }
   return [...byId.values()].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
 }
+
+export interface LocalModelInput {
+  provider: string;
+  model: string;
+  label?: string;
+}
+
+function writeLocalModels(configDir: string, models: ModelOption[], fs: typeof defaultFs = defaultFs): void {
+  const file = path.join(configDir, LOCAL_MODELS_FILE);
+  fs.mkdirSync(configDir, { recursive: true });
+  fs.writeFileSync(file, serialize(models));
+}
+
+export function addLocalModel(configDir: string, input: LocalModelInput, fs: typeof defaultFs = defaultFs): ModelOption {
+  const models = ensureLocalModelsFile(configDir, fs);
+  const entry: ModelOption = {
+    id: `${input.provider}/${input.model}`,
+    provider: input.provider,
+    model: input.model,
+    label: input.label !== undefined && input.label.length > 0 ? input.label : input.model,
+  };
+  const index = models.findIndex((m) => m.id === entry.id);
+  if (index >= 0) {
+    models[index] = entry;
+  } else {
+    models.push(entry);
+  }
+  writeLocalModels(configDir, models, fs);
+  return entry;
+}
+
+export function removeLocalModel(configDir: string, id: string, fs: typeof defaultFs = defaultFs): boolean {
+  const models = ensureLocalModelsFile(configDir, fs);
+  const next = models.filter((m) => m.id !== id);
+  if (next.length === models.length) {
+    return false;
+  }
+  writeLocalModels(configDir, next, fs);
+  return true;
+}

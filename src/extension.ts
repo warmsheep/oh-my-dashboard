@@ -4,11 +4,12 @@ import { BackupService } from "./core/backupService";
 import { ConfigStore } from "./core/configStore";
 import { validate } from "./core/jsoncEditor";
 import { PresetService } from "./core/presetService";
-import type { BackupEntry, DiscoveredConfig, JsoncError, ModelSetting, Preset } from "./core/types";
+import type { BackupEntry, DiscoveredConfig, JsoncError, ModelEntry, ModelSetting, Preset } from "./core/types";
 import { CONFIG_KEY, CONFIG_SECTION, OUTPUT_CHANNEL_NAME, VIEW } from "./constants";
 import { ConfigTreeDataProvider } from "./tree/provider";
 import { registerCommands } from "./ui/commands";
 import { createStatusBar } from "./ui/statusbar";
+import { notifyPresetEditorsModelsChanged } from "./webview/presetEditorHost";
 
 interface TreeDataSnapshot {
   discovered: DiscoveredConfig;
@@ -17,6 +18,7 @@ interface TreeDataSnapshot {
   backups: BackupEntry[];
   parseErrors: Map<string, JsoncError[]>;
   assignments: { agents: Record<string, ModelSetting>; categories: Record<string, ModelSetting> };
+  models: ModelEntry[];
 }
 
 export function activate(ctx: vscode.ExtensionContext): void {
@@ -67,6 +69,7 @@ export function activate(ctx: vscode.ExtensionContext): void {
       currentPreset: presetService.currentPresetName(),
       backups: backupService.list(),
       assignments: configStore.ohMyAssignments(),
+      models: configStore.listModelEntries(),
     };
   };
 
@@ -74,11 +77,13 @@ export function activate(ctx: vscode.ExtensionContext): void {
     configFiles: new ConfigTreeDataProvider("config", dataLoader),
     presets: new ConfigTreeDataProvider("presets", dataLoader),
     backups: new ConfigTreeDataProvider("backups", dataLoader),
+    models: new ConfigTreeDataProvider("models", dataLoader),
   };
   ctx.subscriptions.push(
     vscode.window.registerTreeDataProvider(VIEW.configFiles, providers.configFiles),
     vscode.window.registerTreeDataProvider(VIEW.presets, providers.presets),
     vscode.window.registerTreeDataProvider(VIEW.backups, providers.backups),
+    vscode.window.registerTreeDataProvider(VIEW.models, providers.models),
   );
 
   const statusbar = createStatusBar({ presetService, log });
@@ -88,7 +93,9 @@ export function activate(ctx: vscode.ExtensionContext): void {
     providers.configFiles.refresh();
     providers.presets.refresh();
     providers.backups.refresh();
+    providers.models.refresh();
     statusbar.update();
+    notifyPresetEditorsModelsChanged(configStore.listModels());
   };
 
   registerCommands(ctx, { configStore, backupService, presetService, refreshAll, log });

@@ -2,7 +2,7 @@
   "name": "opencode-config-manager",
   "displayName": "OpenCode 配置管理器",
   "description": "管理 opencode / oh-my-opencode 配置：结构化修改、备份、恢复、命名预设一键切换",
-  "version": "0.4.2",
+  "version": "0.5.0",
   "publisher": "local",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -37,6 +37,10 @@
         {
           "id": "opencodeBackups",
           "name": "备份"
+        },
+        {
+          "id": "opencodeModels",
+          "name": "模型"
         }
       ]
     },
@@ -120,6 +124,23 @@
         "title": "刷新",
         "category": "OpenCode",
         "icon": "$(refresh)"
+      },
+      {
+        "command": "opencode.addModel",
+        "title": "添加模型…",
+        "category": "OpenCode",
+        "icon": "$(add)"
+      },
+      {
+        "command": "opencode.deleteModel",
+        "title": "删除模型",
+        "category": "OpenCode"
+      },
+      {
+        "command": "opencode.openModelsFile",
+        "title": "打开模型清单文件",
+        "category": "OpenCode",
+        "icon": "$(go-to-file)"
       }
     ],
     "menus": {
@@ -138,6 +159,16 @@
           "command": "opencode.backupNow",
           "when": "view == opencodeBackups",
           "group": "navigation@1"
+        },
+        {
+          "command": "opencode.addModel",
+          "when": "view == opencodeModels",
+          "group": "navigation@1"
+        },
+        {
+          "command": "opencode.openModelsFile",
+          "when": "view == opencodeModels",
+          "group": "navigation@2"
         }
       ],
       "view/item/context": [
@@ -178,6 +209,10 @@
         {
           "command": "opencode.setAgentModel",
           "when": "view == opencodeConfigFiles && viewItem =~ /agent|category/"
+        },
+        {
+          "command": "opencode.deleteModel",
+          "when": "view == opencodeModels && viewItem == modelLocal"
         }
       ],
       "commandPalette": [
@@ -219,6 +254,18 @@
         },
         {
           "command": "opencode.deleteBackup",
+          "when": "false"
+        },
+        {
+          "command": "opencode.addModel",
+          "when": "false"
+        },
+        {
+          "command": "opencode.deleteModel",
+          "when": "false"
+        },
+        {
+          "command": "opencode.openModelsFile",
           "when": "false"
         }
       ]

@@ -53,6 +53,11 @@ export interface ModelOption {
   label: string;
 }
 
+export interface ModelEntry {
+  option: ModelOption;
+  source: "opencode" | "local" | "both";
+}
+
 export interface DiscoveredConfig {
   configDir: string;
   opencodeJson: string;

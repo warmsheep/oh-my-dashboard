@@ -21,12 +21,16 @@ export const CMD = {
   diffBackup: "opencode.diffBackup",
   deleteBackup: "opencode.deleteBackup",
   refreshTree: "opencode.refreshTree",
+  addModel: "opencode.addModel",
+  deleteModel: "opencode.deleteModel",
+  openModelsFile: "opencode.openModelsFile",
 } as const;
 
 export const VIEW = {
   configFiles: "opencodeConfigFiles",
   presets: "opencodePresets",
   backups: "opencodeBackups",
+  models: "opencodeModels",
 } as const;
 
 export const CONFIG_SECTION = "opencodeConfigManager";

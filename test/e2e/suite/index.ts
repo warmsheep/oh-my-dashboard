@@ -98,6 +98,28 @@ async function executeRestoreBackup(dirName: string): Promise<void> {
   console.log(`    (modal patch engaged: ${patchEngaged})`);
 }
 
+async function executeDeleteModel(id: string): Promise<void> {
+  const windowApi = vscode.window as unknown as {
+    showWarningMessage: (...args: unknown[]) => Thenable<string | undefined>;
+  };
+  const original = windowApi.showWarningMessage;
+  windowApi.showWarningMessage = (...args: unknown[]) => {
+    const actions = args.filter((arg): arg is string => typeof arg === "string");
+    return Promise.resolve(actions.length > 1 ? actions[actions.length - 1] : undefined);
+  };
+  try {
+    const deleting = Promise.resolve(vscode.commands.executeCommand(CMD.deleteModel, id));
+    await sleep(1_000);
+    await vscode.commands.executeCommand("workbench.action.acceptDialog").then(
+      () => undefined,
+      () => undefined,
+    );
+    await withTimeout(deleting, 10_000, "deleteModel should resolve");
+  } finally {
+    windowApi.showWarningMessage = original;
+  }
+}
+
 function tests(): TestCase[] {
   return [
     {
@@ -149,6 +171,26 @@ function tests(): TestCase[] {
         assert.ok(
           document.fileName.endsWith("opencode.json"),
           `active document should be opencode.json, got: ${document.fileName}`,
+        );
+      },
+    },
+    {
+      name: "addModel writes models.json; deleteModel removes the entry",
+      fn: async () => {
+        const id = "e2e-test-provider/e2e-model-x";
+        await vscode.commands.executeCommand(CMD.addModel, id);
+        const modelsFile = path.join(configDir, "models.json");
+        assert.ok(fs.existsSync(modelsFile), "models.json must exist after addModel");
+        const afterAdd = JSON.parse(fs.readFileSync(modelsFile, "utf8")) as { models: { provider: string; model: string }[] };
+        assert.ok(
+          afterAdd.models.some((m) => `${m.provider}/${m.model}` === id),
+          `added model ${id} not found in models.json`,
+        );
+        await executeDeleteModel(id);
+        const afterDelete = JSON.parse(fs.readFileSync(modelsFile, "utf8")) as { models: { provider: string; model: string }[] };
+        assert.ok(
+          !afterDelete.models.some((m) => `${m.provider}/${m.model}` === id),
+          `deleted model ${id} still present in models.json`,
         );
       },
     },

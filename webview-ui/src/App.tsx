@@ -355,6 +355,9 @@ export default function App() {
       if (!msg || typeof msg !== "object") return;
       if (msg.type === "init") handlersRef.current.init(msg.payload);
       else if (msg.type === "result") handlersRef.current.result(msg.payload);
+      else if (msg.type === "modelsUpdated") {
+        setPayload((current) => (current ? { ...current, models: msg.payload.models } : current));
+      }
     };
     window.addEventListener("message", onMessage);
     postToHost({ type: "ready" });

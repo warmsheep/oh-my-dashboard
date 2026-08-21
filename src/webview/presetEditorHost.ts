@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as vscode from "vscode";
 import { KNOWN_AGENTS, KNOWN_CATEGORIES, VARIANTS } from "../core/types";
-import type { ModelSetting, Preset, Variant } from "../core/types";
+import type { ModelOption, ModelSetting, Preset, Variant } from "../core/types";
 import type { ConfigStore } from "../core/configStore";
 import type { PresetService } from "../core/presetService";
 import type { PresetRow, WebviewInitPayload } from "../shared/protocol";
@@ -17,6 +17,12 @@ export interface PresetEditorDeps {
 }
 
 const openPanels = new Map<string, vscode.WebviewPanel>();
+
+export function notifyPresetEditorsModelsChanged(models: ModelOption[]): void {
+  for (const panel of openPanels.values()) {
+    void panel.webview.postMessage({ type: "modelsUpdated", payload: { models } });
+  }
+}
 
 export async function openPresetEditor(
   ctx: vscode.ExtensionContext,

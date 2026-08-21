@@ -14,6 +14,7 @@ export interface WebviewInitPayload {
 
 export type ExtToWebview =
   | { type: "init"; payload: WebviewInitPayload }
+  | { type: "modelsUpdated"; payload: { models: ModelOption[] } }
   | { type: "result"; payload: { action: "save" | "apply"; ok: boolean; error?: string } };
 
 export type WebviewToExt =

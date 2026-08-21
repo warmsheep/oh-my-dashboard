@@ -3,7 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { getValue, parseSafe } from "./jsoncEditor";
 import { ensureLocalModelsFile, mergeModelOptions } from "./builtinModels";
-import type { DiscoveredConfig, ModelOption, ModelSetting, ParseResult } from "./types";
+import type { DiscoveredConfig, ModelEntry, ModelOption, ModelSetting, ParseResult } from "./types";
 
 export interface ConfigStoreOptions {
   configDirOverride?: string;
@@ -124,6 +124,27 @@ export class ConfigStore {
   }
 
   listModels(): ModelOption[] {
+    const options = this.opencodeModels();
+    const local = ensureLocalModelsFile(this.configDir);
+    return mergeModelOptions(options, local);
+  }
+
+  listModelEntries(): ModelEntry[] {
+    const fromOpencode = this.opencodeModels();
+    const fromLocal = ensureLocalModelsFile(this.configDir);
+    const opencodeIds = new Set(fromOpencode.map((m) => m.id));
+    const localIds = new Set(fromLocal.map((m) => m.id));
+    return mergeModelOptions(fromOpencode, fromLocal).map((option) => ({
+      option,
+      source: opencodeIds.has(option.id)
+        ? localIds.has(option.id)
+          ? "both"
+          : "opencode"
+        : "local",
+    }));
+  }
+
+  private opencodeModels(): ModelOption[] {
     const result = this.readParse<{ provider?: Record<string, { models?: Record<string, unknown> }> }>(
       path.join(this.configDir, "opencode.json"),
     );
@@ -144,8 +165,7 @@ export class ConfigStore {
         }
       }
     }
-    const local = ensureLocalModelsFile(this.configDir);
-    return mergeModelOptions(options, local);
+    return options;
   }
 
   defaultModel(): string | null {

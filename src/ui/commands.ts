@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as vscode from "vscode";
+import { addLocalModel, removeLocalModel, LOCAL_MODELS_FILE } from "../core/builtinModels";
 import { applyEdits, validate } from "../core/jsoncEditor";
 import type { JsoncEdit } from "../core/jsoncEditor";
 import type { BackupEntry, Variant } from "../core/types";
@@ -94,6 +95,15 @@ export function registerCommands(ctx: vscode.ExtensionContext, deps: ExtensionDe
     ),
     vscode.commands.registerCommand(CMD.deleteBackup, (arg?: unknown) =>
       run(deps, "删除备份失败", () => deleteBackup(deps, arg)),
+    ),
+    vscode.commands.registerCommand(CMD.addModel, (arg?: unknown) =>
+      run(deps, "添加模型失败", () => addModel(deps, arg)),
+    ),
+    vscode.commands.registerCommand(CMD.deleteModel, (arg?: unknown) =>
+      run(deps, "删除模型失败", () => deleteModel(deps, arg)),
+    ),
+    vscode.commands.registerCommand(CMD.openModelsFile, () =>
+      run(deps, "打开模型清单失败", () => openModelsFile(deps)),
     ),
     vscode.commands.registerCommand(CMD.refreshTree, () => deps.refreshAll()),
   ];
@@ -663,4 +673,86 @@ async function deleteBackup(deps: ExtensionDeps, arg: unknown): Promise<void> {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function modelIdFromArg(arg: unknown): string | undefined {
+  if (typeof arg === "string" && arg.length > 0) {
+    return arg;
+  }
+  const node = toNode(arg);
+  if (node?.kind === "model" && node.id) {
+    return idSuffix(node.id);
+  }
+  return undefined;
+}
+
+async function addModel(deps: ExtensionDeps, arg: unknown): Promise<void> {
+  const programmatic = typeof arg === "string" && arg.length > 0;
+  let idInput = programmatic ? arg : undefined;
+  if (!idInput) {
+    idInput = await vscode.window.showInputBox({
+      prompt: "模型 ID（provider/model，例如 deepseek/deepseek-v4-flash）",
+      placeHolder: "provider/model",
+      validateInput: (value) =>
+        MODEL_ID_PATTERN.test(value) ? undefined : "格式须为 provider/model，例如 deepseek/deepseek-v4-flash",
+    });
+  }
+  if (!idInput) {
+    return;
+  }
+  if (!MODEL_ID_PATTERN.test(idInput)) {
+    void vscode.window.showErrorMessage(`模型 ID 格式不正确: ${idInput}（须为 provider/model）`);
+    return;
+  }
+  const label = programmatic
+    ? undefined
+    : await vscode.window.showInputBox({
+        prompt: "显示名称（可选，留空则用模型名）",
+        placeHolder: "例如 DeepSeek V4 Flash",
+      });
+  const [provider, model] = idInput.split("/");
+  const entry = addLocalModel(deps.configStore.configDir, {
+    provider,
+    model,
+    ...(label !== undefined && label.trim() !== "" ? { label: label.trim() } : {}),
+  });
+  deps.refreshAll();
+  void vscode.window.showInformationMessage(`已添加模型 ${entry.label}（${entry.id}）`);
+}
+
+async function deleteModel(deps: ExtensionDeps, arg: unknown): Promise<void> {
+  const id = modelIdFromArg(arg);
+  if (!id) {
+    return;
+  }
+  const fromOpencode = deps.configStore
+    .listModelEntries()
+    .find((entry) => entry.option.id === id && (entry.source === "opencode" || entry.source === "both"));
+  if (fromOpencode) {
+    void vscode.window.showErrorMessage(`${id} 来自 opencode.json，请直接编辑该文件移除`);
+    return;
+  }
+  const confirm = await vscode.window.showWarningMessage(
+    `从模型清单删除 ${id}？`,
+    { modal: true },
+    "删除",
+  );
+  if (confirm !== "删除") {
+    return;
+  }
+  if (!removeLocalModel(deps.configStore.configDir, id)) {
+    void vscode.window.showInformationMessage(`模型清单中未找到 ${id}`);
+    return;
+  }
+  deps.refreshAll();
+  void vscode.window.showInformationMessage(`已删除模型 ${id}`);
+}
+
+async function openModelsFile(deps: ExtensionDeps): Promise<void> {
+  const filePath = path.join(deps.configStore.configDir, LOCAL_MODELS_FILE);
+  if (!fs.existsSync(filePath)) {
+    void vscode.window.showInformationMessage("模型清单文件尚不存在，请先「添加模型…」创建");
+    return;
+  }
+  await vscode.window.showTextDocument(vscode.Uri.file(filePath));
 }

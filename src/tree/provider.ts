@@ -1,8 +1,8 @@
 import * as vscode from "vscode";
-import type { BackupEntry, DiscoveredConfig, JsoncError, ModelSetting, Preset } from "../core/types";
+import type { BackupEntry, DiscoveredConfig, JsoncError, ModelEntry, ModelSetting, Preset } from "../core/types";
 import { buildConfigTree, CURRENT_PRESET_BADGE, type BaseNode } from "./nodes";
 
-export type TreeSection = "config" | "presets" | "backups";
+export type TreeSection = "config" | "presets" | "backups" | "models";
 
 export interface TreeDataSnapshot {
   discovered: DiscoveredConfig;
@@ -11,6 +11,7 @@ export interface TreeDataSnapshot {
   backups: BackupEntry[];
   parseErrors: Map<string, JsoncError[]>;
   assignments?: { agents: Record<string, ModelSetting>; categories: Record<string, ModelSetting> };
+  models?: ModelEntry[];
 }
 
 const COLLAPSIBLE: Record<BaseNode["collapsibleState"], vscode.TreeItemCollapsibleState> = {
@@ -47,6 +48,14 @@ function iconId(node: BaseNode): string {
       return "bookmark";
     case "backupRoot":
       return "history";
+    case "modelRoot":
+      return "circuit-board";
+    case "modelProvider":
+      return "server";
+    case "model":
+      return "symbol-misc";
+    case "modelAddAction":
+      return "add";
   }
 }
 
@@ -89,8 +98,10 @@ export class ConfigTreeDataProvider implements vscode.TreeDataProvider<BaseNode>
       this.cache.backups,
       this.cache.parseErrors,
       this.cache.assignments,
+      this.cache.models,
     );
-    const root = this.section === "config" ? roots[0] : this.section === "presets" ? roots[1] : roots[2];
+    const sectionIndex = { config: 0, presets: 1, backups: 2, models: 3 } as const;
+    const root = roots[sectionIndex[this.section]];
     return root?.children ?? [];
   }
 }

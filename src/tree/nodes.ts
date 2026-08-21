@@ -1,5 +1,5 @@
 import * as path from "node:path";
-import type { BackupEntry, DiscoveredConfig, JsoncError, ModelSetting, Preset } from "../core/types";
+import type { BackupEntry, DiscoveredConfig, JsoncError, ModelEntry, ModelSetting, Preset } from "../core/types";
 
 export type NodeKind =
   | "configRoot"
@@ -13,6 +13,10 @@ export type NodeKind =
   | "captureAction"
   | "backupRoot"
   | "backup"
+  | "modelRoot"
+  | "modelProvider"
+  | "model"
+  | "modelAddAction"
   | "guide"
   | "parseError";
 
@@ -202,6 +206,42 @@ const BACKUP_REASON_LABELS: Record<string, string> = {
   "pre-restore": "恢复前",
 };
 
+const MODEL_SOURCE_LABELS: Record<ModelEntry["source"], string> = {
+  opencode: "opencode.json",
+  local: "models.json",
+  both: "opencode.json + models.json",
+};
+
+function modelNodes(models: ModelEntry[]): BaseNode[] {
+  const byProvider = new Map<string, ModelEntry[]>();
+  for (const entry of models) {
+    const list = byProvider.get(entry.option.provider) ?? [];
+    list.push(entry);
+    byProvider.set(entry.option.provider, list);
+  }
+  const providerNames = [...byProvider.keys()].sort((a, b) => a.localeCompare(b));
+  return providerNames.map((provider) => {
+    const entries = byProvider.get(provider) ?? [];
+    return {
+      kind: "modelProvider" as const,
+      id: `modelProvider:${provider}`,
+      label: provider,
+      description: `（${entries.length}）`,
+      contextValue: "modelProvider",
+      collapsibleState: "collapsed" as const,
+      children: entries.map((entry) => ({
+        kind: "model" as const,
+        id: `model:${entry.option.id}`,
+        label: `${entry.option.label}（${entry.option.id}）`,
+        description: MODEL_SOURCE_LABELS[entry.source],
+        tooltip: `${entry.option.id} — 来源: ${MODEL_SOURCE_LABELS[entry.source]}`,
+        contextValue: entry.source === "opencode" ? "modelOpencode" : "modelLocal",
+        collapsibleState: "none" as const,
+      })),
+    };
+  });
+}
+
 /**
  * Pure builder for the OpenCode Config Manager sidebar tree.
  *
@@ -217,6 +257,7 @@ export function buildConfigTree(
   backups: BackupEntry[],
   parseErrors: Map<string, JsoncError[]>,
   assignments?: Assignments,
+  models?: ModelEntry[],
 ): BaseNode[] {
   const ohMy = configFileNode("config:oh-my-opencode.json", "oh-my-opencode.json", d.ohMyOpencodeJson, parseErrors);
   const assignmentChildren = assignments ? assignmentNodes(assignments) : [];
@@ -301,9 +342,22 @@ export function buildConfigTree(
             filePath: b.dir,
           }));
 
+  const modelChildren: BaseNode[] = [
+    {
+      kind: "modelAddAction",
+      id: "action:addModel",
+      label: "➕ 添加模型…",
+      contextValue: "modelAddAction",
+      collapsibleState: "none",
+      command: "opencode.addModel",
+    },
+    ...modelNodes(models ?? []),
+  ];
+
   return [
     { kind: "configRoot", id: "root:config", label: "配置文件", tooltip: d.configDir, contextValue: "configRoot", collapsibleState: "expanded", children: configChildren },
     { kind: "presetRoot", id: "root:presets", label: "预设", contextValue: "presetRoot", collapsibleState: "expanded", children: presetChildren },
     { kind: "backupRoot", id: "root:backups", label: "备份", contextValue: "backupRoot", collapsibleState: "expanded", children: backupChildren },
+    { kind: "modelRoot", id: "root:models", label: "模型", contextValue: "modelRoot", collapsibleState: "expanded", children: modelChildren },
   ];
 }

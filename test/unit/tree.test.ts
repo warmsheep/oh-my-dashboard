@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { BackupEntry, DiscoveredConfig, JsoncError, Preset } from "../../src/core/types";
+import type { BackupEntry, DiscoveredConfig, JsoncError, ModelEntry, Preset } from "../../src/core/types";
 import { buildConfigTree, CURRENT_PRESET_BADGE, type BaseNode } from "../../src/tree/nodes";
 import { ConfigTreeDataProvider, type TreeDataSnapshot } from "../../src/tree/provider";
 
@@ -107,6 +107,21 @@ const ASSIGNMENTS: NonNullable<TreeDataSnapshot["assignments"]> = {
   },
 };
 
+const MODEL_ENTRIES: ModelEntry[] = [
+  {
+    option: { id: "zhipuai-coding-plan/glm-5", provider: "zhipuai-coding-plan", model: "glm-5", label: "GLM-5" },
+    source: "opencode",
+  },
+  {
+    option: { id: "zhipuai-coding-plan/glm-5.3", provider: "zhipuai-coding-plan", model: "glm-5.3", label: "GLM-5.3" },
+    source: "local",
+  },
+  {
+    option: { id: "deepseek/deepseek-v4-flash", provider: "deepseek", model: "deepseek-v4-flash", label: "DeepSeek V4 Flash" },
+    source: "both",
+  },
+];
+
 function makeSnapshot(overrides: Partial<TreeDataSnapshot> = {}): TreeDataSnapshot {
   return {
     discovered: makeDiscovered(),
@@ -145,12 +160,29 @@ describe("buildConfigTree — full shape", () => {
     BACKUPS,
     new Map<string, JsoncError[]>(),
     ASSIGNMENTS,
+    MODEL_ENTRIES,
   );
 
-  it("returns exactly three roots in order 配置文件 / 预设 / 备份, all expanded", () => {
-    expect(roots.map((r) => r.label)).toEqual(["配置文件", "预设", "备份"]);
-    expect(roots.map((r) => r.kind)).toEqual(["configRoot", "presetRoot", "backupRoot"]);
+  it("returns exactly four roots in order 配置文件 / 预设 / 备份 / 模型, all expanded", () => {
+    expect(roots.map((r) => r.label)).toEqual(["配置文件", "预设", "备份", "模型"]);
+    expect(roots.map((r) => r.kind)).toEqual(["configRoot", "presetRoot", "backupRoot", "modelRoot"]);
     expect(roots.every((r) => r.collapsibleState === "expanded")).toBe(true);
+  });
+
+  it("model section: add action first, then providers with model children and source labels", () => {
+    const kids = roots[3].children!;
+    expect(kids[0].kind).toBe("modelAddAction");
+    expect(kids[0].command).toBe("opencode.addModel");
+    const providers = kids.slice(1);
+    expect(providers.every((p) => p.kind === "modelProvider")).toBe(true);
+    const zhipu = providers.find((p) => p.label === "zhipuai-coding-plan");
+    expect(zhipu).toBeDefined();
+    expect(zhipu!.children!.every((m) => m.kind === "model")).toBe(true);
+    const fromOpencode = zhipu!.children!.find((m) => m.id === "model:zhipuai-coding-plan/glm-5");
+    expect(fromOpencode?.description).toBe("opencode.json");
+    expect(fromOpencode?.contextValue).toBe("modelOpencode");
+    const localOnly = zhipu!.children!.find((m) => m.description === "models.json");
+    expect(localOnly?.contextValue).toBe("modelLocal");
   });
 
   it("config section: two config files, agentsMd rows, dir summaries — in order", () => {
