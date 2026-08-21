@@ -9,8 +9,10 @@
  *   prioritizes $XDG_CONFIG_HOME/opencode. `extensionTestsEnv` is merged into
  *   the whole spawned VSCode process env by @vscode/test-electron, so the
  *   extension host inherits it.
- * - As a belt-and-braces guard we fingerprint the real ~/.config/opencode
- *   before/after the run and fail if it changed.
+ * - HOME is likewise replaced with a fresh temp dir, because the omo config
+ *   (~/.omo/omo.jsonc) derives from os.homedir(), not XDG_CONFIG_HOME.
+ * - As a belt-and-braces guard we fingerprint the real ~/.config/opencode and
+ *   ~/.omo before/after the run and fail if either changed.
  */
 
 import { spawnSync } from "node:child_process";
@@ -102,6 +104,15 @@ function fingerprint(dir) {
   return lines.join("\n");
 }
 
+/** Content+mtime stamp of one file ("<missing>" when absent) for the safety guard. */
+function fileStamp(file) {
+  if (!fs.existsSync(file)) {
+    return "<missing>";
+  }
+  const stat = fs.statSync(file);
+  return `${stat.mtimeMs} ${stat.size}`;
+}
+
 function removeWithRetries(target, attempts = 5) {
   for (let i = 0; i < attempts; i += 1) {
     try {
@@ -125,9 +136,12 @@ async function main() {
 
   prepareWebviewAssets();
   const seedRoot = seedConfigHome();
+  const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), "ocm-e2e-home-"));
 
   const realConfigDir = path.join(os.homedir(), ".config", "opencode");
-  const before = fingerprint(realConfigDir);
+  const realOmoFiles = ["omo.jsonc", "omo.json"].map((name) => path.join(os.homedir(), ".omo", name));
+  const beforeConfig = fingerprint(realConfigDir);
+  const beforeOmo = realOmoFiles.map(fileStamp);
 
   let failed = false;
   try {
@@ -137,6 +151,7 @@ async function main() {
       launchArgs: ["--disable-gpu", "--disable-extensions"],
       extensionTestsEnv: {
         XDG_CONFIG_HOME: seedRoot,
+        HOME: fakeHome,
       },
     });
   } catch (error) {
@@ -144,12 +159,19 @@ async function main() {
     failed = true;
   }
 
-  const after = fingerprint(realConfigDir);
-  if (before !== after) {
+  const afterConfig = fingerprint(realConfigDir);
+  if (beforeConfig !== afterConfig) {
     console.error("[e2e:runner] SAFETY VIOLATION: real ~/.config/opencode changed during the run!");
     failed = true;
   } else {
     console.log("[e2e:runner] real ~/.config/opencode untouched ✔");
+  }
+  const afterOmo = realOmoFiles.map(fileStamp);
+  if (beforeOmo.join("|") !== afterOmo.join("|")) {
+    console.error("[e2e:runner] SAFETY VIOLATION: real ~/.omo/omo.json[c] changed during the run!");
+    failed = true;
+  } else {
+    console.log("[e2e:runner] real ~/.omo/omo.json[c] untouched ✔");
   }
 
   if (failed) {
@@ -158,6 +180,7 @@ async function main() {
   }
 
   removeWithRetries(seedRoot);
+  removeWithRetries(fakeHome);
   console.log("[e2e:runner] PASSED");
 }
 
