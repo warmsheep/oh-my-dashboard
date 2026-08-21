@@ -5,8 +5,9 @@ VSCode 扩展：管理 [opencode](https://opencode.ai) 与 [oh-my-opencode](http
 ## 功能
 
 - **配置面板**（活动栏侧边栏）：配置文件 / 预设 / 备份三区树形视图
-  - `opencode.json`（JSONC，保留注释与尾逗号）、`oh-my-opencode.json`、`AGENTS.md`（全局+项目级）、`command/`、`skills/`
-  - agent/category 节点点击 → QuickPick 选模型与 variant，程序化写回
+  - 自动识别本机生效的 agent 配置：新版 oh-my-openagent 的统一配置 `~/.omo/omo.jsonc`（`[opencode]` 块），或旧版 `oh-my-opencode.json[c]` / `oh-my-openagent.json[c]`（与运行时同序：`oh-my-opencode` 优先，`.jsonc` 优先于 `.json`）
+  - `opencode.json`（JSONC，保留注释与尾逗号；`opencode.jsonc` 亦可识别）、`AGENTS.md`（全局+项目级）、`command/`、`skills/`
+  - agent/category 节点点击 → QuickPick 选模型与 variant，程序化写回（omo 目标写 `reasoning` 键，同时清理冲突的 `variant`/`models` 链）
 - **预设**：从当前配置捕获；Webview 矩阵编辑器（批量设模型、逐行 variant）；应用采用合并语义（预设未列出的键不动）
 - **备份**：手动「立即备份」；manifest 记录原因；与当前配置 diff 对比；恢复时明确警告覆盖（应用/恢复不再自动产生备份）
 - **状态栏**：显示当前预设，点击快速切换（`Ctrl+Alt+P`）
@@ -52,7 +53,7 @@ src/webview/   预设编辑器宿主（CSP + nonce + postMessage 协议）
 webview-ui/    React 矩阵表单（Vite 单 bundle，VSCode CSS 变量主题）
 ```
 
-数据位置：预设 `~/.config/opencode/presets/*.json`；备份 `~/.config/opencode/backups/<ISO时间戳>-<原因>/`（含 `manifest.json`）。
+数据位置：预设 `~/.config/opencode/presets/*.json`；备份 `~/.config/opencode/backups/<ISO时间戳>-<原因>/`（含 `manifest.json`，覆盖检测到的实际配置文件）。预设应用/捕获的写入目标由本机检测结果决定：`~/.omo/omo.jsonc` 存在或为 omo 安装时写入其 `[opencode]` 块，否则写入旧版 `oh-my-opencode.json[c]`。
 
 ## 测试
 
