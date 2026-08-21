@@ -18,3 +18,10 @@
   - 应用预设直接写入；恢复前弹窗明确警告覆盖且不可撤销
   - 移除 `autoBackupOnSave` / `maxAutoBackups` 设置
 - 界面全面中文化：命令面板标题、侧边栏视图名、活动栏容器、备份原因标签、Webview 分区标题等
+
+## 0.3.0 (2026-08-21)
+
+- 内置常用模型清单（GLM/Kimi/MiniMax/MiMo/DeepSeek/GPT/Claude/Grok/Gemini 共 15 项），
+  首次使用时生成 `~/.config/opencode/models.json`（可手动编辑，损坏自愈）
+- 模型列表双源合并：opencode.json providers + 本地清单，同名 id 合并为一（opencode.json 优先）
+- 构建产物统一输出到 `build/packages/`（`npm run package`）

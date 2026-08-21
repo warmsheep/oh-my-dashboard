@@ -2,7 +2,7 @@
   "name": "opencode-config-manager",
   "displayName": "OpenCode 配置管理器",
   "description": "管理 opencode / oh-my-opencode 配置：结构化修改、备份、恢复、命名预设一键切换",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "publisher": "local",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -249,7 +249,7 @@
     "test:watch": "vitest",
     "test:e2e": "node esbuild.mjs --tests && node test/e2e/run.mjs",
     "build:webview": "npm --prefix webview-ui run build",
-    "package": "npm run compile && npm run build:webview && vsce package --no-dependencies"
+    "package": "npm run compile && npm run build:webview && node -e \"require('node:fs').cpSync('webview-ui/build','dist-webview',{recursive:true})\" && vsce package --no-dependencies --allow-missing-repository --out build/packages"
   },
   "dependencies": {
     "jsonc-parser": "^3.3.1"

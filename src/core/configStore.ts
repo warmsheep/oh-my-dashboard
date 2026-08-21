@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { getValue, parseSafe } from "./jsoncEditor";
+import { ensureLocalModelsFile, mergeModelOptions } from "./builtinModels";
 import type { DiscoveredConfig, ModelOption, ModelSetting, ParseResult } from "./types";
 
 export interface ConfigStoreOptions {
@@ -126,26 +127,25 @@ export class ConfigStore {
     const result = this.readParse<{ provider?: Record<string, { models?: Record<string, unknown> }> }>(
       path.join(this.configDir, "opencode.json"),
     );
-    const providers = result.value?.provider;
-    if (!providers || typeof providers !== "object") {
-      return [];
-    }
     const options: ModelOption[] = [];
-    for (const [provider, providerConfig] of Object.entries(providers)) {
-      const models = providerConfig?.models;
-      if (!models || typeof models !== "object") {
-        continue;
-      }
-      for (const [model, modelConfig] of Object.entries(models)) {
-        const label =
-          modelConfig && typeof modelConfig === "object" && typeof (modelConfig as { name?: unknown }).name === "string"
-            ? (modelConfig as { name: string }).name
-            : model;
-        options.push({ id: `${provider}/${model}`, provider, model, label });
+    const providers = result.value?.provider;
+    if (providers && typeof providers === "object") {
+      for (const [provider, providerConfig] of Object.entries(providers)) {
+        const models = providerConfig?.models;
+        if (!models || typeof models !== "object") {
+          continue;
+        }
+        for (const [model, modelConfig] of Object.entries(models)) {
+          const label =
+            modelConfig && typeof modelConfig === "object" && typeof (modelConfig as { name?: unknown }).name === "string"
+              ? (modelConfig as { name: string }).name
+              : model;
+          options.push({ id: `${provider}/${model}`, provider, model, label });
+        }
       }
     }
-    options.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
-    return options;
+    const local = ensureLocalModelsFile(this.configDir);
+    return mergeModelOptions(options, local);
   }
 
   defaultModel(): string | null {

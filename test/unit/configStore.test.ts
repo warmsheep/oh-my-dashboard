@@ -1,5 +1,6 @@
 import {
   copyFileSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -8,6 +9,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import * as os from "node:os";
+import { BUILTIN_MODELS } from "../../src/core/builtinModels";
 import * as path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { ConfigStore } from "../../src/core/configStore";
@@ -133,15 +135,18 @@ describe("ConfigStore.writeAtomic", () => {
 });
 
 describe("ConfigStore.listModels", () => {
-  it("returns exactly 24 options sorted by id from the fixture, with name/label fallback", () => {
+  it("merges opencode.json providers with the local builtin catalog, deduplicated by id", () => {
     const dir = seedConfigDir({ opencode: true });
     const models = new ConfigStore({ configDirOverride: dir }).listModels();
 
-    expect(models).toHaveLength(24);
+    expect(models).toHaveLength(38);
     const ids = models.map((m) => m.id);
     expect(ids).toContain("WindsurfAI/claude-opus-4.6");
     expect(ids).toContain("zhipuai-coding-plan/glm-5");
+    expect(ids).toContain("xai/grok-4.1");
+    expect(ids).toContain("google/gemini-3-pro");
     expect(ids).toEqual([...ids].sort());
+    expect(new Set(ids).size).toBe(ids.length);
 
     const named = models.find((m) => m.id === "WindsurfAI/claude-opus-4.6");
     expect(named?.label).toBe("Claude Opus 4.6 By WindsurfAI");
@@ -150,12 +155,16 @@ describe("ConfigStore.listModels", () => {
     const unnamed = models.find((m) => m.id === "zhipuai-coding-plan/glm-5");
     expect(unnamed?.label).toBe("glm-5");
     expect(unnamed?.provider).toBe("zhipuai-coding-plan");
-    expect(unnamed?.model).toBe("glm-5");
+
+    expect(existsSync(path.join(dir, "models.json"))).toBe(true);
   });
 
-  it("returns [] when opencode.json is missing", () => {
+  it("falls back to the builtin catalog (via models.json) when opencode.json is missing", () => {
     const dir = sandbox();
-    expect(new ConfigStore({ configDirOverride: dir }).listModels()).toEqual([]);
+    const models = new ConfigStore({ configDirOverride: dir }).listModels();
+    expect(models.length).toBe(BUILTIN_MODELS.length);
+    expect(models.map((m) => m.id)).toContain("anthropic/claude-opus-4.6");
+    expect(existsSync(path.join(dir, "models.json"))).toBe(true);
   });
 });
 

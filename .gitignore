@@ -7,3 +7,4 @@ webview-ui/build/
 .vitest-cache/
 .vscode-test/
 .sisyphus/
+build/
