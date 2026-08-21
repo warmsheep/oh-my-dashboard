@@ -258,6 +258,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:e2e": "node esbuild.mjs --tests && node test/e2e/run.mjs",
     "build:webview": "npm --prefix webview-ui run build",
     "package": "npm run compile && npm run build:webview && vsce package --no-dependencies"
   },
