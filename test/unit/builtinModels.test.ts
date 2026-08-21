@@ -76,7 +76,7 @@ describe("ensureLocalModelsFile", () => {
       GLM: /^zhipuai-coding-plan\/glm-/,
       Kimi: /^kimi-for-coding\//,
       MiniMax: /^minimax-cn-coding-plan\/MiniMax-/,
-      Mimo: /^xiaomi\/mimo-/,
+      Mimo: /^xiaomi-token-plan-cn\/mimo-/,
       Deepseek: /^deepseek\/deepseek-/,
       GPT: /^openai\/gpt-/,
       Claude: /^anthropic\/claude-/,
