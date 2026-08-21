@@ -6,7 +6,6 @@ import { BackupService } from "../../src/core/backupService";
 import { ConfigStore } from "../../src/core/configStore";
 import { applyEdits, getValue, JsoncSyntaxError, validate } from "../../src/core/jsoncEditor";
 import { PresetService } from "../../src/core/presetService";
-import type { BackupReason } from "../../src/core/types";
 
 const FIXTURES_DIR = path.resolve(process.cwd(), "test/fixtures");
 
@@ -30,7 +29,6 @@ interface PipelineEnv {
 
 interface EnvOptions {
   opencodeFixture?: string;
-  retention?: Partial<Record<BackupReason, number>>;
   now?: () => Date;
 }
 
@@ -49,14 +47,12 @@ function makeEnv(opts: EnvOptions = {}): PipelineEnv {
   const backup = new BackupService({
     configDir,
     hostname: "pipeline-test-host",
-    ...(opts.retention ? { retention: opts.retention } : {}),
     ...(opts.now ? { now: opts.now } : {}),
   });
   const discovered = store.discover();
   const service = new PresetService({
     presetsDir: discovered.presetsDir,
     configStore: store,
-    backupService: backup,
     ...(opts.now ? { now: opts.now } : {}),
   });
   return {
@@ -105,6 +101,9 @@ describe("integration: core pipeline (capture → mutate → apply → backup �
     expect(readBytes(env.ohMyPath)).toEqual(fixtureOhMy);
     expect(readBytes(env.opencodePath)).toEqual(fixtureOpencode);
 
+    const manual = env.backup.create("manual");
+    expect(manual.manifest.reason).toBe("manual");
+
     const mutatedOhMy = applyEdits(readBytes(env.ohMyPath).toString("utf8"), [
       { path: ["agents", "oracle", "model"], value: "WindsurfAI/gpt-5.5", op: "set" },
       { path: ["agents", "foo"], value: { model: "WindsurfAI/gpt-5.4", variant: "low" }, op: "set" },
@@ -136,24 +135,16 @@ describe("integration: core pipeline (capture → mutate → apply → backup �
     expect(readBytes(env.agentsMdPath).toString("utf8")).toContain("junk line appended by hand");
     expect(fs.existsSync(path.join(env.configDir, "command", "a.md"))).toBe(false);
 
-    const preApplies = env.backup.list().filter((e) => e.manifest.reason === "pre-apply");
-    expect(preApplies).toHaveLength(2);
-    const oldest = preApplies[preApplies.length - 1];
-    expect(oldest.manifest.preset).toBe("baseline");
+    expect(env.backup.list()).toHaveLength(1);
 
-    const { preRestore } = env.backup.restore(oldest.dirName);
+    env.backup.restore(manual.dirName);
 
     expect(readBytes(env.ohMyPath)).toEqual(fixtureOhMy);
     expect(readBytes(env.agentsMdPath)).toEqual(Buffer.from(AGENTS_MD_SEED, "utf8"));
     expect(readBytes(path.join(env.configDir, "command", "a.md"))).toEqual(Buffer.from(COMMAND_A_SEED, "utf8"));
     expect(readBytes(path.join(env.configDir, "skills", "one", "x.md"))).toEqual(Buffer.from(SKILL_X_SEED, "utf8"));
 
-    expect(preRestore.manifest.reason).toBe("pre-restore");
-    const preRestoreOhMy = fs.readFileSync(path.join(preRestore.dir, "oh-my-opencode.json"), "utf8");
-    expect(getValue(preRestoreOhMy, ["agents", "oracle", "model"])).toBe("zhipuai-coding-plan/glm-5.2");
-    expect(getValue(preRestoreOhMy, ["agents", "foo", "model"])).toBe("WindsurfAI/gpt-5.4");
-    expect(fs.readFileSync(path.join(preRestore.dir, "AGENTS.md"), "utf8")).toContain("junk line appended by hand");
-    expect(fs.existsSync(path.join(preRestore.dir, "command", "a.md"))).toBe(false);
+    expect(env.backup.list()).toHaveLength(1);
   });
 
   it("scenario B: comments, tabs and trailing commas survive set/clear of defaults.model", () => {
@@ -190,29 +181,27 @@ describe("integration: core pipeline (capture → mutate → apply → backup �
     }
   });
 
-  it("scenario C: pre-apply retention is honored through presetService.apply", () => {
-    const env = makeEnv({ now: seqNow("2026-08-21T11:00:00.000Z"), retention: { "pre-apply": 3 } });
-    env.service.capture("keep3");
+  it("scenario C: applies create no backups; manual backups are never pruned", () => {
+    const env = makeEnv({ now: seqNow("2026-08-21T11:00:00.000Z") });
+    env.service.capture("keep");
 
-    const created: string[] = [];
     for (let i = 0; i < 5; i++) {
-      const result = env.service.apply("keep3");
-      created.push(result.backup.dirName);
+      env.service.apply("keep");
+    }
+    expect(env.backup.list()).toEqual([]);
+    expect(fs.existsSync(env.backupsDir)).toBe(false);
+
+    const manualNames: string[] = [];
+    for (let i = 0; i < 5; i++) {
+      manualNames.push(env.backup.create("manual").dirName);
     }
 
-    const preApplies = env.backup.list().filter((e) => e.manifest.reason === "pre-apply");
-    expect(preApplies).toHaveLength(3);
-    expect(preApplies.map((e) => e.dirName)).toEqual([...created].slice(2).reverse());
-    expect(fs.readdirSync(env.backupsDir).sort()).toEqual(created.slice(2).sort());
-
-    expect(fs.existsSync(path.join(env.backupsDir, created[0]))).toBe(false);
-    expect(fs.existsSync(path.join(env.backupsDir, created[1]))).toBe(false);
-    for (const dirName of created.slice(2)) {
-      expect(fs.existsSync(path.join(env.backupsDir, dirName))).toBe(true);
-    }
+    expect(env.backup.list().map((e) => e.dirName)).toEqual([...manualNames].reverse());
+    expect(env.backup.prune()).toEqual([]);
+    expect(fs.readdirSync(env.backupsDir).sort()).toEqual([...manualNames].sort());
   });
 
-  it("scenario D: apply on a corrupted oh-my-opencode.json throws, keeps bytes, still has its pre-apply backup", () => {
+  it("scenario D: apply on a corrupted oh-my-opencode.json throws, keeps bytes, creates no backups", () => {
     const env = makeEnv({ now: seqNow("2026-08-21T12:00:00.000Z") });
     env.service.capture("snap");
 
@@ -225,10 +214,7 @@ describe("integration: core pipeline (capture → mutate → apply → backup �
     expect(readBytes(env.ohMyPath)).toEqual(ohMyBefore);
     expect(readBytes(env.opencodePath)).toEqual(opencodeBefore);
 
-    const preApplies = env.backup.list().filter((e) => e.manifest.reason === "pre-apply");
-    expect(preApplies).toHaveLength(1);
-    expect(preApplies[0].manifest.preset).toBe("snap");
-    expect(fs.readFileSync(path.join(preApplies[0].dir, "oh-my-opencode.json"), "utf8")).toBe("{ broken");
+    expect(env.backup.list()).toEqual([]);
 
     expect(env.service.load("snap").appliedAt).toBeNull();
   });

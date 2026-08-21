@@ -100,8 +100,7 @@ export class BackupService {
     this.fs.rmSync(path.join(this.backupsDir, dirName), { recursive: true, force: true });
   }
 
-  restore(dirName: string): { preRestore: BackupEntry } {
-    const preRestore = this.create("pre-restore");
+  restore(dirName: string): void {
     const srcDir = path.join(this.backupsDir, dirName);
     for (const name of MANAGED_FILES) {
       const src = path.join(srcDir, name);
@@ -115,7 +114,6 @@ export class BackupService {
         this.fs.cpSync(src, path.join(this.configDir, name), { recursive: true });
       }
     }
-    return { preRestore };
   }
 
   diffPairs(entry: BackupEntry): { label: string; backup: string; current: string }[] {

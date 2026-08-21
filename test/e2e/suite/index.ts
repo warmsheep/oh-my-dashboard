@@ -68,8 +68,7 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
  * extension-host `vscode` API object, so we temporarily patch
  * showWarningMessage to auto-accept the FIRST offered action. As a fallback we
  * also drive the workbench's own dialog-accept command in case the object is
- * not shared. Success is proven by the `*-pre-restore` backup the restore flow
- * creates (asserted afterwards) — not merely by the command resolving.
+ * not shared. Success is proven by the caller via byte-level restore checks.
  */
 async function executeRestoreBackup(dirName: string): Promise<void> {
   const windowApi = vscode.window as unknown as {
@@ -224,15 +223,30 @@ function tests(): TestCase[] {
       name: "restoreBackup(<manual dir>) restores; configs still parseable",
       fn: async () => {
         assert.ok(manualBackupDirName, "requires a manual backup from the previous step");
+
+        fs.writeFileSync(
+          path.join(configDir, "opencode.json"),
+          '{ "marker": "mutated-before-restore" }\n',
+        );
+        const backupCopy = fs.readFileSync(
+          path.join(configDir, "backups", manualBackupDirName, "opencode.json"),
+        );
         await executeRestoreBackup(manualBackupDirName);
 
-        // The restore flow snapshots current config as a *-pre-restore backup —
-        // its presence proves the restore actually executed.
+        assert.ok(
+          fs.readFileSync(path.join(configDir, "opencode.json")).equals(backupCopy),
+          "live opencode.json must equal the restored backup copy",
+        );
+
         const backupsDir = path.join(configDir, "backups");
-        const preRestore = fs
+        const autoDirs = fs
           .readdirSync(backupsDir, { withFileTypes: true })
-          .filter((entry) => entry.isDirectory() && /-pre-restore$/.test(entry.name));
-        assert.ok(preRestore.length >= 1, "expected a *-pre-restore backup after restore");
+          .filter(
+            (entry) =>
+              entry.isDirectory() &&
+              /-(pre-apply|pre-save|pre-restore)$/.test(entry.name),
+          );
+        assert.ok(autoDirs.length === 0, "no automatic backups may be created");
 
         assertNoJsoncErrors(path.join(configDir, "opencode.json"));
         assertNoJsoncErrors(path.join(configDir, "oh-my-opencode.json"));

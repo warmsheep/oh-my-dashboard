@@ -8,7 +8,7 @@ VSCode 扩展：管理 [opencode](https://opencode.ai) 与 [oh-my-opencode](http
   - `opencode.json`（JSONC，保留注释与尾逗号）、`oh-my-opencode.json`、`AGENTS.md`（全局+项目级）、`command/`、`skills/`
   - agent/category 节点点击 → QuickPick 选模型与 variant，程序化写回
 - **预设**：从当前配置捕获；Webview 矩阵编辑器（批量设模型、逐行 variant）；应用采用合并语义（预设未列出的键不动）；应用前自动备份
-- **备份**：手动 / 应用前 / 保存前 / 恢复前（双向安全）；manifest 记录原因；自动保留策略（默认 20 份，手动备份永不清理）；与当前配置 diff 对比
+- **备份**：手动「立即备份」；manifest 记录原因；与当前配置 diff 对比；恢复时明确警告覆盖（应用/恢复不再自动产生备份）
 - **状态栏**：显示当前预设，点击快速切换（`Ctrl+Alt+P`）
 
 ## 安装
@@ -19,7 +19,7 @@ npm --prefix webview-ui install
 npm run compile          # esbuild → dist/extension.js
 npm run build:webview    # Vite → webview-ui/build（并同步 dist-webview/）
 npx vsce package --no-dependencies --allow-missing-repository
-code --install-extension opencode-config-manager-0.1.0.vsix
+code --install-extension opencode-config-manager-0.2.0.vsix
 ```
 
 ## 使用
@@ -28,14 +28,12 @@ code --install-extension opencode-config-manager-0.1.0.vsix
 2. 首次：点「从当前配置捕获…」存一个基线预设
 3. 改模型：展开 `oh-my-opencode.json` → 点任意 agent → 选模型
 4. 切换：状态栏或预设区右键「应用」
-5. 后悔药：备份区右键「恢复」/「对比」
+5. 后悔药：变更前先「立即备份」，需要时备份区右键「恢复」/「对比」
 
 ### 设置
 
 | 键 | 默认 | 说明 |
 |---|---|---|
-| `opencodeConfigManager.autoBackupOnSave` | `true` | 编辑器保存受管文件前自动备份 |
-| `opencodeConfigManager.maxAutoBackups` | `20` | 自动备份保留数量上限 |
 | `opencodeConfigManager.configDirOverride` | — | 配置目录覆盖（默认 `~/.config/opencode`，尊重 `XDG_CONFIG_HOME`） |
 
 ## 架构

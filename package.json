@@ -1,8 +1,8 @@
 {
   "name": "opencode-config-manager",
-  "displayName": "OpenCode Config Manager",
-  "description": "Manage opencode / oh-my-opencode configuration: edit, backup, restore, and switch named presets",
-  "version": "0.1.0",
+  "displayName": "OpenCode 配置管理器",
+  "description": "管理 opencode / oh-my-opencode 配置：结构化修改、备份、恢复、命名预设一键切换",
+  "version": "0.2.0",
   "publisher": "local",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -19,7 +19,7 @@
       "activitybar": [
         {
           "id": "opencodeConfig",
-          "title": "OpenCode Config",
+          "title": "OpenCode 配置",
           "icon": "media/activity-icon.svg"
         }
       ]
@@ -28,96 +28,96 @@
       "opencodeConfig": [
         {
           "id": "opencodeConfigFiles",
-          "name": "Config Files"
+          "name": "配置文件"
         },
         {
           "id": "opencodePresets",
-          "name": "Presets"
+          "name": "预设"
         },
         {
           "id": "opencodeBackups",
-          "name": "Backups"
+          "name": "备份"
         }
       ]
     },
     "commands": [
       {
         "command": "opencode.openConfigFile",
-        "title": "Open Config File",
+        "title": "打开配置文件",
         "category": "OpenCode"
       },
       {
         "command": "opencode.createConfig",
-        "title": "Create Missing Config File",
+        "title": "创建缺失的配置文件",
         "category": "OpenCode"
       },
       {
         "command": "opencode.setAgentModel",
-        "title": "Set Agent/Category Model",
+        "title": "设置 Agent/分类模型",
         "category": "OpenCode"
       },
       {
         "command": "opencode.capturePreset",
-        "title": "Capture Preset from Current Config",
+        "title": "从当前配置捕获预设",
         "category": "OpenCode",
         "icon": "$(add)"
       },
       {
         "command": "opencode.applyPreset",
-        "title": "Apply Preset",
+        "title": "应用预设",
         "category": "OpenCode",
         "icon": "$(play)"
       },
       {
         "command": "opencode.editPreset",
-        "title": "Edit Preset (Matrix Form)",
+        "title": "编辑预设（矩阵表单）",
         "category": "OpenCode",
         "icon": "$(edit)"
       },
       {
         "command": "opencode.renamePreset",
-        "title": "Rename Preset",
+        "title": "重命名预设",
         "category": "OpenCode"
       },
       {
         "command": "opencode.deletePreset",
-        "title": "Delete Preset",
+        "title": "删除预设",
         "category": "OpenCode"
       },
       {
         "command": "opencode.exportPreset",
-        "title": "Export Preset to File",
+        "title": "导出预设到文件",
         "category": "OpenCode"
       },
       {
         "command": "opencode.showPresetQuickPick",
-        "title": "Switch Preset...",
+        "title": "切换预设…",
         "category": "OpenCode"
       },
       {
         "command": "opencode.backupNow",
-        "title": "Backup Now",
+        "title": "立即备份",
         "category": "OpenCode",
         "icon": "$(save)"
       },
       {
         "command": "opencode.restoreBackup",
-        "title": "Restore Backup",
+        "title": "恢复备份",
         "category": "OpenCode"
       },
       {
         "command": "opencode.diffBackup",
-        "title": "Compare Backup with Current",
+        "title": "与当前配置对比",
         "category": "OpenCode"
       },
       {
         "command": "opencode.deleteBackup",
-        "title": "Delete Backup",
+        "title": "删除备份",
         "category": "OpenCode"
       },
       {
         "command": "opencode.refreshTree",
-        "title": "Refresh",
+        "title": "刷新",
         "category": "OpenCode",
         "icon": "$(refresh)"
       }
@@ -231,23 +231,12 @@
       }
     ],
     "configuration": {
-      "title": "OpenCode Config Manager",
+      "title": "OpenCode 配置管理器",
       "properties": {
-        "opencodeConfigManager.autoBackupOnSave": {
-          "type": "boolean",
-          "default": true,
-          "description": "Automatically create a backup before saving managed config files from the editor"
-        },
-        "opencodeConfigManager.maxAutoBackups": {
-          "type": "number",
-          "default": 20,
-          "minimum": 1,
-          "description": "Maximum number of automatic backups (pre-apply / pre-save / pre-restore) to retain. Manual backups are never pruned."
-        },
         "opencodeConfigManager.configDirOverride": {
           "type": "string",
           "title": "配置目录覆盖",
-          "description": "配置目录覆盖（默认自动发现）"
+          "description": "配置目录覆盖（默认自动发现 ~/.config/opencode，尊重 XDG_CONFIG_HOME）"
         }
       }
     }

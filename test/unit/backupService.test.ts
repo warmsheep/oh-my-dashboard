@@ -250,7 +250,7 @@ describe("BackupService.prune", () => {
 });
 
 describe("BackupService.restore", () => {
-  it("round-trips: safety pre-restore backup captures mutated state, then backup is restored byte-identical", () => {
+  it("restores the backup byte-identical and creates NO pre-restore backup (manual backups only)", () => {
     seedFullTree();
     const svc = new BackupService({
       configDir,
@@ -262,13 +262,11 @@ describe("BackupService.restore", () => {
       "utf8"
     );
 
-    // mutate: append garbage + delete command/a.md
     fs.appendFileSync(path.join(configDir, "opencode.json"), "\n//garbage");
     fs.rmSync(path.join(configDir, "command", "a.md"));
 
-    const { preRestore } = svc.restore(snap.dirName);
+    svc.restore(snap.dirName);
 
-    // config restored byte-identical, deleted file back
     expect(fs.readFileSync(path.join(configDir, "opencode.json"), "utf8")).toBe(
       original
     );
@@ -279,16 +277,8 @@ describe("BackupService.restore", () => {
       fs.readFileSync(path.join(configDir, "command", "sub", "b.md"), "utf8")
     ).toBe("b");
 
-    // a *-pre-restore-* backup exists and equals the mutated state
-    expect(preRestore.dirName).toMatch(/-pre-restore$/);
-    expect(preRestore.manifest.reason).toBe("pre-restore");
-    expect(
-      fs.readFileSync(path.join(preRestore.dir, "opencode.json"), "utf8")
-    ).toBe(original + "\n//garbage");
-    expect(fs.existsSync(path.join(preRestore.dir, "command", "a.md"))).toBe(
-      false
-    );
-    expect(preRestore.manifest.fileCount).toBe(5); // 3 top-level + sub/b.md + skills/one/x.md
+    expect(svc.list()).toHaveLength(1);
+    expect(svc.list()[0].dirName).toBe(snap.dirName);
   });
 });
 

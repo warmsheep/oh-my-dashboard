@@ -40,7 +40,6 @@ function makeEnv(now?: () => Date): Env {
   const service = new PresetService({
     presetsDir: discovered.presetsDir,
     configStore: store,
-    backupService: backup,
     ...(now ? { now } : {}),
   });
   return {
@@ -242,29 +241,23 @@ describe("PresetService.apply — merge semantics", () => {
   });
 });
 
-describe("PresetService.apply — backup & bookkeeping", () => {
-  it("creates a pre-apply backup (manifest.preset === name), stamps appliedAt, persists it", () => {
+describe("PresetService.apply — bookkeeping", () => {
+  it("stamps appliedAt, persists it, and creates NO backups (manual backups only)", () => {
     const startMs = Date.parse("2026-08-21T15:04:00.000Z");
     const env = makeEnv(seqNow("2026-08-21T15:04:00.000Z"));
     env.service.capture("snap");
 
-    // drift so the backup snapshot is distinguishable from the post-apply state
     env.store.writeAtomic(
       env.ohMyPath,
       applyEdits(readOhMy(env), [
         { path: ["agents", "oracle", "model"], value: "minimax-cn-coding-plan/MiniMax-M2.5", op: "set" },
       ]),
     );
-    const before = readOhMy(env);
-    expect(before).toContain("minimax-cn-coding-plan/MiniMax-M2.5");
 
     const result = env.service.apply("snap");
 
-    // pre-apply backup exists with the drifted (pre-apply) content
-    const entries = env.backup.list().filter((e) => e.dirName.endsWith("-pre-apply"));
-    expect(entries).toHaveLength(1);
-    expect(entries[0].manifest.preset).toBe("snap");
-    expect(fs.readFileSync(path.join(entries[0].dir, "oh-my-opencode.json"), "utf8")).toBe(before);
+    expect(env.backup.list()).toEqual([]);
+    expect(fs.existsSync(path.join(env.configDir, "backups"))).toBe(false);
 
     // appliedAt stamped with the fake clock (>= start) both in the result and on disk
     expect(Date.parse(result.preset.appliedAt ?? "")).toBeGreaterThanOrEqual(startMs);

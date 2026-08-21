@@ -238,12 +238,12 @@ describe("buildConfigTree — full shape", () => {
   it("backup section: sorted newest first, label stamp + reason, preset description, dir tooltip", () => {
     const kids = roots[2].children!;
     expect(kids.map((k) => k.id)).toEqual(["backup:20260821-100000-pre-apply", "backup:20260819-090000-manual"]);
-    expect(kids[0].label).toBe("2026-08-21 10:00 pre-apply");
-    expect(kids[0].description).toBe("preset=deep-work");
+    expect(kids[0].label).toBe("2026-08-21 10:00 应用前");
+    expect(kids[0].description).toBe("预设 deep-work");
     expect(kids[0].contextValue).toBe("backup");
     expect(kids[0].tooltip).toContain("/cfg/backups/20260821-100000-pre-apply");
     expect(kids[0].tooltip).toContain("2");
-    expect(kids[1].label).toBe("2026-08-19 09:00 manual");
+    expect(kids[1].label).toBe("2026-08-19 09:00 手动");
     expect(kids[1].description).toBeUndefined();
   });
 
@@ -341,7 +341,7 @@ describe("buildConfigTree — current preset marker", () => {
 
   it("backup description carries manifest.preset name", () => {
     const newest = roots[2].children![0];
-    expect(newest.description).toBe("preset=deep-work");
+    expect(newest.description).toBe("预设 deep-work");
   });
 });
 

@@ -9,7 +9,6 @@ import { CONFIG_KEY, CONFIG_SECTION, OUTPUT_CHANNEL_NAME, VIEW } from "./constan
 import { ConfigTreeDataProvider } from "./tree/provider";
 import { registerCommands } from "./ui/commands";
 import { createStatusBar } from "./ui/statusbar";
-import { initSaveGuard } from "./ui/saveGuard";
 
 interface TreeDataSnapshot {
   discovered: DiscoveredConfig;
@@ -52,19 +51,11 @@ export function activate(ctx: vscode.ExtensionContext): void {
     return { discovered, parseErrors };
   };
 
-  const maxAutoBackups = cfg.get<number>(CONFIG_KEY.maxAutoBackups, 20);
   const discovered = configStore.discover(workspaceFolders());
-  const backupService = new BackupService({
-    configDir: discovered.configDir,
-    retention:
-      maxAutoBackups > 0
-        ? { "pre-apply": maxAutoBackups, "pre-save": maxAutoBackups, "pre-restore": maxAutoBackups }
-        : undefined,
-  });
+  const backupService = new BackupService({ configDir: discovered.configDir });
   const presetService = new PresetService({
     presetsDir: discovered.presetsDir,
     configStore,
-    backupService,
   });
 
   const dataLoader = (): TreeDataSnapshot => {
@@ -101,7 +92,6 @@ export function activate(ctx: vscode.ExtensionContext): void {
   };
 
   registerCommands(ctx, { configStore, backupService, presetService, refreshAll, log });
-  initSaveGuard(ctx, { configStore, backupService, refreshAll, workspaceFolders, log });
 
   let watchTimer: NodeJS.Timeout | undefined;
   const onWatchEvent = (): void => {
@@ -127,7 +117,7 @@ export function activate(ctx: vscode.ExtensionContext): void {
     const message = error instanceof Error ? error.message : String(error);
     log(`fs.watch(${configStore.configDir}) 失败，将依赖手动刷新: ${message}`);
     void vscode.window.showWarningMessage(
-      `无法监视配置目录变更（${message}），请使用「OpenCode: Refresh」手动刷新`,
+      `无法监视配置目录变更（${message}），请使用「OpenCode: 刷新」手动刷新`,
     );
   }
 }

@@ -32,8 +32,6 @@ export const VIEW = {
 export const CONFIG_SECTION = "opencodeConfigManager";
 
 export const CONFIG_KEY = {
-  autoBackupOnSave: "opencodeConfigManager.autoBackupOnSave",
-  maxAutoBackups: "opencodeConfigManager.maxAutoBackups",
   configDirOverride: "opencodeConfigManager.configDirOverride",
 } as const;
 

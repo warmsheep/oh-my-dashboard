@@ -2,9 +2,8 @@ import * as defaultFs from "node:fs";
 import * as path from "node:path";
 import * as realEditor from "./jsoncEditor";
 import type { JsoncEdit } from "./jsoncEditor";
-import type { BackupEntry, ModelSetting, Preset } from "./types";
+import type { ModelSetting, Preset } from "./types";
 import type { ConfigStore } from "./configStore";
-import type { BackupService } from "./backupService";
 import type * as jsoncEditorModule from "./jsoncEditor";
 
 export interface JsoncEditorApi {
@@ -16,7 +15,6 @@ export interface JsoncEditorApi {
 export interface PresetServiceOptions {
   presetsDir: string;
   configStore: ConfigStore;
-  backupService: BackupService;
   now?: () => Date;
   fs?: typeof import("node:fs");
   editor?: JsoncEditorApi;
@@ -31,7 +29,6 @@ export interface ApplyChange {
 
 export interface ApplyResult {
   preset: import("./types").Preset;
-  backup: BackupEntry;
   changes: ApplyChange[];
 }
 
@@ -60,7 +57,6 @@ function byName(a: Preset, b: Preset): number {
 export class PresetService {
   private readonly presetsDir: string;
   private readonly configStore: ConfigStore;
-  private readonly backupService: BackupService;
   private readonly now: () => Date;
   private readonly fs: typeof import("node:fs");
   private readonly editor: JsoncEditorApi;
@@ -68,7 +64,6 @@ export class PresetService {
   constructor(opts: PresetServiceOptions) {
     this.presetsDir = opts.presetsDir;
     this.configStore = opts.configStore;
-    this.backupService = opts.backupService;
     this.now = opts.now ?? (() => new Date());
     this.fs = opts.fs ?? defaultFs;
     this.editor =
@@ -161,7 +156,6 @@ export class PresetService {
 
   apply(name: string): ApplyResult {
     const preset = this.load(name);
-    const backup = this.backupService.create("pre-apply", { preset: name });
     const discovered = this.configStore.discover();
     const changes: ApplyChange[] = [];
 
@@ -218,7 +212,7 @@ export class PresetService {
 
     preset.appliedAt = this.now().toISOString();
     this.save(preset);
-    return { preset, backup, changes };
+    return { preset, changes };
   }
 
   currentPresetName(): string | null {

@@ -34,6 +34,13 @@ interface AgentTarget {
 
 const MANUAL_MODEL = "__manual__";
 
+const BACKUP_REASON_LABELS: Record<string, string> = {
+  manual: "手动",
+  "pre-apply": "应用前",
+  "pre-save": "保存前",
+  "pre-restore": "恢复前",
+};
+
 export function registerCommands(ctx: vscode.ExtensionContext, deps: ExtensionDeps): void {
   const disposables = [
     vscode.commands.registerCommand(CMD.openConfigFile, (arg?: unknown) =>
@@ -246,7 +253,7 @@ async function pickBackup(deps: ExtensionDeps, placeHolder: string): Promise<Bac
   }
   const items: BackupPickItem[] = entries.map((entry) => ({
     label: entry.dirName,
-    description: entry.manifest.reason,
+    description: BACKUP_REASON_LABELS[entry.manifest.reason] ?? entry.manifest.reason,
     detail: `创建于 ${entry.manifest.createdAt}，共 ${entry.manifest.fileCount} 个文件`,
     entry,
   }));
@@ -349,7 +356,7 @@ async function openConfigFile(deps: ExtensionDeps, arg: unknown): Promise<void> 
   }
   if (items.length === 0) {
     void vscode.window.showInformationMessage(
-      "未发现任何配置文件，可先执行「OpenCode: Create Missing Config File」创建",
+      "未发现任何配置文件，可先执行「OpenCode: 创建缺失的配置文件」创建",
     );
     return;
   }
@@ -530,9 +537,7 @@ async function applyPresetCommand(
   }
   const result = deps.presetService.apply(name);
   deps.refreshAll();
-  void vscode.window.showInformationMessage(
-    `已应用预设 ${name}（${result.changes.length} 处变更，备份 ${result.backup.dirName}）`,
-  );
+  void vscode.window.showInformationMessage(`已应用预设 ${name}（${result.changes.length} 处变更）`);
 }
 
 async function renamePreset(deps: ExtensionDeps, arg: unknown): Promise<void> {
@@ -601,18 +606,16 @@ async function restoreBackup(deps: ExtensionDeps, arg: unknown): Promise<void> {
     return;
   }
   const confirm = await vscode.window.showWarningMessage(
-    `恢复备份 ${entry.dirName}？当前配置将先自动备份`,
-    { modal: true },
+    `恢复备份 ${entry.dirName}？当前配置将被覆盖且无法撤销`,
+    { modal: true, detail: "恢复前可先「立即备份」留存当前配置" },
     "恢复",
   );
   if (confirm !== "恢复") {
     return;
   }
-  const result = deps.backupService.restore(entry.dirName);
+  deps.backupService.restore(entry.dirName);
   deps.refreshAll();
-  void vscode.window.showInformationMessage(
-    `已恢复备份 ${entry.dirName}（恢复前已备份至 ${result.preRestore.dirName}）`,
-  );
+  void vscode.window.showInformationMessage(`已恢复备份 ${entry.dirName}`);
 }
 
 async function diffBackup(deps: ExtensionDeps, arg: unknown): Promise<void> {

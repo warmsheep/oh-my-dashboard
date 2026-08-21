@@ -195,6 +195,13 @@ function formatAppliedStamp(iso: string): string {
   return `${pad2(dt.getUTCMonth() + 1)}-${pad2(dt.getUTCDate())}`;
 }
 
+const BACKUP_REASON_LABELS: Record<string, string> = {
+  manual: "手动",
+  "pre-apply": "应用前",
+  "pre-save": "保存前",
+  "pre-restore": "恢复前",
+};
+
 /**
  * Pure builder for the OpenCode Config Manager sidebar tree.
  *
@@ -286,8 +293,8 @@ export function buildConfigTree(
           .map((b): BaseNode => ({
             kind: "backup",
             id: `backup:${b.dirName}`,
-            label: `${formatBackupStamp(b.manifest.createdAt)} ${b.manifest.reason}`,
-            description: b.manifest.preset ? `preset=${b.manifest.preset}` : undefined,
+            label: `${formatBackupStamp(b.manifest.createdAt)} ${BACKUP_REASON_LABELS[b.manifest.reason] ?? b.manifest.reason}`,
+            description: b.manifest.preset ? `预设 ${b.manifest.preset}` : undefined,
             tooltip: `${b.dir}（${b.manifest.fileCount} 个文件）`,
             contextValue: "backup",
             collapsibleState: "none",

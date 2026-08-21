@@ -50,10 +50,10 @@ export interface SectionMeta {
 }
 
 export const SECTIONS: readonly SectionMeta[] = [
-  { key: "agents", title: "Agents", icon: "🤖", known: KNOWN_AGENTS },
+  { key: "agents", title: "智能体", icon: "🤖", known: KNOWN_AGENTS },
   {
     key: "categories",
-    title: "Categories",
+    title: "分类",
     icon: "📦",
     known: KNOWN_CATEGORIES,
   },
