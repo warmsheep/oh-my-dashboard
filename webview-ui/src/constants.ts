@@ -16,6 +16,7 @@ export const KNOWN_AGENTS: readonly string[] = [
   "momus",
   "atlas",
   "sisyphus",
+  "sisyphus-junior",
 ];
 
 export const KNOWN_CATEGORIES: readonly string[] = [

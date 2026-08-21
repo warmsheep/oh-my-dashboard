@@ -1,10 +1,11 @@
-import type { ModelOption, Variant } from "../core/types";
+import type { ModelOption } from "../core/types";
 
 export interface PresetRow {
   section: "agents" | "categories";
   name: string;
   model: string | null;
-  variant: Variant | null;
+  /** Reasoning level; wider than the classic five variants (omo accepts "off"/"minimal"/...). */
+  variant: string | null;
 }
 
 export interface WebviewInitPayload {

@@ -208,6 +208,9 @@ function MatrixRow({
             {v}
           </option>
         ))}
+        {row.variant !== null && !VARIANT_ORDER.includes(row.variant) && (
+          <option value={row.variant}>{row.variant}</option>
+        )}
       </select>
     </div>
   );
