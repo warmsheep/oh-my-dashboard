@@ -1,4 +1,8 @@
-import type { BackupEntry } from "./types";
+import * as defaultFs from "node:fs";
+import * as path from "node:path";
+import * as realEditor from "./jsoncEditor";
+import type { JsoncEdit } from "./jsoncEditor";
+import type { BackupEntry, ModelSetting, Preset } from "./types";
 import type { ConfigStore } from "./configStore";
 import type { BackupService } from "./backupService";
 import type * as jsoncEditorModule from "./jsoncEditor";
@@ -31,48 +35,202 @@ export interface ApplyResult {
   changes: ApplyChange[];
 }
 
+const PRESET_NAME_RE = /^[^/\\]{1,64}$/;
+
+/** Sentinel reported as `to` in ApplyChange when a remove edit actually dropped a key. */
+const REMOVED = "<<removed>>";
+
+/** Reduce a raw assignment entry to { model, variant? }: drop null/undefined variants and any extra keys. */
+function cleanSettings(record: Record<string, ModelSetting>): Record<string, ModelSetting> {
+  const out: Record<string, ModelSetting> = {};
+  for (const [key, setting] of Object.entries(record ?? {})) {
+    const cleaned: ModelSetting = { model: setting.model };
+    if (setting.variant != null) {
+      cleaned.variant = setting.variant;
+    }
+    out[key] = cleaned;
+  }
+  return out;
+}
+
+function byName(a: Preset, b: Preset): number {
+  return a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
+}
+
 export class PresetService {
-  constructor(_opts: PresetServiceOptions) {
-    void _opts;
+  private readonly presetsDir: string;
+  private readonly configStore: ConfigStore;
+  private readonly backupService: BackupService;
+  private readonly now: () => Date;
+  private readonly fs: typeof import("node:fs");
+  private readonly editor: JsoncEditorApi;
+
+  constructor(opts: PresetServiceOptions) {
+    this.presetsDir = opts.presetsDir;
+    this.configStore = opts.configStore;
+    this.backupService = opts.backupService;
+    this.now = opts.now ?? (() => new Date());
+    this.fs = opts.fs ?? defaultFs;
+    this.editor =
+      opts.editor ?? {
+        parseSafe: realEditor.parseSafe,
+        getValue: realEditor.getValue,
+        applyEdits: realEditor.applyEdits,
+      };
+  }
+
+  private presetPath(name: string): string {
+    return path.join(this.presetsDir, `${name}.json`);
   }
 
   list(): import("./types").Preset[] {
-    throw new Error("NOT_IMPLEMENTED");
+    if (!this.fs.existsSync(this.presetsDir)) {
+      return [];
+    }
+    const presets: Preset[] = [];
+    for (const entry of this.fs.readdirSync(this.presetsDir)) {
+      if (!entry.endsWith(".json")) {
+        continue;
+      }
+      try {
+        const text = this.fs.readFileSync(this.presetPath(entry.slice(0, -".json".length)), "utf8");
+        presets.push(JSON.parse(text) as Preset);
+      } catch {
+        // Invalid entries are skipped silently.
+      }
+    }
+    return presets.sort(byName);
   }
 
-  load(_name: string): import("./types").Preset {
-    throw new Error("NOT_IMPLEMENTED");
+  load(name: string): import("./types").Preset {
+    const file = this.presetPath(name);
+    if (!this.fs.existsSync(file)) {
+      throw new Error("PRESET_NOT_FOUND");
+    }
+    return JSON.parse(this.fs.readFileSync(file, "utf8")) as Preset;
   }
 
-  exists(_name: string): boolean {
-    throw new Error("NOT_IMPLEMENTED");
+  exists(name: string): boolean {
+    return this.fs.existsSync(this.presetPath(name));
   }
 
-  save(_preset: import("./types").Preset): void {
-    throw new Error("NOT_IMPLEMENTED");
+  save(preset: import("./types").Preset): void {
+    if (!PRESET_NAME_RE.test(preset.name)) {
+      throw new Error("INVALID_PRESET_NAME");
+    }
+    this.fs.mkdirSync(this.presetsDir, { recursive: true });
+    this.configStore.writeAtomic(this.presetPath(preset.name), JSON.stringify(preset, null, 2) + "\n");
   }
 
-  capture(_name: string, _description?: string): import("./types").Preset {
-    throw new Error("NOT_IMPLEMENTED");
+  capture(name: string, description?: string): import("./types").Preset {
+    const assignments = this.configStore.ohMyAssignments();
+    const preset: Preset = {
+      name,
+      ...(description !== undefined ? { description } : {}),
+      createdAt: this.now().toISOString(),
+      appliedAt: null,
+      defaults: { model: this.configStore.defaultModel() },
+      agents: cleanSettings(assignments.agents),
+      categories: cleanSettings(assignments.categories),
+    };
+    this.save(preset);
+    return preset;
   }
 
-  rename(_oldName: string, _newName: string): void {
-    throw new Error("NOT_IMPLEMENTED");
+  rename(oldName: string, newName: string): void {
+    const preset = this.load(oldName);
+    this.save({ ...preset, name: newName });
+    this.fs.rmSync(this.presetPath(oldName));
   }
 
-  remove(_name: string): void {
-    throw new Error("NOT_IMPLEMENTED");
+  remove(name: string): void {
+    const file = this.presetPath(name);
+    if (!this.fs.existsSync(file)) {
+      throw new Error("PRESET_NOT_FOUND");
+    }
+    this.fs.rmSync(file);
   }
 
-  exportTo(_name: string, _targetFile: string): void {
-    throw new Error("NOT_IMPLEMENTED");
+  exportTo(name: string, targetFile: string): void {
+    const source = this.presetPath(name);
+    if (!this.fs.existsSync(source)) {
+      throw new Error("PRESET_NOT_FOUND");
+    }
+    this.configStore.writeAtomic(targetFile, this.fs.readFileSync(source, "utf8"));
   }
 
-  apply(_name: string): ApplyResult {
-    throw new Error("NOT_IMPLEMENTED");
+  apply(name: string): ApplyResult {
+    const preset = this.load(name);
+    const backup = this.backupService.create("pre-apply", { preset: name });
+    const discovered = this.configStore.discover();
+    const changes: ApplyChange[] = [];
+
+    // One edit batch for oh-my-opencode.json: for every listed key, set model and
+    // set-or-remove variant. Keys NOT present in the preset are never touched.
+    const edits: JsoncEdit[] = [];
+    const collect = (section: "agents" | "categories", settings: Record<string, ModelSetting>): void => {
+      for (const [key, setting] of Object.entries(settings)) {
+        edits.push({ path: [section, key, "model"], value: setting.model, op: "set" });
+        if (setting.variant != null) {
+          edits.push({ path: [section, key, "variant"], value: setting.variant, op: "set" });
+        } else {
+          edits.push({ path: [section, key, "variant"], value: undefined, op: "remove" });
+        }
+      }
+    };
+    collect("agents", preset.agents);
+    collect("categories", preset.categories);
+
+    const ohMyText = this.configStore.readTextOrEmpty(discovered.ohMyOpencodeJson);
+    const ohMyParse = this.editor.parseSafe<unknown>(ohMyText);
+    if (ohMyParse.errors.length > 0) {
+      // Never touch a broken file.
+      throw new realEditor.JsoncSyntaxError(ohMyParse.errors);
+    }
+
+    const recordChanges = (file: ApplyChange["file"], fileEdits: JsoncEdit[], text: string): void => {
+      for (const edit of fileEdits) {
+        const from = this.editor.getValue(text, edit.path);
+        const isRemove = (edit.op ?? "set") === "remove";
+        if (isRemove ? from !== undefined : from !== edit.value) {
+          changes.push({ file, path: edit.path, from, to: isRemove ? REMOVED : edit.value });
+        }
+      }
+    };
+    recordChanges("oh-my-opencode.json", edits, ohMyText);
+
+    const newOhMyText = this.editor.applyEdits(ohMyText, edits);
+    if (newOhMyText !== ohMyText) {
+      this.configStore.writeAtomic(discovered.ohMyOpencodeJson, newOhMyText);
+    }
+
+    const opencodeText = this.configStore.readTextOrEmpty(discovered.opencodeJson);
+    const model = preset.defaults?.model ?? null;
+    const modelEdit: JsoncEdit =
+      model != null
+        ? { path: ["model"], value: model, op: "set" }
+        : { path: ["model"], value: undefined, op: "remove" };
+    recordChanges("opencode.json", [modelEdit], opencodeText);
+    const newOpencodeText = this.editor.applyEdits(opencodeText, [modelEdit]);
+    if (newOpencodeText !== opencodeText) {
+      this.configStore.writeAtomic(discovered.opencodeJson, newOpencodeText);
+    }
+
+    preset.appliedAt = this.now().toISOString();
+    this.save(preset);
+    return { preset, backup, changes };
   }
 
   currentPresetName(): string | null {
-    throw new Error("NOT_IMPLEMENTED");
+    let best: { name: string; appliedAt: string } | null = null;
+    for (const preset of this.list()) {
+      if (typeof preset.appliedAt !== "string") {
+        continue;
+      }
+      if (best === null || preset.appliedAt > best.appliedAt) {
+        best = { name: preset.name, appliedAt: preset.appliedAt };
+      }
+    }
+    return best === null ? null : best.name;
   }
 }
