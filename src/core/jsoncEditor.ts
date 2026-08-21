@@ -1,4 +1,11 @@
-import { parse, parseTree, findNodeAtLocation, getNodeValue } from "jsonc-parser";
+import {
+  applyEdits as applyJsoncEdits,
+  findNodeAtLocation,
+  getNodeValue,
+  modify,
+  parse,
+  parseTree,
+} from "jsonc-parser";
 import type { JsonPath, JsoncError, ParseResult } from "./types";
 
 export interface JsoncEdit {
@@ -15,6 +22,8 @@ export class JsoncSyntaxError extends Error {
 }
 
 const PARSE_OPTIONS = { allowTrailingComma: true, allowEmptyContent: true } as const;
+
+const FORMATTING_OPTIONS = { tabSize: 2, insertSpaces: true };
 
 function toErrors(errors: { offset: number; length: number; error: number }[]): JsoncError[] {
   return errors.map((e) => ({ offset: e.offset, length: e.length, message: `Parse error code ${e.error}` }));
@@ -36,14 +45,40 @@ export function getValue<T>(text: string, path: JsonPath): T | undefined {
   return node ? (getNodeValue(node) as T) : undefined;
 }
 
-export function applyEdits(_text: string, _edits: JsoncEdit[]): string {
-  throw new Error("NOT_IMPLEMENTED");
+function assertParsable(text: string): void {
+  const errors = validate(text);
+  if (errors.length > 0) {
+    throw new JsoncSyntaxError(errors);
+  }
 }
 
-export function setValues(_text: string, _entries: { path: JsonPath; value: unknown }[]): string {
-  throw new Error("NOT_IMPLEMENTED");
+function hasPath(text: string, path: JsonPath): boolean {
+  const root = parseTree(text, undefined, PARSE_OPTIONS);
+  return root !== undefined && findNodeAtLocation(root, path) !== undefined;
 }
 
-export function removeKey(_text: string, _path: JsonPath): string {
-  throw new Error("NOT_IMPLEMENTED");
+export function applyEdits(text: string, edits: JsoncEdit[]): string {
+  assertParsable(text);
+  let current = text;
+  for (const edit of edits) {
+    const isRemove = (edit.op ?? "set") === "remove";
+    if (isRemove && !hasPath(current, edit.path)) {
+      continue;
+    }
+    const value = isRemove ? undefined : edit.value;
+    const modifications = modify(current, edit.path, value, { formattingOptions: FORMATTING_OPTIONS });
+    current = applyJsoncEdits(current, modifications);
+  }
+  return current;
+}
+
+export function setValues(text: string, entries: { path: JsonPath; value: unknown }[]): string {
+  return applyEdits(
+    text,
+    entries.map((entry) => ({ path: entry.path, value: entry.value, op: "set" as const })),
+  );
+}
+
+export function removeKey(text: string, path: JsonPath): string {
+  return applyEdits(text, [{ path, value: undefined, op: "remove" }]);
 }
