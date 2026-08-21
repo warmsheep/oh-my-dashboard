@@ -9,6 +9,11 @@ export interface BackupServiceOptions {
   now?: () => Date;
   fs?: typeof import("node:fs");
   retention?: Partial<Record<BackupReason, number>>;
+  /**
+   * Absolute paths of the managed config files on this machine (e.g. detected
+   * opencode.json + ~/.omo/omo.jsonc). Defaults to the legacy configDir-relative trio.
+   */
+  managedFiles?: readonly string[];
 }
 
 export const DEFAULT_RETENTION: Record<BackupReason, number | null> = {
@@ -34,6 +39,7 @@ export class BackupService {
   private readonly now: () => Date;
   private readonly fs: typeof import("node:fs");
   private readonly retention: Record<BackupReason, number | null>;
+  private readonly managedFiles: readonly { label: string; src: string }[];
 
   constructor(opts: BackupServiceOptions) {
     this.configDir = opts.configDir;
@@ -42,6 +48,9 @@ export class BackupService {
     this.now = opts.now ?? (() => new Date());
     this.fs = opts.fs ?? defaultFs;
     this.retention = { ...DEFAULT_RETENTION, ...opts.retention };
+    this.managedFiles = opts.managedFiles
+      ? opts.managedFiles.map((src) => ({ label: path.basename(src), src }))
+      : MANAGED_FILES.map((name) => ({ label: name, src: path.join(opts.configDir, name) }));
   }
 
   create(reason: BackupReason, meta?: { preset?: string }): BackupEntry {
@@ -51,10 +60,9 @@ export class BackupService {
     this.fs.mkdirSync(dir, { recursive: true });
 
     let fileCount = 0;
-    for (const name of MANAGED_FILES) {
-      const src = path.join(this.configDir, name);
+    for (const { label, src } of this.managedFiles) {
       if (this.fs.existsSync(src)) {
-        this.fs.copyFileSync(src, path.join(dir, name));
+        this.fs.copyFileSync(src, path.join(dir, label));
         fileCount++;
       }
     }
@@ -102,10 +110,11 @@ export class BackupService {
 
   restore(dirName: string): void {
     const srcDir = path.join(this.backupsDir, dirName);
-    for (const name of MANAGED_FILES) {
-      const src = path.join(srcDir, name);
-      if (this.fs.existsSync(src)) {
-        this.fs.copyFileSync(src, path.join(this.configDir, name));
+    for (const { label, src } of this.managedFiles) {
+      const backup = path.join(srcDir, label);
+      if (this.fs.existsSync(backup)) {
+        this.fs.mkdirSync(path.dirname(src), { recursive: true });
+        this.fs.copyFileSync(backup, src);
       }
     }
     for (const name of MANAGED_DIRS) {
@@ -118,11 +127,10 @@ export class BackupService {
 
   diffPairs(entry: BackupEntry): { label: string; backup: string; current: string }[] {
     const pairs: { label: string; backup: string; current: string }[] = [];
-    for (const name of MANAGED_FILES) {
-      const backup = path.join(entry.dir, name);
-      const current = path.join(this.configDir, name);
-      if (this.fs.existsSync(backup) && this.fs.existsSync(current)) {
-        pairs.push({ label: name, backup, current });
+    for (const { label, src } of this.managedFiles) {
+      const backup = path.join(entry.dir, label);
+      if (this.fs.existsSync(backup) && this.fs.existsSync(src)) {
+        pairs.push({ label, backup, current: src });
       }
     }
     return pairs;
