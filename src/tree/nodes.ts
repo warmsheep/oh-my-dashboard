@@ -54,6 +54,7 @@ const KNOWN_AGENT_ORDER: readonly string[] = [
   "momus",
   "atlas",
   "sisyphus",
+  "sisyphus-junior",
 ];
 
 const KNOWN_CATEGORY_ORDER: readonly string[] = [
@@ -263,9 +264,9 @@ function modelNodes(models: ModelEntry[]): BaseNode[] {
 /**
  * Pure builder for the OpenCode Config Manager sidebar tree.
  *
- * @param assignments Optional model assignments read from oh-my-opencode.json. When provided,
- *   the oh-my-opencode.json node gets agent/category children (KNOWN order first, extras
- *   alphabetical); when absent it stays a leaf. Injecting content keeps this function pure.
+ * @param assignments Optional model assignments read from the detected agent config
+ *   (omo.jsonc / oh-my-opencode.json...). When provided, the agent-config node gets
+ *   agent/category children (KNOWN order first, extras alphabetical); when absent it stays a leaf.
  *   A config file counts as missing when its path is empty (see existence convention above).
  */
 export function buildConfigTree(
@@ -277,7 +278,13 @@ export function buildConfigTree(
   assignments?: Assignments,
   models?: ModelEntry[],
 ): BaseNode[] {
-  const ohMy = configFileNode("config:oh-my-opencode.json", "oh-my-opencode.json", d.ohMyOpencodeJson, parseErrors);
+  const agentConfigPath = d.agentConfig.path;
+  const ohMy = configFileNode(
+    "config:agentConfig",
+    agentConfigPath ? path.basename(agentConfigPath) : "oh-my-opencode.json",
+    agentConfigPath,
+    parseErrors,
+  );
   const assignmentChildren = assignments ? assignmentNodes(assignments) : [];
   if (assignments) {
     ohMy.children = [...(ohMy.children ?? []), ...assignmentChildren];
@@ -290,7 +297,7 @@ export function buildConfigTree(
     ...agentsMdNodes(d),
     ...dirSummaryNodes(d),
   ];
-  if (!d.opencodeJson && !d.ohMyOpencodeJson) {
+  if (!d.opencodeJson && !d.agentConfig.path) {
     configChildren.unshift({
       kind: "guide",
       id: "guide:createConfig",

@@ -30,6 +30,13 @@ function makeDiscovered(overrides: Partial<DiscoveredConfig> = {}): DiscoveredCo
     configDir: "/cfg",
     opencodeJson: "/cfg/opencode.json",
     ohMyOpencodeJson: "/cfg/oh-my-opencode.json",
+    agentConfig: {
+      kind: "legacy",
+      path: "/cfg/oh-my-opencode.json",
+      sectionPath: [],
+      reasoningKey: "variant",
+      exists: true,
+    },
     agentsMd: [
       { scope: "global", path: "/cfg/AGENTS.md", exists: true },
       { scope: "project", path: "/work/proj-a/AGENTS.md", exists: false },
@@ -227,8 +234,31 @@ describe("buildConfigTree — full shape", () => {
     expect(n.children).toBeUndefined();
   });
 
+  it("agent config node shows the detected file's basename (omo.jsonc on omo machines)", () => {
+    const omoRoots = buildConfigTree(
+      makeDiscovered({
+        agentConfig: {
+          kind: "omo",
+          path: "/home/t/.omo/omo.jsonc",
+          sectionPath: ["[opencode]"],
+          reasoningKey: "reasoning",
+          exists: true,
+        },
+      }),
+      [],
+      null,
+      [],
+      new Map<string, JsoncError[]>(),
+      ASSIGNMENTS,
+    );
+    const n = find(omoRoots[0].children!, "config:agentConfig");
+    expect(n.label).toBe("omo.jsonc");
+    expect(n.tooltip).toBe("/home/t/.omo/omo.jsonc");
+    expect(n.filePath).toBe("/home/t/.omo/omo.jsonc");
+  });
+
   it("oh-my-opencode.json node: collapsed with agent+category children, KNOWN order first", () => {
-    const n = find(roots[0].children!, "config:oh-my-opencode.json");
+    const n = find(roots[0].children!, "config:agentConfig");
     expect(n.label).toBe("oh-my-opencode.json");
     expect(n.collapsibleState).toBe("collapsed");
 
@@ -310,7 +340,7 @@ describe("buildConfigTree — full shape", () => {
 
   it("without assignments, oh-my-opencode.json node is a childless leaf", () => {
     const roots2 = buildConfigTree(makeSnapshot().discovered, PRESETS, null, BACKUPS, new Map());
-    const n = find(roots2[0].children!, "config:oh-my-opencode.json");
+    const n = find(roots2[0].children!, "config:agentConfig");
     expect(n.children).toBeUndefined();
     expect(n.collapsibleState).toBe("none");
   });
@@ -322,7 +352,11 @@ describe("buildConfigTree — full shape", () => {
 
 describe("buildConfigTree — missing configs guide", () => {
   const roots = buildConfigTree(
-    makeDiscovered({ opencodeJson: "", ohMyOpencodeJson: "" }),
+    makeDiscovered({
+      opencodeJson: "",
+      ohMyOpencodeJson: "",
+      agentConfig: { kind: "legacy", path: "", sectionPath: [], reasoningKey: "variant", exists: false },
+    }),
     [],
     null,
     [],
@@ -373,7 +407,7 @@ describe("buildConfigTree — parse errors", () => {
   });
 
   it("leaves the healthy file untouched", () => {
-    const other = find(roots[0].children!, "config:oh-my-opencode.json");
+    const other = find(roots[0].children!, "config:agentConfig");
     expect(other.label).toBe("oh-my-opencode.json");
     expect((other.children ?? []).some((c) => c.kind === "parseError")).toBe(false);
   });
@@ -439,7 +473,11 @@ describe("buildConfigTree — empty sections", () => {
 describe("buildConfigTree — id uniqueness", () => {
   it("has no duplicate ids anywhere (recursive)", () => {
     const roots = buildConfigTree(
-      makeDiscovered({ opencodeJson: "", ohMyOpencodeJson: "" }),
+      makeDiscovered({
+      opencodeJson: "",
+      ohMyOpencodeJson: "",
+      agentConfig: { kind: "legacy", path: "", sectionPath: [], reasoningKey: "variant", exists: false },
+    }),
       PRESETS,
       "deep-work",
       BACKUPS,
@@ -480,7 +518,7 @@ describe("ConfigTreeDataProvider", () => {
     const snap = makeSnapshot();
     const provider = new ConfigTreeDataProvider("config", () => snap);
     const top = (await provider.getChildren())!;
-    const ohMy = find(top, "config:oh-my-opencode.json");
+    const ohMy = find(top, "config:agentConfig");
     const kids = await provider.getChildren(ohMy);
     expect(kids.map((k) => k.contextValue)).toEqual(["agent", "agent", "agent", "category", "category"]);
     expect(await provider.getChildren(top[0])).toEqual([]); // leaf → []
