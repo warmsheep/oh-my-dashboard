@@ -333,8 +333,8 @@ async function openConfigFile(deps: ExtensionDeps, arg: unknown): Promise<void> 
     if (node.label) {
       const discovered = deps.configStore.discover(workspaceFolders());
       const byLabel: Record<string, string> = {
-        "opencode.json": discovered.opencodeJson,
-        "oh-my-opencode.json": discovered.ohMyOpencodeJson,
+        [path.basename(discovered.opencodeJson)]: discovered.opencodeJson,
+        [path.basename(discovered.agentConfig.path)]: discovered.agentConfig.path,
       };
       const target = byLabel[node.label];
       if (target) {
@@ -351,11 +351,15 @@ async function openConfigFile(deps: ExtensionDeps, arg: unknown): Promise<void> 
       items.push({ label, description: filePath, path: filePath });
     }
   };
-  addFile("opencode.json", discovered.opencodeJson, fs.existsSync(discovered.opencodeJson));
   addFile(
-    "oh-my-opencode.json",
-    discovered.ohMyOpencodeJson,
-    fs.existsSync(discovered.ohMyOpencodeJson),
+    path.basename(discovered.opencodeJson),
+    discovered.opencodeJson,
+    fs.existsSync(discovered.opencodeJson),
+  );
+  addFile(
+    path.basename(discovered.agentConfig.path),
+    discovered.agentConfig.path,
+    fs.existsSync(discovered.agentConfig.path),
   );
   for (const agentsMd of discovered.agentsMd) {
     addFile(
@@ -403,12 +407,17 @@ async function pickFileInDirectory(dir: string): Promise<void> {
 async function createConfig(deps: ExtensionDeps): Promise<void> {
   const discovered = deps.configStore.discover(workspaceFolders());
   const agentsMdPath = path.join(discovered.configDir, "AGENTS.md");
+  const agentConfigKey = discovered.agentConfig.kind === "omo" ? "omo.jsonc" : "oh-my-opencode.json";
   const allTargets: { key: keyof typeof FILE_TEMPLATES; label: string; filePath: string }[] = [
-    { key: "opencode.json", label: "opencode.json", filePath: discovered.opencodeJson },
     {
-      key: "oh-my-opencode.json",
-      label: "oh-my-opencode.json",
-      filePath: discovered.ohMyOpencodeJson,
+      key: "opencode.json",
+      label: path.basename(discovered.opencodeJson),
+      filePath: discovered.opencodeJson,
+    },
+    {
+      key: agentConfigKey,
+      label: path.basename(discovered.agentConfig.path),
+      filePath: discovered.agentConfig.path,
     },
     { key: "AGENTS.md", label: "AGENTS.md（全局）", filePath: agentsMdPath },
   ];
@@ -428,6 +437,7 @@ async function createConfig(deps: ExtensionDeps): Promise<void> {
   if (!picked) {
     return;
   }
+  fs.mkdirSync(path.dirname(picked.target.filePath), { recursive: true });
   deps.configStore.writeAtomic(picked.target.filePath, FILE_TEMPLATES[picked.target.key]);
   deps.refreshAll();
   void vscode.window.showInformationMessage(`已创建 ${picked.target.label}`);
@@ -485,24 +495,31 @@ async function setAgentModel(deps: ExtensionDeps, arg: unknown): Promise<void> {
   }
 
   const discovered = deps.configStore.discover(workspaceFolders());
-  const raw = deps.configStore.readTextOrEmpty(discovered.ohMyOpencodeJson);
+  const agentConfig = discovered.agentConfig;
+  const agentFileName = path.basename(agentConfig.path);
+  const raw = deps.configStore.readTextOrEmpty(agentConfig.path);
   if (raw.length > 0) {
     const errors = validate(raw);
     if (errors.length > 0) {
       void vscode.window.showErrorMessage(
-        "oh-my-opencode.json 存在 JSONC 语法错误，已取消修改，请先修复后再试",
+        `${agentFileName} 存在 JSONC 语法错误，已取消修改，请先修复后再试`,
       );
       return;
     }
   }
+  const base = [...agentConfig.sectionPath, target.section, target.name];
+  const otherReasoningKey = agentConfig.reasoningKey === "reasoning" ? "variant" : "reasoning";
   const edits: JsoncEdit[] = [
-    { path: [target.section, target.name, "model"], value: modelId },
+    { path: [...base, "model"], value: modelId },
     variantPick.variant === null
-      ? { path: [target.section, target.name, "variant"], value: undefined, op: "remove" }
-      : { path: [target.section, target.name, "variant"], value: variantPick.variant },
+      ? { path: [...base, agentConfig.reasoningKey], value: undefined, op: "remove" }
+      : { path: [...base, agentConfig.reasoningKey], value: variantPick.variant },
+    { path: [...base, otherReasoningKey], value: undefined, op: "remove" },
+    { path: [...base, "models"], value: undefined, op: "remove" },
   ];
   const next = applyEdits(raw.length > 0 ? raw : "{}", edits);
-  deps.configStore.writeAtomic(discovered.ohMyOpencodeJson, next);
+  fs.mkdirSync(path.dirname(agentConfig.path), { recursive: true });
+  deps.configStore.writeAtomic(agentConfig.path, next);
   deps.refreshAll();
   void vscode.window.showInformationMessage(
     `已更新 ${target.name} → ${modelId}${variantPick.variant ? `（variant: ${variantPick.variant}）` : ""}`,

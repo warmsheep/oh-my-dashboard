@@ -49,11 +49,13 @@ export const MODEL_ID_PATTERN = /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/;
 
 export const OUTPUT_CHANNEL_NAME = "OpenCode Config Manager";
 
-export const FILE_TEMPLATES: Record<"opencode.json" | "oh-my-opencode.json" | "AGENTS.md", string> = {
+export const FILE_TEMPLATES: Record<"opencode.json" | "oh-my-opencode.json" | "omo.jsonc" | "AGENTS.md", string> = {
   "opencode.json":
     '{\n  "$schema": "https://opencode.ai/config.json",\n  "provider": {}\n}\n',
   "oh-my-opencode.json":
     '{\n  "$schema": "https://raw.githubusercontent.com/code-yeongyu/oh-my-opencode/dev/assets/oh-my-opencode.schema.json",\n  "agents": {},\n  "categories": {}\n}\n',
+  "omo.jsonc":
+    '{\n  "$schema": "https://raw.githubusercontent.com/code-yeongyu/oh-my-openagent/dev/assets/omo.schema.json",\n  "[opencode]": {\n    "agents": {},\n    "categories": {}\n  }\n}\n',
   "AGENTS.md": "# AGENTS.md\n",
 };
 

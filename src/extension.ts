@@ -1,4 +1,5 @@
 import * as fs from "node:fs";
+import * as path from "node:path";
 import * as vscode from "vscode";
 import { BackupService } from "./core/backupService";
 import { ConfigStore } from "./core/configStore";
@@ -41,7 +42,7 @@ export function activate(ctx: vscode.ExtensionContext): void {
   } => {
     const discovered = configStore.discover(workspaceFolders());
     const parseErrors = new Map<string, JsoncError[]>();
-    for (const file of [discovered.opencodeJson, discovered.ohMyOpencodeJson]) {
+    for (const file of [discovered.opencodeJson, discovered.agentConfig.path]) {
       const text = configStore.readTextOrEmpty(file);
       if (text.length > 0) {
         const errors = validate(text);
@@ -54,7 +55,14 @@ export function activate(ctx: vscode.ExtensionContext): void {
   };
 
   const discovered = configStore.discover(workspaceFolders());
-  const backupService = new BackupService({ configDir: discovered.configDir });
+  const backupService = new BackupService({
+    configDir: discovered.configDir,
+    managedFiles: [
+      discovered.opencodeJson,
+      discovered.agentConfig.path,
+      path.join(discovered.configDir, "AGENTS.md"),
+    ],
+  });
   const presetService = new PresetService({
     presetsDir: discovered.presetsDir,
     configStore,
@@ -110,14 +118,22 @@ export function activate(ctx: vscode.ExtensionContext): void {
       refreshAll();
     }, 300);
   };
+  const watchers: fs.FSWatcher[] = [];
   try {
-    const watcher = fs.watch(configStore.configDir, { recursive: true }, onWatchEvent);
+    watchers.push(fs.watch(configStore.configDir, { recursive: true }, onWatchEvent));
+    // The omo config lives outside the opencode config dir — watch it too (flat: only omo.jsonc matters).
+    const agentConfigDir = path.dirname(discovered.agentConfig.path);
+    if (agentConfigDir !== configStore.configDir && fs.existsSync(agentConfigDir)) {
+      watchers.push(fs.watch(agentConfigDir, onWatchEvent));
+    }
     ctx.subscriptions.push({
       dispose: () => {
         if (watchTimer !== undefined) {
           clearTimeout(watchTimer);
         }
-        watcher.close();
+        for (const watcher of watchers) {
+          watcher.close();
+        }
       },
     });
   } catch (error) {
