@@ -243,6 +243,11 @@
           "default": 20,
           "minimum": 1,
           "description": "Maximum number of automatic backups (pre-apply / pre-save / pre-restore) to retain. Manual backups are never pruned."
+        },
+        "opencodeConfigManager.configDirOverride": {
+          "type": "string",
+          "title": "配置目录覆盖",
+          "description": "配置目录覆盖（默认自动发现）"
         }
       }
     }
