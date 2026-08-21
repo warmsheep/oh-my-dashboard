@@ -31,3 +31,8 @@
 - 内置模型清单按 models.dev（opencode 官方模型目录）2026-08-21 数据全量刷新，15 → 33 项，
   每系列收录最新主力：GLM-5.3、Kimi K3、MiniMax M3、MiMo v2.5 Pro、DeepSeek V4、
   GPT-5.6、Claude Opus 5 / Sonnet 5、Grok 4.6、Gemini 3.7 Flash 等
+
+## 0.4.1 (2026-08-21)
+
+- Kimi 系列改走 kimi-for-coding 通道（k3 / k3-256k / kimi-for-coding-highspeed）
+- 安装脚本在安装后自动重置本地 models.json，确保每次升级后内置模型清单刷新到最新版本

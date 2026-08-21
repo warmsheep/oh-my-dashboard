@@ -74,7 +74,7 @@ describe("ensureLocalModelsFile", () => {
   it("builtin catalog covers all required families with unique ids", () => {
     const families: Record<string, RegExp> = {
       GLM: /^zhipuai-coding-plan\/glm-/,
-      Kimi: /^moonshotai\/kimi-/,
+      Kimi: /^kimi-for-coding\//,
       MiniMax: /^minimax-cn-coding-plan\/MiniMax-/,
       Mimo: /^xiaomi\/mimo-/,
       Deepseek: /^deepseek\/deepseek-/,
