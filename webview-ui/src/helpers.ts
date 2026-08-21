@@ -22,7 +22,7 @@ export function setAllModels(
   rows: readonly PresetRow[],
   model: string,
 ): PresetRow[] {
-  return rows.map((r) => (r.model === null ? r : { ...r, model }));
+  return rows.map((r) => ({ ...r, model }));
 }
 
 /**

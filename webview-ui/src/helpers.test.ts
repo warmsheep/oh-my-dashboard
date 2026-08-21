@@ -42,13 +42,14 @@ describe("setAllModels", () => {
     expect(next.map((r) => r.model)).toEqual(["new/x", "new/x"]);
   });
 
-  it("DOCUMENTED CHOICE: rows with model null stay null — unset rows mean “inherit default” and are excluded from the batch set", () => {
+  it("fills placeholder rows too: “全部模型设为” covers rows the preset never configured (e.g. newly added agents)", () => {
     const rows = [
       row("agents", "oracle", null),
+      row("agents", "sisyphus-junior", null),
       row("agents", "momus", "old/a"),
     ];
     const next = setAllModels(rows, "new/x");
-    expect(next.map((r) => r.model)).toEqual([null, "new/x"]);
+    expect(next.map((r) => r.model)).toEqual(["new/x", "new/x", "new/x"]);
   });
 
   it("returns a new array and new row objects without mutating the input", () => {
