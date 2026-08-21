@@ -1,0 +1,130 @@
+{
+  "$schema": "https://raw.githubusercontent.com/code-yeongyu/oh-my-opencode/dev/assets/oh-my-opencode.schema.json",
+  "agents": {
+    "hephaestus": {
+      "model": "zhipuai-coding-plan/glm-5.2",
+      "variant": "medium"
+    },
+    "oracle": {
+      "model": "zhipuai-coding-plan/glm-5.2",
+      "variant": "high"
+    },
+    "librarian": {
+      "model": "zhipuai-coding-plan/glm-5.2"
+    },
+    "explore": {
+      "model": "zhipuai-coding-plan/glm-5.2"
+    },
+    "multimodal-looker": {
+      "model": "zhipuai-coding-plan/glm-4.6v"
+    },
+    "prometheus": {
+      "model": "zhipuai-coding-plan/glm-5.2",
+      "variant": "max"
+    },
+    "metis": {
+      "model": "zhipuai-coding-plan/glm-5.2",
+      "variant": "max"
+    },
+    "momus": {
+      "model": "zhipuai-coding-plan/glm-5.2",
+      "variant": "xhigh"
+    },
+    "atlas": {
+      "model": "zhipuai-coding-plan/glm-5.2"
+    },
+    "sisyphus": {
+      "model": "zhipuai-coding-plan/glm-5.2"
+    }
+  },
+  "categories": {
+    "visual-engineering": {
+      "model": "zhipuai-coding-plan/glm-5.2",
+      "variant": "high"
+    },
+    "ultrabrain": {
+      "model": "zhipuai-coding-plan/glm-5.2",
+      "variant": "xhigh"
+    },
+    "deep": {
+      "model": "zhipuai-coding-plan/glm-5.2",
+      "variant": "medium"
+    },
+    "artistry": {
+      "model": "zhipuai-coding-plan/glm-5.2",
+      "variant": "high"
+    },
+    "quick": {
+      "model": "zhipuai-coding-plan/glm-5.2"
+    },
+    "unspecified-low": {
+      "model": "zhipuai-coding-plan/glm-5.2"
+    },
+    "unspecified-high": {
+      "model": "zhipuai-coding-plan/glm-5.2"
+    },
+    "writing": {
+      "model": "zhipuai-coding-plan/glm-5.2"
+    },
+    "architect": {
+      "model": "zhipuai-coding-plan/glm-5.2",
+      "variant": "high",
+      "description": "系统架构设计、技术选型、数据库设计、性能优化、微服务设计、分布式系统规划",
+      "prompt_append": "你是一名资深系统架构师。你的职责是：\n\n1. 设计高可用、高性能、可扩展的系统架构\n2. 评估技术选型，提供最佳实践建议\n3. 设计数据库模型和数据流\n4. 规划微服务架构和模块边界\n5. 识别系统瓶颈并提供优化方案\n6. 编写架构设计文档\n\n工作风格：\n- 提供详细的技术分析和权衡利弊\n- 使用图表（如 Mermaid）展示架构\n- 给出具体的实现建议和代码示例\n- 考虑成本、可维护性和扩展性"
+    },
+    "backend": {
+      "model": "zhipuai-coding-plan/glm-5.2",
+      "variant": "medium",
+      "description": "后端开发、API设计、数据库操作、业务逻辑实现、服务端开发",
+      "prompt_append": "你是一名后端开发工程师。你的职责是：\n\n1. 实现业务逻辑和API接口\n2. 设计数据库表结构和SQL查询\n3. 编写高效的查询和事务处理\n4. 实现用户认证和授权\n5. 处理文件上传、邮件发送等后台任务\n6. 编写单元测试和集成测试\n\n工作风格：\n- 遵循代码规范，保持代码简洁\n- 注意安全性和性能\n- 编写清晰的注释和文档\n- 确保代码可测试性"
+    },
+    "frontend": {
+      "model": "zhipuai-coding-plan/glm-5.2",
+      "variant": "high",
+      "description": "前端开发、UI实现、组件设计、交互逻辑、页面样式、用户体验优化",
+      "prompt_append": "你是一名前端开发工程师。你的职责是：\n\n1. 实现用户界面和交互功能\n2. 设计和开发可复用组件\n3. 优化页面性能和加载速度\n4. 实现响应式设计和跨浏览器兼容\n5. 与后端API对接\n6. 编写前端测试\n\n工作风格：\n- 注重用户体验和界面美观\n- 遵循前端最佳实践\n- 使用现代前端框架（Vue/React）\n- 确保代码可维护性和性能"
+    },
+    "qa": {
+      "model": "zhipuai-coding-plan/glm-5.2",
+      "variant": "medium",
+      "description": "测试用例编写、bug验证、质量保障、自动化测试、性能测试、回归测试",
+      "prompt_append": "你是一名测试工程师（QA）。你的职责是：\n\n1. 编写测试用例和测试计划\n2. 执行功能测试和回归测试\n3. 编写自动化测试脚本\n4. 报告和跟踪bug\n5. 验证bug修复\n6. 进行性能测试和安全测试\n\n工作风格：\n- 注重细节，不放过任何问题\n- 提供清晰的测试报告\n- 编写可维护的自动化测试\n- 推动质量改进"
+    },
+    "product": {
+      "model": "zhipuai-coding-plan/glm-5.2",
+      "variant": "high",
+      "description": "需求分析、产品设计、原型设计、用户研究、产品规划、需求文档编写",
+      "prompt_append": "你是一名产品经理。你的职责是：\n\n1. 收集和分析用户需求\n2. 编写详细的需求文档（PRD）\n3. 设计产品原型和交互流程\n4. 规划产品功能和迭代路线图\n5. 定义产品指标和成功标准\n6. 与开发、设计师、测试团队沟通\n\n工作风格：\n- 以用户为中心设计产品\n- 提供清晰的需求描述\n- 使用原型图展示产品设计\n- 平衡用户价值和商业目标\n\n重要：你擅长使用代码生成原型图，如 HTML/CSS/JS 原型或使用框架组件快速搭建可交互的原型。"
+    }
+  },
+  "default_run_agent": "sisyphus",
+  "disabled_hooks": [
+    "anthropic-context-window-limit-recovery"
+  ],
+  "tmux": {
+    "enabled": true,
+    "layout": "main-vertical",
+    "main_pane_size": 60,
+    "main_pane_min_width": 120,
+    "agent_pane_min_width": 40
+  },
+  "skills": {
+    "sources": [
+      {
+        "path": "~/.config/opencode/skills",
+        "recursive": true
+      }
+    ]
+  },
+  "backgroundTask": {
+    "maxToolCalls": 100000,
+    "circuitBreaker": {
+      "enabled": true,
+      "maxToolCalls": 100000,
+      "consecutiveThreshold": 500
+    }
+  },
+  "ralph_loop": {
+    "default_max_iterations": 1000
+  }
+}

@@ -1,0 +1,271 @@
+{
+  "name": "opencode-config-manager",
+  "displayName": "OpenCode Config Manager",
+  "description": "Manage opencode / oh-my-opencode configuration: edit, backup, restore, and switch named presets",
+  "version": "0.1.0",
+  "publisher": "local",
+  "license": "MIT",
+  "icon": "media/icon.png",
+  "engines": {
+    "vscode": "^1.100.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "opencodeConfig",
+          "title": "OpenCode Config",
+          "icon": "media/activity-icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "opencodeConfig": [
+        {
+          "id": "opencodeConfigFiles",
+          "name": "Config Files"
+        },
+        {
+          "id": "opencodePresets",
+          "name": "Presets"
+        },
+        {
+          "id": "opencodeBackups",
+          "name": "Backups"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "opencode.openConfigFile",
+        "title": "Open Config File",
+        "category": "OpenCode"
+      },
+      {
+        "command": "opencode.createConfig",
+        "title": "Create Missing Config File",
+        "category": "OpenCode"
+      },
+      {
+        "command": "opencode.setAgentModel",
+        "title": "Set Agent/Category Model",
+        "category": "OpenCode"
+      },
+      {
+        "command": "opencode.capturePreset",
+        "title": "Capture Preset from Current Config",
+        "category": "OpenCode",
+        "icon": "$(add)"
+      },
+      {
+        "command": "opencode.applyPreset",
+        "title": "Apply Preset",
+        "category": "OpenCode",
+        "icon": "$(play)"
+      },
+      {
+        "command": "opencode.editPreset",
+        "title": "Edit Preset (Matrix Form)",
+        "category": "OpenCode",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "opencode.renamePreset",
+        "title": "Rename Preset",
+        "category": "OpenCode"
+      },
+      {
+        "command": "opencode.deletePreset",
+        "title": "Delete Preset",
+        "category": "OpenCode"
+      },
+      {
+        "command": "opencode.exportPreset",
+        "title": "Export Preset to File",
+        "category": "OpenCode"
+      },
+      {
+        "command": "opencode.showPresetQuickPick",
+        "title": "Switch Preset...",
+        "category": "OpenCode"
+      },
+      {
+        "command": "opencode.backupNow",
+        "title": "Backup Now",
+        "category": "OpenCode",
+        "icon": "$(save)"
+      },
+      {
+        "command": "opencode.restoreBackup",
+        "title": "Restore Backup",
+        "category": "OpenCode"
+      },
+      {
+        "command": "opencode.diffBackup",
+        "title": "Compare Backup with Current",
+        "category": "OpenCode"
+      },
+      {
+        "command": "opencode.deleteBackup",
+        "title": "Delete Backup",
+        "category": "OpenCode"
+      },
+      {
+        "command": "opencode.refreshTree",
+        "title": "Refresh",
+        "category": "OpenCode",
+        "icon": "$(refresh)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "opencode.refreshTree",
+          "when": "view =~ /opencodeConfigFiles|opencodePresets|opencodeBackups/",
+          "group": "navigation@99"
+        },
+        {
+          "command": "opencode.capturePreset",
+          "when": "view == opencodePresets",
+          "group": "navigation@1"
+        },
+        {
+          "command": "opencode.backupNow",
+          "when": "view == opencodeBackups",
+          "group": "navigation@1"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "opencode.applyPreset",
+          "when": "view == opencodePresets && viewItem == preset",
+          "group": "inline@1"
+        },
+        {
+          "command": "opencode.editPreset",
+          "when": "view == opencodePresets && viewItem == preset",
+          "group": "inline@2"
+        },
+        {
+          "command": "opencode.renamePreset",
+          "when": "view == opencodePresets && viewItem == preset"
+        },
+        {
+          "command": "opencode.deletePreset",
+          "when": "view == opencodePresets && viewItem == preset"
+        },
+        {
+          "command": "opencode.exportPreset",
+          "when": "view == opencodePresets && viewItem == preset"
+        },
+        {
+          "command": "opencode.restoreBackup",
+          "when": "view == opencodeBackups && viewItem == backup"
+        },
+        {
+          "command": "opencode.diffBackup",
+          "when": "view == opencodeBackups && viewItem == backup"
+        },
+        {
+          "command": "opencode.deleteBackup",
+          "when": "view == opencodeBackups && viewItem == backup"
+        },
+        {
+          "command": "opencode.setAgentModel",
+          "when": "view == opencodeConfigFiles && viewItem =~ /agent|category/"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "opencode.openConfigFile",
+          "when": "false"
+        },
+        {
+          "command": "opencode.setAgentModel",
+          "when": "false"
+        },
+        {
+          "command": "opencode.applyPreset",
+          "when": "false"
+        },
+        {
+          "command": "opencode.editPreset",
+          "when": "false"
+        },
+        {
+          "command": "opencode.renamePreset",
+          "when": "false"
+        },
+        {
+          "command": "opencode.deletePreset",
+          "when": "false"
+        },
+        {
+          "command": "opencode.exportPreset",
+          "when": "false"
+        },
+        {
+          "command": "opencode.restoreBackup",
+          "when": "false"
+        },
+        {
+          "command": "opencode.diffBackup",
+          "when": "false"
+        },
+        {
+          "command": "opencode.deleteBackup",
+          "when": "false"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "opencode.showPresetQuickPick",
+        "key": "ctrl+alt+p",
+        "mac": "cmd+alt+p"
+      }
+    ],
+    "configuration": {
+      "title": "OpenCode Config Manager",
+      "properties": {
+        "opencodeConfigManager.autoBackupOnSave": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically create a backup before saving managed config files from the editor"
+        },
+        "opencodeConfigManager.maxAutoBackups": {
+          "type": "number",
+          "default": 20,
+          "minimum": 1,
+          "description": "Maximum number of automatic backups (pre-apply / pre-save / pre-restore) to retain. Manual backups are never pruned."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "build:webview": "npm --prefix webview-ui run build",
+    "package": "npm run compile && npm run build:webview && vsce package --no-dependencies"
+  },
+  "dependencies": {
+    "jsonc-parser": "^3.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/vscode": "^1.100.0",
+    "@vscode/test-electron": "^3.1.0",
+    "@vscode/vsce": "^3.9.2",
+    "esbuild": "^0.25.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  }
+}

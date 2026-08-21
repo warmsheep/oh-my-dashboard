@@ -1,0 +1,13 @@
+{
+  "name": "example",
+  "description": "fixture preset",
+  "createdAt": "2026-08-21T00:00:00.000Z",
+  "appliedAt": null,
+  "defaults": { "model": null },
+  "agents": {
+    "oracle": { "model": "zhipuai-coding-plan/glm-5", "variant": "high" }
+  },
+  "categories": {
+    "ultrabrain": { "model": "zhipuai-coding-plan/glm-5", "variant": "xhigh" }
+  }
+}

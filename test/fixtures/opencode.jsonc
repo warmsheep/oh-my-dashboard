@@ -1,0 +1,212 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+     "WindsurfAI": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "WindsurfAI",
+      "options": {
+        "baseURL": "https://proxy.example.internal:8443/v1"
+      },
+      "models": {
+        "gpt-5.5": {
+          "name": "GPT-5.5 By WindsurfAI",
+          "limit": {
+            "context": 1000000,
+            "output": 128000
+          }
+        },
+        "gpt-5.4": {
+          "name": "GPT-5.4 By WindsurfAI",
+          "limit": {
+            "context": 1000000,
+            "output": 128000
+          }
+        },
+        "gpt-5.4-mini": {
+          "name": "GPT-5.4-Mini By WindsurfAI",
+          "limit": {
+            "context": 400000,
+            "output": 128000
+          }
+        },
+        "gpt-5.3-codex": {
+          "name": "GPT-5.3 Codex By WindsurfAI",
+          "limit": {
+            "context": 400000,
+            "output": 128000
+          }
+        },
+        "gpt-5.2": {
+          "name": "GPT-5.2"
+        },
+        "gpt-5.2-codex": {
+          "name": "GPT-5.2 Codex By WindsurfAI"
+        },
+        "claude-opus-4.6": {
+          "name": "Claude Opus 4.6 By WindsurfAI",
+          "limit": {
+            "context": 1000000,
+            "output": 256000
+          }
+        },
+        "claude-sonnet-4.6": {
+          "name": "Claude Sonnet 4.6 By WindsurfAI",
+          "limit": {
+            "context": 400000,
+            "output": 128000
+          }
+        }
+      }
+    },
+    "LocalAI": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "LocalAI",
+      "options": {
+        "baseURL": "https://proxy.example.internal:8443/v1"
+      },
+      "models": {
+	"gpt-5.5": {
+          "name": "GPT-5.5",
+          "limit": {
+            "context": 1000000,
+            "output": 128000
+          }
+        },
+        "gpt-5.4": {
+          "name": "GPT-5.4",
+          "limit": {
+            "context": 1000000,
+            "output": 128000
+          }
+        },
+        "gpt-5.4-mini": {
+          "name": "GPT-5.4-Mini",
+          "limit": {
+            "context": 400000,
+            "output": 128000
+          }
+        },
+        "gpt-5.3-codex": {
+          "name": "GPT-5.3 Codex",
+          "limit": {
+            "context": 400000,
+            "output": 128000
+          }
+        },
+        "gpt-5.2": {
+          "name": "GPT-5.2"
+        },
+        "gpt-5.2-codex": {
+          "name": "GPT-5.2 Codex"
+        },
+	"claude-opus-4.6": {
+	  "name": "Claude Opus 4.6 By OpenAI",
+	  "limit": {
+            "context": 1000000,
+            "output": 256000
+          }
+	},
+	"claude-sonnet-4.6": {
+	  "name": "Claude Sonnet 4.6 By OpenAI",
+	  "limit": {
+            "context": 400000,
+            "output": 128000
+          }
+	}
+      }
+    },
+    "openai": {
+      "models": {
+        "gpt-5.3-codex": {
+          "limit": {
+            "context": 400000,
+            "output": 128000
+          }
+        }
+      }
+    },
+    "github-copilot": {
+      "models": {
+        "claude-opus-4.6": {
+          "limit": {
+            "context": 1000000,
+            "output": 256000
+          }
+        },
+        "gemini-3.1-pro-preview": {
+          "limit": {
+            "context": 600000,
+            "output": 256000
+          }
+        }
+      }
+    },
+    "zhipuai-coding-plan": {
+      "models": {
+        "glm-5": {
+          "limit": {
+            "context": 200000,
+            "output": 128000
+          }
+        },
+      }
+    },
+    "minimax-cn-coding-plan": {
+      "models": {
+        "MiniMax-M2.5": {
+          "limit": {
+            "context": 204800,
+            "output": 128000
+          }
+        },
+        "MiniMax-M2.7": {
+          "limit": {
+            "context": 204800,
+            "output": 128000
+          }
+        },
+        "claude-opus-4.6": {
+          "name": "Claude Opus 4.6 By MiniMax",
+	  "limit": {
+            "context": 400000,
+            "output": 128000
+          }
+        },
+        "claude-sonnet-4.6": {
+          "name": "Claude Sonnet 4.6 By MiniMax",
+	  "limit": {
+            "context": 400000,
+            "output": 128000
+          }
+        }
+      }
+    }
+  },
+  "plugin": [
+    "~/.config/opencode/node_modules/oh-my-opencode/dist/index.js",
+    "@happycastle/opencode-openmemory@latest"
+  ],
+  "lsp": {
+    "kotlin-ls": {
+      "command": [
+        "~/.local/share/opencode/bin/kotlin-ls/official/kotlin-lsp.sh",
+        "--stdio"
+      ],
+      "extensions": [
+        ".kt",
+        ".kts"
+      ],
+      "priority": 10
+    }
+  },
+  "mcp": {
+    "openmemory": {
+      "enabled": true,
+      "type": "remote",
+      "url": "https://mcp.example.internal:8787/mcp",
+      "headers": {
+        "x-api-key": "REDACTED-LOCAL-DEV"
+      }
+    }
+  }
+}

@@ -1,0 +1,9 @@
+node_modules/
+dist/
+dist-webview/
+webview-ui/node_modules/
+webview-ui/build/
+*.vsix
+.vitest-cache/
+.vscode-test/
+.sisyphus/
