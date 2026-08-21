@@ -3,7 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { getValue, parseSafe } from "./jsoncEditor";
 import { ensureLocalModelsFile, mergeModelOptions } from "./builtinModels";
-import type { DirEntry, DiscoveredConfig, ModelEntry, ModelOption, ModelSetting, ParseResult } from "./types";
+import type { AgentConfigTarget, DirEntry, DiscoveredConfig, ModelEntry, ModelOption, ModelSetting, ParseResult } from "./types";
 
 export interface ConfigStoreOptions {
   configDirOverride?: string;
@@ -69,10 +69,79 @@ export class ConfigStore {
     return this.configDirOverride ?? ConfigStore.resolveConfigDir(this.env, this.homeDir);
   }
 
+  /** oh-my-openagent's unified config home (`~/.omo` on every platform). */
+  get omoDir(): string {
+    return path.join(this.homeDir, ".omo");
+  }
+
+  /**
+   * The opencode base config that actually exists on this machine: opencode.json wins, then
+   * opencode.jsonc, then opencode.json as the creation default.
+   */
+  resolveOpencodeConfigPath(): string {
+    const json = path.join(this.configDir, "opencode.json");
+    if (fs.existsSync(json)) {
+      return json;
+    }
+    const jsonc = path.join(this.configDir, "opencode.jsonc");
+    return fs.existsSync(jsonc) ? jsonc : json;
+  }
+
+  /**
+   * The agent/category config this machine actually uses. Current oh-my-openagent reads only
+   * ~/.omo/omo.jsonc (legacy files are migrated away); older installs read the legacy basenames
+   * in the runtime's compat order (oh-my-opencode before oh-my-openagent, .jsonc before .json).
+   * When nothing exists, an existing ~/.omo dir or an "oh-my-openagent" plugin entry in
+   * opencode.json selects the omo creation target; otherwise the legacy file is created.
+   */
+  resolveAgentConfig(): AgentConfigTarget {
+    const omoJsonc = path.join(this.omoDir, "omo.jsonc");
+    const omoJson = path.join(this.omoDir, "omo.json");
+    const omo = (p: string, exists: boolean): AgentConfigTarget => ({
+      kind: "omo",
+      path: p,
+      sectionPath: ["[opencode]"],
+      reasoningKey: "reasoning",
+      exists,
+    });
+    if (fs.existsSync(omoJsonc)) {
+      return omo(omoJsonc, true);
+    }
+    if (fs.existsSync(omoJson)) {
+      return omo(omoJson, true);
+    }
+    for (const name of [
+      "oh-my-opencode.jsonc",
+      "oh-my-opencode.json",
+      "oh-my-openagent.jsonc",
+      "oh-my-openagent.json",
+    ]) {
+      const candidate = path.join(this.configDir, name);
+      if (fs.existsSync(candidate)) {
+        return { kind: "legacy", path: candidate, sectionPath: [], reasoningKey: "variant", exists: true };
+      }
+    }
+    const plugins = getValue<unknown>(this.readTextOrEmpty(this.resolveOpencodeConfigPath()), ["plugin"]);
+    const usesOpenagent =
+      Array.isArray(plugins) &&
+      plugins.some((entry) => typeof entry === "string" && entry.startsWith("oh-my-openagent"));
+    if (fs.existsSync(this.omoDir) || usesOpenagent) {
+      return omo(omoJsonc, false);
+    }
+    return {
+      kind: "legacy",
+      path: path.join(this.configDir, "oh-my-opencode.json"),
+      sectionPath: [],
+      reasoningKey: "variant",
+      exists: false,
+    };
+  }
+
   discover(workspaceFolders?: string[]): DiscoveredConfig {
     const configDir = this.configDir;
-    const opencodeJson = path.join(configDir, "opencode.json");
+    const opencodeJson = this.resolveOpencodeConfigPath();
     const ohMyOpencodeJson = path.join(configDir, "oh-my-opencode.json");
+    const agentConfig = this.resolveAgentConfig();
     const commandDir = path.join(configDir, "command");
     const skillsDir = path.join(configDir, "skills");
 
@@ -108,6 +177,7 @@ export class ConfigStore {
       configDir,
       opencodeJson,
       ohMyOpencodeJson,
+      agentConfig,
       agentsMd,
       commandDir,
       commandFiles,
@@ -173,7 +243,7 @@ export class ConfigStore {
 
   private opencodeModels(): ModelOption[] {
     const result = this.readParse<{ provider?: Record<string, { models?: Record<string, unknown> }> }>(
-      path.join(this.configDir, "opencode.json"),
+      this.resolveOpencodeConfigPath(),
     );
     const options: ModelOption[] = [];
     const providers = result.value?.provider;
@@ -196,7 +266,7 @@ export class ConfigStore {
   }
 
   defaultModel(): string | null {
-    const text = this.readTextOrEmpty(path.join(this.configDir, "opencode.json"));
+    const text = this.readTextOrEmpty(this.resolveOpencodeConfigPath());
     if (!text) {
       return null;
     }
@@ -205,13 +275,60 @@ export class ConfigStore {
   }
 
   ohMyAssignments(): { agents: Record<string, ModelSetting>; categories: Record<string, ModelSetting> } {
-    const text = this.readTextOrEmpty(path.join(this.configDir, "oh-my-opencode.json"));
+    const target = this.resolveAgentConfig();
+    const text = this.readTextOrEmpty(target.path);
     if (!text) {
       return { agents: {}, categories: {} };
     }
-    return {
-      agents: getValue<Record<string, ModelSetting>>(text, ["agents"]) ?? {},
-      categories: getValue<Record<string, ModelSetting>>(text, ["categories"]) ?? {},
+    if (target.kind === "legacy") {
+      return {
+        agents: getValue<Record<string, ModelSetting>>(text, ["agents"]) ?? {},
+        categories: getValue<Record<string, ModelSetting>>(text, ["categories"]) ?? {},
+      };
+    }
+    // omo: OpenCode plugin settings live under the "[opencode]" block; agents/categories may
+    // also sit at the shared base level so every harness sees them.
+    const read = (section: "agents" | "categories"): Record<string, ModelSetting> => {
+      const raw =
+        getValue<Record<string, unknown>>(text, [...target.sectionPath, section]) ??
+        getValue<Record<string, unknown>>(text, [section]) ??
+        {};
+      const out: Record<string, ModelSetting> = {};
+      for (const [key, entry] of Object.entries(raw)) {
+        const setting = toModelSetting(entry);
+        if (setting) {
+          out[key] = setting;
+        }
+      }
+      return out;
     };
+    return { agents: read("agents"), categories: read("categories") };
   }
+}
+
+/** Normalize an omo entry ({model, reasoning} or a {models: [...]} chain) into a ModelSetting. */
+function toModelSetting(entry: unknown): ModelSetting | null {
+  if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+    return null;
+  }
+  const record = entry as Record<string, unknown>;
+  const chainHead =
+    Array.isArray(record.models) && record.models.length > 0 && record.models[0] && typeof record.models[0] === "object"
+      ? (record.models[0] as Record<string, unknown>)
+      : undefined;
+  const model =
+    typeof record.model === "string"
+      ? record.model
+      : typeof chainHead?.model === "string"
+        ? chainHead.model
+        : null;
+  if (model === null) {
+    return null;
+  }
+  const reasoning = record.reasoning ?? record.variant ?? chainHead?.reasoning ?? chainHead?.variant;
+  const setting: ModelSetting = { model };
+  if (typeof reasoning === "string") {
+    setting.variant = reasoning;
+  }
+  return setting;
 }

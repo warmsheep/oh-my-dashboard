@@ -85,7 +85,7 @@ describe("ConfigStore.discover", () => {
     writeFileSync(path.join(wsWithAgentsMd, "AGENTS.md"), "# project agents");
     const wsWithoutAgentsMd = sandbox();
 
-    const store = new ConfigStore({ configDirOverride: configDir });
+    const store = new ConfigStore({ configDirOverride: configDir, homeDir: sandbox() });
     const d = store.discover([wsWithAgentsMd, wsWithoutAgentsMd]);
 
     expect(d.configDir).toBe(configDir);
@@ -106,7 +106,7 @@ describe("ConfigStore.discover", () => {
 
   it("does not throw on an empty config dir; paths still present, arrays empty", () => {
     const dir = sandbox();
-    const store = new ConfigStore({ configDirOverride: dir });
+    const store = new ConfigStore({ configDirOverride: dir, homeDir: sandbox() });
     const d = store.discover();
     expect(d.opencodeJson).toBe(path.join(dir, "opencode.json"));
     expect(d.commandFiles).toEqual([]);
@@ -139,7 +139,7 @@ describe("ConfigStore.listModels", () => {
     const dir = seedConfigDir({ opencode: true });
     const models = new ConfigStore({ configDirOverride: dir }).listModels();
 
-    expect(models).toHaveLength(57);
+    expect(models).toHaveLength(74);
     const ids = models.map((m) => m.id);
     expect(ids).toContain("WindsurfAI/claude-opus-4.6");
     expect(ids).toContain("zhipuai-coding-plan/glm-5");
@@ -181,7 +181,7 @@ describe("ConfigStore.defaultModel", () => {
 describe("ConfigStore.ohMyAssignments", () => {
   it("reads agents and categories from the seeded fixture", () => {
     const dir = seedConfigDir({ ohMy: true });
-    const { agents, categories } = new ConfigStore({ configDirOverride: dir }).ohMyAssignments();
+    const { agents, categories } = new ConfigStore({ configDirOverride: dir, homeDir: sandbox() }).ohMyAssignments();
     expect(agents.oracle?.model).toBe("zhipuai-coding-plan/glm-5.2");
     expect(agents.oracle?.variant).toBe("high");
     expect(Object.keys(agents)).toHaveLength(10);
@@ -190,7 +190,7 @@ describe("ConfigStore.ohMyAssignments", () => {
 
   it("returns empty records when the file is missing", () => {
     const dir = sandbox();
-    expect(new ConfigStore({ configDirOverride: dir }).ohMyAssignments()).toEqual({
+    expect(new ConfigStore({ configDirOverride: dir, homeDir: sandbox() }).ohMyAssignments()).toEqual({
       agents: {},
       categories: {},
     });
@@ -204,5 +204,163 @@ describe("ConfigStore.readText / readTextOrEmpty", () => {
     const missing = path.join(dir, "nope.json");
     expect(() => store.readText(missing)).toThrow();
     expect(store.readTextOrEmpty(missing)).toBe("");
+  });
+});
+
+describe("ConfigStore.resolveOpencodeConfigPath", () => {
+  it("prefers opencode.json, falls back to opencode.jsonc, defaults to opencode.json", () => {
+    const dir = sandbox();
+    const store = new ConfigStore({ configDirOverride: dir });
+    expect(store.resolveOpencodeConfigPath()).toBe(path.join(dir, "opencode.json"));
+
+    writeFileSync(path.join(dir, "opencode.jsonc"), "{}");
+    expect(store.resolveOpencodeConfigPath()).toBe(path.join(dir, "opencode.jsonc"));
+
+    writeFileSync(path.join(dir, "opencode.json"), "{}");
+    expect(store.resolveOpencodeConfigPath()).toBe(path.join(dir, "opencode.json"));
+  });
+});
+
+describe("ConfigStore.resolveAgentConfig", () => {
+  it("prefers ~/.omo/omo.jsonc over everything else", () => {
+    const configDir = seedConfigDir();
+    const home = sandbox();
+    mkdirSync(path.join(home, ".omo"), { recursive: true });
+    writeFileSync(path.join(home, ".omo", "omo.jsonc"), "{}");
+
+    const target = new ConfigStore({ configDirOverride: configDir, homeDir: home }).resolveAgentConfig();
+    expect(target).toEqual({
+      kind: "omo",
+      path: path.join(home, ".omo", "omo.jsonc"),
+      sectionPath: ["[opencode]"],
+      reasoningKey: "reasoning",
+      exists: true,
+    });
+  });
+
+  it("accepts ~/.omo/omo.json as fallback basename", () => {
+    const configDir = seedConfigDir();
+    const home = sandbox();
+    mkdirSync(path.join(home, ".omo"), { recursive: true });
+    writeFileSync(path.join(home, ".omo", "omo.json"), "{}");
+
+    const target = new ConfigStore({ configDirOverride: configDir, homeDir: home }).resolveAgentConfig();
+    expect(target.kind).toBe("omo");
+    expect(target.path).toBe(path.join(home, ".omo", "omo.json"));
+    expect(target.exists).toBe(true);
+  });
+
+  it("matches runtime legacy order: oh-my-opencode.jsonc > oh-my-opencode.json > oh-my-openagent.jsonc > oh-my-openagent.json", () => {
+    const dir = sandbox();
+    const home = sandbox();
+    const store = new ConfigStore({ configDirOverride: dir, homeDir: home });
+
+    writeFileSync(path.join(dir, "oh-my-openagent.json"), "{}");
+    expect(store.resolveAgentConfig().path).toBe(path.join(dir, "oh-my-openagent.json"));
+
+    writeFileSync(path.join(dir, "oh-my-openagent.jsonc"), "{}");
+    expect(store.resolveAgentConfig().path).toBe(path.join(dir, "oh-my-openagent.jsonc"));
+
+    writeFileSync(path.join(dir, "oh-my-opencode.json"), "{}");
+    expect(store.resolveAgentConfig().path).toBe(path.join(dir, "oh-my-opencode.json"));
+
+    writeFileSync(path.join(dir, "oh-my-opencode.jsonc"), "{}");
+    const target = store.resolveAgentConfig();
+    expect(target).toEqual({
+      kind: "legacy",
+      path: path.join(dir, "oh-my-opencode.jsonc"),
+      sectionPath: [],
+      reasoningKey: "variant",
+      exists: true,
+    });
+  });
+
+  it("creates omo.jsonc when nothing exists but ~/.omo is present", () => {
+    const dir = seedConfigDir({ opencode: true, ohMy: false });
+    const home = sandbox();
+    mkdirSync(path.join(home, ".omo"), { recursive: true });
+
+    const target = new ConfigStore({ configDirOverride: dir, homeDir: home }).resolveAgentConfig();
+    expect(target.kind).toBe("omo");
+    expect(target.path).toBe(path.join(home, ".omo", "omo.jsonc"));
+    expect(target.exists).toBe(false);
+  });
+
+  it("creates omo.jsonc when opencode.json registers the oh-my-openagent plugin", () => {
+    const dir = sandbox();
+    const home = sandbox();
+    writeFileSync(path.join(dir, "opencode.json"), JSON.stringify({ plugin: ["oh-my-openagent@latest"] }));
+
+    const target = new ConfigStore({ configDirOverride: dir, homeDir: home }).resolveAgentConfig();
+    expect(target.kind).toBe("omo");
+    expect(target.exists).toBe(false);
+  });
+
+  it("falls back to legacy oh-my-opencode.json when nothing hints at omo", () => {
+    const dir = sandbox();
+    const home = sandbox();
+    writeFileSync(path.join(dir, "opencode.json"), JSON.stringify({ plugin: ["oh-my-opencode"] }));
+
+    const target = new ConfigStore({ configDirOverride: dir, homeDir: home }).resolveAgentConfig();
+    expect(target).toEqual({
+      kind: "legacy",
+      path: path.join(dir, "oh-my-opencode.json"),
+      sectionPath: [],
+      reasoningKey: "variant",
+      exists: false,
+    });
+  });
+});
+
+describe("ConfigStore.ohMyAssignments (omo target)", () => {
+  function seedOmo(text: string): { configDir: string; home: string } {
+    const configDir = seedConfigDir({ opencode: true, ohMy: false });
+    const home = sandbox();
+    mkdirSync(path.join(home, ".omo"), { recursive: true });
+    writeFileSync(path.join(home, ".omo", "omo.jsonc"), text);
+    return { configDir, home };
+  }
+
+  it("reads [opencode] agents/categories, maps reasoning→variant, follows models[0] chains, skips model-less entries", () => {
+    const { configDir, home } = seedOmo(`{
+      "[opencode]": {
+        "agents": {
+          "oracle": { "model": "openai/gpt-5.6-sol", "reasoning": "high" },
+          "explore": { "model": "github-copilot/grok-code-fast-1" },
+          "prometheus": { "prompt_append": "no model here" },
+          "chained": { "models": [{ "model": "a/b", "reasoning": "max" }, { "model": "c/d" }] }
+        },
+        "categories": {
+          "quick": { "model": "x/y", "reasoning": "off" }
+        }
+      }
+    }`);
+
+    const { agents, categories } = new ConfigStore({ configDirOverride: configDir, homeDir: home }).ohMyAssignments();
+    expect(agents).toEqual({
+      oracle: { model: "openai/gpt-5.6-sol", variant: "high" },
+      explore: { model: "github-copilot/grok-code-fast-1" },
+      chained: { model: "a/b", variant: "max" },
+    });
+    expect(categories).toEqual({ quick: { model: "x/y", variant: "off" } });
+  });
+
+  it("falls back to shared-base agents/categories when the [opencode] block lacks them", () => {
+    const { configDir, home } = seedOmo(`{
+      "agents": { "oracle": { "model": "a/b", "reasoning": "low" } },
+      "[opencode]": { "tmux": { "enabled": false } }
+    }`);
+
+    const { agents } = new ConfigStore({ configDirOverride: configDir, homeDir: home }).ohMyAssignments();
+    expect(agents).toEqual({ oracle: { model: "a/b", variant: "low" } });
+  });
+
+  it("accepts the deprecated variant key on omo targets", () => {
+    const { configDir, home } = seedOmo(`{
+      "[opencode]": { "agents": { "oracle": { "model": "a/b", "variant": "xhigh" } } }
+    }`);
+
+    const { agents } = new ConfigStore({ configDirOverride: configDir, homeDir: home }).ohMyAssignments();
+    expect(agents).toEqual({ oracle: { model: "a/b", variant: "xhigh" } });
   });
 });

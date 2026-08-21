@@ -5,7 +5,12 @@ export type JsonPath = (string | number)[];
 
 export interface ModelSetting {
   model: string;
-  variant?: Variant | null;
+  /**
+   * Reasoning level. Presets capture/apply the canonical `reasoning` key on omo targets and the
+   * deprecated `variant` key on legacy targets; upstream accepts harness-native tokens beyond
+   * VARIANTS (e.g. "off", "minimal"), so this is intentionally wider than Variant.
+   */
+  variant?: string | null;
 }
 
 export interface Preset {
@@ -65,10 +70,23 @@ export interface DirEntry {
   children?: DirEntry[];
 }
 
+/** Where agent/category model assignments live on this machine. */
+export interface AgentConfigTarget {
+  /** "omo": unified ~/.omo/omo.jsonc (latest oh-my-openagent). "legacy": oh-my-opencode.json[c] / oh-my-openagent.json[c]. */
+  kind: "omo" | "legacy";
+  path: string;
+  /** Path prefix for agents/categories sections: ["[opencode]"] on omo targets, [] on legacy. */
+  sectionPath: JsonPath;
+  /** Canonical per-entry reasoning field written on this target. */
+  reasoningKey: "reasoning" | "variant";
+  exists: boolean;
+}
+
 export interface DiscoveredConfig {
   configDir: string;
   opencodeJson: string;
   ohMyOpencodeJson: string;
+  agentConfig: AgentConfigTarget;
   agentsMd: { scope: "global" | "project"; path: string; exists: boolean }[];
   commandDir: string;
   commandFiles: string[];
@@ -91,6 +109,7 @@ export const KNOWN_AGENTS: readonly string[] = [
   "momus",
   "atlas",
   "sisyphus",
+  "sisyphus-junior",
 ];
 
 export const KNOWN_CATEGORIES: readonly string[] = [
