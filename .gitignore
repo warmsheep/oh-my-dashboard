@@ -8,3 +8,4 @@ webview-ui/build/
 .vscode-test/
 .sisyphus/
 build/
+.omo/

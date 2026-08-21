@@ -16,6 +16,7 @@ npm run package                                   # 编译+webview构建+同步d
 - **不要直接跑 `npm run test:e2e`**（Linux 无显示服务器会挂）；必须走 `./scripts/e2e.sh`。
 - `webview-ui/build` 是 Vite 产物，`dist-webview/` 是它的拷贝 — `npm run package` 和 e2e runner 会自动同步；手动构建 webview 后若直接跑 e2e，需先 `npm run build:webview`。
 - e2e 首次运行会向 `.vscode-test/` 下载 ~150MB 的 VSCode 二进制。
+- **每次 `npm run package` 打包前必须递增版本号**（用 `npm version <major|minor|patch> --no-git-tag-version`，会同步 package.json 与 lockfile）：bug 修复、模型清单等数据更新升 patch；新功能或行为变化升 minor；不兼容变更升 major。禁止不升版本重复打包。
 
 ## 硬性架构约束
 
@@ -34,7 +35,8 @@ npm run package                                   # 编译+webview构建+同步d
 
 ## 数据与运行时位置
 
-- 管理对象：`~/.config/opencode/` 下 `opencode.json`、`oh-my-opencode.json`、`AGENTS.md`、`command/`、`skills/`；预设存 `presets/*.json`；备份存 `backups/<ISO时间戳>-manual/`（只有手动备份，无自动备份）。
+- 管理对象：`~/.config/opencode/` 下 `opencode.json`（或 `opencode.jsonc`）、`AGENTS.md`、`command/`、`skills/`；预设存 `presets/*.json`；备份存 `backups/<ISO时间戳>-manual/`（只有手动备份，无自动备份）。
+- agent/category 配置目标**不固定**：`ConfigStore.resolveAgentConfig()` 按 `~/.omo/omo.jsonc` → `~/.omo/omo.json` → `oh-my-opencode.jsonc` → `oh-my-opencode.json` → `oh-my-openagent.jsonc` → `oh-my-openagent.json` 顺序检测（与 oh-my-openagent 运行时同序）；都不存在时按 `~/.omo` 目录或 opencode.json 的 plugin 条目决定创建目标。omo 目标写 `[opencode]` 块内的 `reasoning` 键，legacy 目标写顶层 `variant` 键；应用时会清掉被改条目的冲突键（`variant`/`reasoning`/`models` 链）。
 - 模型清单：内置清单在 `src/core/builtinModels.ts`，首次使用 seed 到 `~/.config/opencode/models.json`（可手编、损坏自愈重建）。清单来源是 models.dev（opencode 官方目录）— 更新模型时以其 provider/model id 为准。
 - 备份保留：手动备份永不清理；`DEFAULT_RETENTION` 里的 pre-* 规则仅为兼容旧版本残留备份。
 

@@ -16,3 +16,4 @@ dist/test-e2e/**
 !dist/extension.js
 !dist-webview/**
 build/**
+.omo/**
