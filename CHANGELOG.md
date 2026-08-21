@@ -36,3 +36,7 @@
 
 - Kimi 系列改走 kimi-for-coding 通道（k3 / k3-256k / kimi-for-coding-highspeed）
 - 安装脚本在安装后自动重置本地 models.json，确保每次升级后内置模型清单刷新到最新版本
+
+## 0.4.2 (2026-08-21)
+
+- GPT 系列补齐 GPT-5.6 全部变体：gpt-5.6 / Sol / Luna / Terra（models.dev 2026-07-09 发布）

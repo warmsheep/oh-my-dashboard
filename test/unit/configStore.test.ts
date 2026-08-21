@@ -139,7 +139,7 @@ describe("ConfigStore.listModels", () => {
     const dir = seedConfigDir({ opencode: true });
     const models = new ConfigStore({ configDirOverride: dir }).listModels();
 
-    expect(models).toHaveLength(54);
+    expect(models).toHaveLength(57);
     const ids = models.map((m) => m.id);
     expect(ids).toContain("WindsurfAI/claude-opus-4.6");
     expect(ids).toContain("zhipuai-coding-plan/glm-5");
