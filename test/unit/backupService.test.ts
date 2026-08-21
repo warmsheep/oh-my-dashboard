@@ -32,6 +32,8 @@ function seedFullTree(): void {
   fs.writeFileSync(path.join(configDir, "command", "sub", "b.md"), "b");
   fs.mkdirSync(path.join(configDir, "skills", "one"), { recursive: true });
   fs.writeFileSync(path.join(configDir, "skills", "one", "x.md"), "x");
+  fs.mkdirSync(path.join(configDir, "presets"), { recursive: true });
+  fs.writeFileSync(path.join(configDir, "presets", "work.json"), '{"name":"work"}');
 }
 
 /** Deterministic clock: each call advances by stepMs, producing distinct fs-safe stamps. */
@@ -97,12 +99,15 @@ describe("BackupService.create", () => {
     expect(
       fs.readFileSync(path.join(entry.dir, "skills", "one", "x.md"), "utf8")
     ).toBe("x");
+    expect(
+      fs.readFileSync(path.join(entry.dir, "presets", "work.json"), "utf8")
+    ).toBe('{"name":"work"}');
 
     // manifest fields exact
     expect(entry.manifest.version).toBe(1);
     expect(entry.manifest.reason).toBe("manual");
     expect(entry.manifest.preset).toBe("heavy");
-    expect(entry.manifest.fileCount).toBe(6);
+    expect(entry.manifest.fileCount).toBe(7);
     expect(entry.manifest.machine).toBe("test-host");
     expect(entry.manifest.createdAt).toBe("2026-08-21T15:04:05.123Z");
     expect(() => Date.parse(entry.manifest.createdAt)).not.toBeNull();
@@ -264,6 +269,7 @@ describe("BackupService.restore", () => {
 
     fs.appendFileSync(path.join(configDir, "opencode.json"), "\n//garbage");
     fs.rmSync(path.join(configDir, "command", "a.md"));
+    fs.writeFileSync(path.join(configDir, "presets", "work.json"), '{"name":"work-mutated"}');
 
     svc.restore(snap.dirName);
 
@@ -276,6 +282,9 @@ describe("BackupService.restore", () => {
     expect(
       fs.readFileSync(path.join(configDir, "command", "sub", "b.md"), "utf8")
     ).toBe("b");
+    expect(
+      fs.readFileSync(path.join(configDir, "presets", "work.json"), "utf8")
+    ).toBe('{"name":"work"}');
 
     expect(svc.list()).toHaveLength(1);
     expect(svc.list()[0].dirName).toBe(snap.dirName);

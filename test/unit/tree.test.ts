@@ -38,6 +38,24 @@ function makeDiscovered(overrides: Partial<DiscoveredConfig> = {}): DiscoveredCo
     commandFiles: ["deploy.md", "git.md"],
     skillsDir: "/cfg/skills",
     skillNames: ["pdf", "xlsx"],
+    commandTree: [
+      { name: "deploy.md", path: "/cfg/command/deploy.md", isDir: false },
+      { name: "git.md", path: "/cfg/command/git.md", isDir: false },
+      {
+        name: "sub",
+        path: "/cfg/command/sub",
+        isDir: true,
+        children: [{ name: "nested.md", path: "/cfg/command/sub/nested.md", isDir: false }],
+      },
+    ],
+    skillsTree: [
+      {
+        name: "pdf",
+        path: "/cfg/skills/pdf",
+        isDir: true,
+        children: [{ name: "SKILL.md", path: "/cfg/skills/pdf/SKILL.md", isDir: false }],
+      },
+    ],
     presetsDir: "/cfg/presets",
     backupsDir: "/cfg/backups",
     ...overrides,
@@ -243,16 +261,27 @@ describe("buildConfigTree — full shape", () => {
     expect(project.description).toBe("（不存在）");
   });
 
-  it("dirSummary rows: command/ (N) and skills/ (N) with dir tooltips", () => {
+  it("dirSummary rows: expandable tree with subdirs and clickable files", () => {
     const kids = roots[0].children!;
-    expect(find(kids, "dir:command")).toMatchObject({
+    const command = find(kids, "dir:command");
+    expect(command).toMatchObject({
       label: "command/ (2)",
       tooltip: "/cfg/command",
       contextValue: "dirSummary",
-      command: "opencode.openConfigFile",
-      filePath: "/cfg/command",
+      collapsibleState: "collapsed",
     });
-    expect(find(kids, "dir:skills")).toMatchObject({ label: "skills/ (2)", tooltip: "/cfg/skills" });
+    const sub = find(command.children!, "dir:/cfg/command/sub");
+    expect(sub.kind).toBe("dirEntry");
+    expect(sub.collapsibleState).toBe("collapsed");
+    const nested = find(sub.children!, "file:/cfg/command/sub/nested.md");
+    expect(nested.kind).toBe("fileEntry");
+    expect(nested.command).toBe("opencode.openConfigFile");
+    expect(nested.filePath).toBe("/cfg/command/sub/nested.md");
+    const skillFile = find(
+      find(find(kids, "dir:skills").children!, "dir:/cfg/skills/pdf").children!,
+      "file:/cfg/skills/pdf/SKILL.md",
+    );
+    expect(skillFile.command).toBe("opencode.openConfigFile");
   });
 
   it("preset section: captureAction first, then presets sorted by name", () => {
@@ -364,9 +393,9 @@ describe("buildConfigTree — current preset marker", () => {
     expect(deep.description).toBe(CURRENT_PRESET_BADGE);
     expect(balanced.description).not.toContain("当前");
     expect(balanced.description).toBe("应用于 07-15");
-    // Preset rows must NOT auto-apply on click (menus handle it) — no command.
-    expect(deep.command).toBeUndefined();
-    expect(balanced.command).toBeUndefined();
+    // Preset rows open the preset editor on click (safe); apply stays on menus.
+    expect(deep.command).toBe("opencode.editPreset");
+    expect(balanced.command).toBe("opencode.editPreset");
     expect(deep.tooltip).toContain(CURRENT_PRESET_BADGE);
     expect(deep.tooltip).toContain("2026-08-20T08:30:00.000Z");
   });
@@ -457,14 +486,14 @@ describe("ConfigTreeDataProvider", () => {
     expect(await provider.getChildren(top[0])).toEqual([]); // leaf → []
   });
 
-  it("getTreeItem maps a preset node: collapsibleState None, no command, pin icon for current", () => {
+  it("getTreeItem maps a preset node: collapsibleState None, edit command, pin icon for current", () => {
     const snap = makeSnapshot();
     const provider = new ConfigTreeDataProvider("presets", () => snap);
     const deep = find(buildConfigTree(snap.discovered, snap.presets, snap.currentPreset, snap.backups, snap.parseErrors, snap.assignments)[1].children!, "preset:deep-work");
 
     const item = provider.getTreeItem(deep);
     expect(item.collapsibleState).toBe(0); // TreeItemCollapsibleState.None
-    expect(item.command).toBeUndefined();
+    expect((item.command as { command: string } | undefined)?.command).toBe("opencode.editPreset");
     expect(item.contextValue).toBe("preset");
     expect(item.label).toBe("deep-work");
     expect(item.description).toBe(CURRENT_PRESET_BADGE);

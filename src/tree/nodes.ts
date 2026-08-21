@@ -1,5 +1,5 @@
 import * as path from "node:path";
-import type { BackupEntry, DiscoveredConfig, JsoncError, ModelEntry, ModelSetting, Preset } from "../core/types";
+import type { BackupEntry, DirEntry, DiscoveredConfig, JsoncError, ModelEntry, ModelSetting, Preset } from "../core/types";
 
 export type NodeKind =
   | "configRoot"
@@ -17,6 +17,8 @@ export type NodeKind =
   | "modelProvider"
   | "model"
   | "modelAddAction"
+  | "dirEntry"
+  | "fileEntry"
   | "guide"
   | "parseError";
 
@@ -153,29 +155,45 @@ function agentsMdNodes(d: DiscoveredConfig): BaseNode[] {
   });
 }
 
+function dirEntryNodes(entries: DirEntry[]): BaseNode[] {
+  return entries.map((entry) =>
+    entry.isDir
+      ? {
+          kind: "dirEntry" as const,
+          id: `dir:${entry.path}`,
+          label: entry.name,
+          tooltip: entry.path,
+          contextValue: "dirEntry",
+          collapsibleState: "collapsed" as const,
+          children: dirEntryNodes(entry.children ?? []),
+        }
+      : {
+          kind: "fileEntry" as const,
+          id: `file:${entry.path}`,
+          label: entry.name,
+          tooltip: entry.path,
+          contextValue: "fileEntry",
+          collapsibleState: "none" as const,
+          command: "opencode.openConfigFile",
+          filePath: entry.path,
+        },
+  );
+}
+
 function dirSummaryNodes(d: DiscoveredConfig): BaseNode[] {
-  return [
-    {
-      kind: "dirSummary",
-      id: "dir:command",
-      label: `command/ (${d.commandFiles.length})`,
-      tooltip: d.commandDir,
-      contextValue: "dirSummary",
-      collapsibleState: "none",
-      command: "opencode.openConfigFile",
-      filePath: d.commandDir,
-    },
-    {
-      kind: "dirSummary",
-      id: "dir:skills",
-      label: `skills/ (${d.skillNames.length})`,
-      tooltip: d.skillsDir,
-      contextValue: "dirSummary",
-      collapsibleState: "none",
-      command: "opencode.openConfigFile",
-      filePath: d.skillsDir,
-    },
+  const roots: { id: string; label: string; dir: string; tree: DirEntry[] }[] = [
+    { id: "dir:command", label: `command/ (${d.commandFiles.length})`, dir: d.commandDir, tree: d.commandTree },
+    { id: "dir:skills", label: `skills/ (${d.skillNames.length})`, dir: d.skillsDir, tree: d.skillsTree },
   ];
+  return roots.map((root) => ({
+    kind: "dirSummary" as const,
+    id: root.id,
+    label: root.label,
+    tooltip: root.dir,
+    contextValue: "dirSummary",
+    collapsibleState: root.tree.length > 0 ? ("collapsed" as const) : ("none" as const),
+    children: dirEntryNodes(root.tree),
+  }));
 }
 
 function pad2(n: number): string {
@@ -310,6 +328,7 @@ export function buildConfigTree(
           tooltip,
           contextValue: "preset",
           collapsibleState: "none",
+          command: "opencode.editPreset",
         };
       }),
   ];

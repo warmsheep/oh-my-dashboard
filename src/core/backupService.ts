@@ -19,7 +19,7 @@ export const DEFAULT_RETENTION: Record<BackupReason, number | null> = {
 };
 
 const MANAGED_FILES = ["opencode.json", "oh-my-opencode.json", "AGENTS.md"] as const;
-const MANAGED_DIRS = ["command", "skills"] as const;
+const MANAGED_DIRS = ["command", "skills", "presets"] as const;
 const MANIFEST_FILE = "manifest.json";
 const ALL_REASONS = Object.keys(DEFAULT_RETENTION) as BackupReason[];
 

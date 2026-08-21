@@ -58,6 +58,13 @@ export interface ModelEntry {
   source: "opencode" | "local" | "both";
 }
 
+export interface DirEntry {
+  name: string;
+  path: string;
+  isDir: boolean;
+  children?: DirEntry[];
+}
+
 export interface DiscoveredConfig {
   configDir: string;
   opencodeJson: string;
@@ -67,6 +74,8 @@ export interface DiscoveredConfig {
   commandFiles: string[];
   skillsDir: string;
   skillNames: string[];
+  commandTree: DirEntry[];
+  skillsTree: DirEntry[];
   presetsDir: string;
   backupsDir: string;
 }

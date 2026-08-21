@@ -3,12 +3,37 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { getValue, parseSafe } from "./jsoncEditor";
 import { ensureLocalModelsFile, mergeModelOptions } from "./builtinModels";
-import type { DiscoveredConfig, ModelEntry, ModelOption, ModelSetting, ParseResult } from "./types";
+import type { DirEntry, DiscoveredConfig, ModelEntry, ModelOption, ModelSetting, ParseResult } from "./types";
 
 export interface ConfigStoreOptions {
   configDirOverride?: string;
   env?: Record<string, string | undefined>;
   homeDir?: string;
+}
+
+function readDirTree(dir: string, depth = 0): DirEntry[] {
+  if (depth > 8 || !fs.existsSync(dir)) {
+    return [];
+  }
+  const entries = fs.readdirSync(dir, { withFileTypes: true }).sort((a, b) => {
+    if (a.isDirectory() !== b.isDirectory()) {
+      return a.isDirectory() ? -1 : 1;
+    }
+    return a.name.localeCompare(b.name);
+  });
+  return entries.map((entry) => {
+    const entryPath = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      const children = readDirTree(entryPath, depth + 1);
+      return {
+        name: entry.name,
+        path: entryPath,
+        isDir: true,
+        ...(children.length > 0 ? { children } : {}),
+      };
+    }
+    return { name: entry.name, path: entryPath, isDir: false };
+  });
 }
 
 export class ConfigStore {
@@ -88,6 +113,8 @@ export class ConfigStore {
       commandFiles,
       skillsDir,
       skillNames,
+      commandTree: readDirTree(commandDir),
+      skillsTree: readDirTree(skillsDir),
       presetsDir: path.join(configDir, "presets"),
       backupsDir: path.join(configDir, "backups"),
     };

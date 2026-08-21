@@ -56,6 +56,10 @@ function iconId(node: BaseNode): string {
       return "symbol-misc";
     case "modelAddAction":
       return "add";
+    case "dirEntry":
+      return "folder";
+    case "fileEntry":
+      return "file";
   }
 }
 

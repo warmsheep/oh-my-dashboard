@@ -42,6 +42,8 @@ function makeEnv(opts: EnvOptions = {}): PipelineEnv {
   fs.writeFileSync(path.join(configDir, "command", "a.md"), COMMAND_A_SEED);
   fs.mkdirSync(path.join(configDir, "skills", "one"), { recursive: true });
   fs.writeFileSync(path.join(configDir, "skills", "one", "x.md"), SKILL_X_SEED);
+  fs.mkdirSync(path.join(configDir, "presets"), { recursive: true });
+  fs.writeFileSync(path.join(configDir, "presets", "seeded.json"), '{"name":"seeded"}');
 
   const store = new ConfigStore({ configDirOverride: configDir });
   const backup = new BackupService({
@@ -111,6 +113,7 @@ describe("integration: core pipeline (capture → mutate → apply → backup �
     env.store.writeAtomic(env.ohMyPath, mutatedOhMy);
     fs.appendFileSync(env.agentsMdPath, "\njunk line appended by hand\n");
     fs.rmSync(path.join(env.configDir, "command", "a.md"));
+    fs.rmSync(path.join(env.configDir, "presets", "seeded.json"));
 
     const second = env.service.apply("baseline");
     expect(second.changes).toEqual([
@@ -143,6 +146,7 @@ describe("integration: core pipeline (capture → mutate → apply → backup �
     expect(readBytes(env.agentsMdPath)).toEqual(Buffer.from(AGENTS_MD_SEED, "utf8"));
     expect(readBytes(path.join(env.configDir, "command", "a.md"))).toEqual(Buffer.from(COMMAND_A_SEED, "utf8"));
     expect(readBytes(path.join(env.configDir, "skills", "one", "x.md"))).toEqual(Buffer.from(SKILL_X_SEED, "utf8"));
+    expect(readBytes(path.join(env.configDir, "presets", "seeded.json"))).toEqual(Buffer.from('{"name":"seeded"}', "utf8"));
 
     expect(env.backup.list()).toHaveLength(1);
   });
