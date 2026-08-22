@@ -95,6 +95,12 @@ export function registerCommands(ctx: vscode.ExtensionContext, deps: ExtensionDe
     vscode.commands.registerCommand(CMD.deleteBackup, (arg?: unknown) =>
       run(deps, "删除备份失败", () => deleteBackup(deps, arg)),
     ),
+    vscode.commands.registerCommand(CMD.exportBackup, (arg?: unknown) =>
+      run(deps, "导出备份失败", () => exportBackup(deps, arg)),
+    ),
+    vscode.commands.registerCommand(CMD.importBackup, (arg?: unknown) =>
+      run(deps, "导入备份失败", () => importBackup(deps, arg)),
+    ),
     vscode.commands.registerCommand(CMD.addModel, (arg?: unknown) =>
       run(deps, "添加模型失败", () => addModel(deps, arg)),
     ),
@@ -727,8 +733,56 @@ const FRIENDLY_ERRORS: Record<string, string> = {
   INVALID_BACKUP_NAME: "备份名称不合法",
   BACKUP_NOT_FOUND: "备份不存在",
   BACKUP_PUBLISH_FAILED: "备份发布失败（manifest 缺失）",
+  BACKUP_IMPORT_INVALID: "备份压缩包无效或已损坏",
   CONFIG_UNREADABLE: "配置文件存在但无法读取（权限或被占用），已中止以防覆盖",
 };
+
+async function exportBackup(deps: ExtensionDeps, arg: unknown): Promise<void> {
+  // Programmatic form (e2e / scripts): { dirName, target } — distinct keys so a tree
+  // node ({kind,id,label,filePath}) can never be mistaken for it.
+  if (typeof arg === "object" && arg !== null && !Array.isArray(arg)) {
+    const o = arg as Record<string, unknown>;
+    if (typeof o.dirName === "string" && typeof o.target === "string") {
+      deps.backupService.exportZip(o.dirName, o.target);
+      deps.log(`已导出备份 ${o.dirName} → ${o.target}`);
+      return;
+    }
+  }
+  const entry = backupFromArg(deps, arg) ?? (await pickBackup(deps, "选择要导出的备份"));
+  if (!entry) {
+    return;
+  }
+  const target = await vscode.window.showSaveDialog({
+    defaultUri: vscode.Uri.file(`${entry.dirName}.zip`),
+    filters: { "Zip 压缩包": ["zip"] },
+  });
+  if (!target) {
+    return;
+  }
+  deps.backupService.exportZip(entry.dirName, target.fsPath);
+  void vscode.window.showInformationMessage(`已导出备份 ${entry.dirName} → ${target.fsPath}`);
+}
+
+async function importBackup(deps: ExtensionDeps, arg: unknown): Promise<void> {
+  let zipPath: string | undefined = typeof arg === "string" && arg.length > 0 ? arg : undefined;
+  if (!zipPath) {
+    const picked = await vscode.window.showOpenDialog({
+      canSelectMany: false,
+      openLabel: "导入",
+      title: "选择备份压缩包（zip）",
+      filters: { "Zip 压缩包": ["zip"] },
+    });
+    zipPath = picked?.[0]?.fsPath;
+  }
+  if (!zipPath) {
+    return;
+  }
+  const entry = deps.backupService.importZip(zipPath);
+  deps.refreshAll();
+  void vscode.window.showInformationMessage(
+    `已导入备份 ${entry.dirName}（${entry.manifest.fileCount} 个文件）`,
+  );
+}
 
 function errorMessage(error: unknown): string {
   const raw = error instanceof Error ? error.message : String(error);

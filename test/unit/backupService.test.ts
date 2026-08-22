@@ -7,6 +7,7 @@ import {
   DEFAULT_RETENTION,
   isoFs,
 } from "../../src/core/backupService";
+import { strToU8, zipSync } from "fflate";
 
 // All tests run against throwaway sandboxes — NEVER the real ~/.config/opencode.
 let configDir: string;
@@ -490,5 +491,156 @@ describe("BackupService staging + symlink handling", () => {
     const before = fs.readFileSync(path.join(configDir, "opencode.json"), "utf8");
     expect(() => svc.restore(entry.dirName)).toThrow();
     expect(fs.readFileSync(path.join(configDir, "opencode.json"), "utf8")).toBe(before);
+  });
+});
+
+describe("BackupService zip export/import", () => {
+  it("round-trips a backup through zip: files, manifest, empty dirs, CJK names", () => {
+    seedFullTree();
+    fs.mkdirSync(path.join(configDir, "command", "空目录"));
+    fs.writeFileSync(path.join(configDir, "command", "说明.md"), "# 说明");
+    const svc = new BackupService({ configDir, now: seqNow("2026-08-21T15:04:00.000Z") });
+    const entry = svc.create("manual", { name: "往返" });
+
+    const zipPath = path.join(configDir, "export.zip");
+    svc.exportZip(entry.dirName, zipPath);
+    expect(fs.statSync(zipPath).size).toBeGreaterThan(100);
+
+    const originalOpencode = fs.readFileSync(path.join(entry.dir, "opencode.json"), "utf8");
+    svc.remove(entry.dirName);
+    expect(fs.existsSync(entry.dir)).toBe(false);
+
+    const imported = svc.importZip(zipPath);
+    expect(imported.dirName).toBe(entry.dirName);
+    expect(imported.manifest.reason).toBe("manual");
+    expect(imported.manifest.name).toBe("往返");
+    expect(fs.readFileSync(path.join(imported.dir, "opencode.json"), "utf8")).toBe(originalOpencode);
+    expect(fs.readFileSync(path.join(imported.dir, "command", "说明.md"), "utf8")).toBe("# 说明");
+    expect(fs.statSync(path.join(imported.dir, "command", "空目录")).isDirectory()).toBe(true);
+  });
+
+  it("importing the same zip twice yields a suffixed copy and keeps both", () => {
+    seedFullTree();
+    const svc = new BackupService({ configDir, now: seqNow("2026-08-21T15:04:00.000Z") });
+    const entry = svc.create("manual");
+    const zipPath = path.join(configDir, "export.zip");
+    svc.exportZip(entry.dirName, zipPath);
+
+    const second = svc.importZip(zipPath);
+    expect(second.dirName).toBe(`${entry.dirName}-import-1`);
+    expect(svc.list().map((e) => e.dirName).sort()).toEqual([entry.dirName, second.dirName].sort());
+  });
+
+  it("rejects traversal entries and writes nothing", () => {
+    seedFullTree();
+    const svc = new BackupService({ configDir });
+    const backupsBefore = fs.existsSync(path.join(configDir, "backups"))
+      ? fs.readdirSync(path.join(configDir, "backups"))
+      : [];
+    for (const bad of ["../evil.txt", "a/../../evil.txt", "/abs.txt", "C:\\\\evil.txt", "a\\\\b.txt"]) {
+      const zipPath = path.join(configDir, `bad-${bad.length}.zip`);
+      fs.writeFileSync(
+        zipPath,
+        zipSync({
+          "manifest.json": strToU8(JSON.stringify({ version: 1, reason: "manual", createdAt: "2026-01-01T00:00:00.000Z", fileCount: 1, machine: "x" })),
+          [bad]: strToU8("x"),
+        }),
+      );
+      expect(() => svc.importZip(zipPath)).toThrow("BACKUP_IMPORT_INVALID");
+    }
+    const backupsAfter = fs.existsSync(path.join(configDir, "backups"))
+      ? fs.readdirSync(path.join(configDir, "backups"))
+      : [];
+    expect(backupsAfter.filter((n) => !n.endsWith(".zip"))).toEqual(backupsBefore);
+    expect(fs.existsSync(path.join(configDir, "evil.txt"))).toBe(false);
+  });
+
+  it("rejects zips without a valid version-1 manifest", () => {
+    seedFullTree();
+    const svc = new BackupService({ configDir });
+    const noManifest = path.join(configDir, "no-manifest.zip");
+    fs.writeFileSync(noManifest, zipSync({ "opencode.json": strToU8("{}") }));
+    expect(() => svc.importZip(noManifest)).toThrow("BACKUP_IMPORT_INVALID");
+
+    const badManifest = path.join(configDir, "bad-manifest.zip");
+    fs.writeFileSync(badManifest, zipSync({ "manifest.json": strToU8('{"version":2}') }));
+    expect(() => svc.importZip(badManifest)).toThrow("BACKUP_IMPORT_INVALID");
+
+    const notZip = path.join(configDir, "not-a-zip.zip");
+    fs.writeFileSync(notZip, "this is not a zip file");
+    expect(() => svc.importZip(notZip)).toThrow("BACKUP_IMPORT_INVALID");
+  });
+
+  it("a foreign manifest reason downgrades to manual", () => {
+    seedFullTree();
+    const svc = new BackupService({ configDir });
+    const zipPath = path.join(configDir, "foreign.zip");
+    fs.writeFileSync(
+      zipPath,
+      zipSync({
+        "manifest.json": strToU8(JSON.stringify({ version: 1, reason: "weird-reason", createdAt: "2026-01-01T00:00:00.000Z", fileCount: 1, machine: "x" })),
+        "opencode.json": strToU8("{}"),
+      }),
+    );
+    const imported = svc.importZip(zipPath);
+    expect(imported.dirName.endsWith("-manual")).toBe(true);
+  });
+
+  it("exportZip guards dirName and unknown backups", () => {
+    seedFullTree();
+    const svc = new BackupService({ configDir });
+    const zipPath = path.join(configDir, "x.zip");
+    expect(() => svc.exportZip("../escape", zipPath)).toThrow("INVALID_BACKUP_NAME");
+    expect(() => svc.exportZip("2026-01-01T00-00-00-000Z-manual", zipPath)).toThrow("BACKUP_NOT_FOUND");
+  });
+});
+
+describe("BackupService zip import hardening", () => {
+  const manifestEntry = {
+    "manifest.json": strToU8(
+      JSON.stringify({ version: 1, reason: "manual", createdAt: "2026-01-01T00:00:00.000Z", fileCount: 2, machine: "x" }),
+    ),
+  };
+
+  it("rejects a file/dir name collision with BACKUP_IMPORT_INVALID", () => {
+    seedFullTree();
+    const svc = new BackupService({ configDir });
+    const zipPath = path.join(configDir, "collision.zip");
+    fs.writeFileSync(zipPath, zipSync({ ...manifestEntry, a: strToU8("x"), "a/b": strToU8("y") }));
+    expect(() => svc.importZip(zipPath)).toThrow("BACKUP_IMPORT_INVALID");
+    expect(fs.readdirSync(path.join(configDir, "backups")).filter((n) => !n.endsWith(".zip"))).toEqual([]);
+  });
+
+  it("downgrades prototype-chain reasons (constructor) to manual", () => {
+    seedFullTree();
+    const svc = new BackupService({ configDir });
+    const zipPath = path.join(configDir, "ctor.zip");
+    fs.writeFileSync(
+      zipPath,
+      zipSync({
+        "manifest.json": strToU8(
+          JSON.stringify({ version: 1, reason: "constructor", createdAt: "2026-01-01T00:00:00.000Z", fileCount: 1, machine: "x" }),
+        ),
+        "opencode.json": strToU8("{}"),
+      }),
+    );
+    expect(svc.importZip(zipPath).dirName.endsWith("-manual")).toBe(true);
+  });
+
+  it("rejects archives exceeding the entry cap before materializing them", () => {
+    seedFullTree();
+    const svc = new BackupService({ configDir });
+    const many: Record<string, Uint8Array> = { ...manifestEntry };
+    for (let i = 0; i < 20_001; i += 1) {
+      many[`f${i}.txt`] = new Uint8Array(0);
+    }
+    const zipPath = path.join(configDir, "many.zip");
+    fs.writeFileSync(zipPath, zipSync(many));
+    expect(() => svc.importZip(zipPath)).toThrow("BACKUP_IMPORT_INVALID");
+    const backupsDir = path.join(configDir, "backups");
+    const residue = fs.existsSync(backupsDir)
+      ? fs.readdirSync(backupsDir).filter((n) => !n.endsWith(".zip"))
+      : [];
+    expect(residue).toEqual([]);
   });
 });

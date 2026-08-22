@@ -12,6 +12,7 @@ VSCode 扩展：管理 [opencode](https://opencode.ai) 与 [oh-my-opencode](http
 - **模板**（原「预设」）：从当前配置捕获；Webview 矩阵编辑器（批量设模型、逐行 variant）；应用采用合并语义（预设未列出的键不动）
 - **插件**：列出 opencode.json `plugin` 数组声明的插件（npm 包名可带 `@版本`，或 `~/` `./` `/` `file://` 本地路径）；npm 插件按 opencode 现行布局在运行时缓存 `~/.cache/opencode/packages/<包名>/node_modules/` 解析（兼容旧版平铺缓存），回退 `<配置目录>/node_modules/`；展示安装版本 / 未安装 / 本地路径 / 缺失状态；点击标题打开配置文件，展开浏览插件目录文件（自动排除嵌套 `node_modules` 与 `.git`），单击文件即可预览编辑
 - **备份**：手动「立即备份」会要求输入备份名称（名称仅用于展示，时间戳自动附带且不入名称）；历史备份可右键「重命名备份」；manifest 记录原因；与当前配置 diff 对比；恢复时明确警告覆盖（应用/恢复不再自动产生备份）
+  - **导入/导出**：备份可导出为 zip（跨平台纯 JS 实现，macOS/Linux/Windows 通用，条目名按 zip 规范用 `/`，含中文名时置 UTF-8 标志位）；导入时校验 manifest、防目录遍历/zip 炸弹（解压前按头部声明尺寸限流），同名已存在时自动加 `-import-N` 后缀
 - **状态栏**：显示当前预设，点击快速切换（`Ctrl+Alt+P`）
 - **Coding Plan 额度**（状态栏右侧）：实时显示 Kimi / GLM / MiMo / DeepSeek 剩余额度（5 小时窗口、周额度；MiMo 为月度额度+余额；DeepSeek 为按量计费余额）
   - Kimi / GLM / DeepSeek 自动读取 opencode 凭据（`~/.local/share/opencode/auth.json`），无需额外配置

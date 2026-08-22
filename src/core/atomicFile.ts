@@ -19,13 +19,13 @@ function sleepSync(ms: number): void {
  * so the rename retries with backoff before giving up; POSIX rename is atomic and unaffected.
  * The tmp file is removed on every failure path (write/fsync/rename).
  */
-export function writeFileAtomic(filePath: string, content: string, fsMod: AtomicFs = fs): void {
+export function writeFileAtomic(filePath: string, content: string | Uint8Array, fsMod: AtomicFs = fs): void {
   const dir = path.dirname(filePath);
   const tmpPath = path.join(dir, `.tmp-${process.pid}-${Math.random().toString(36).slice(2, 10)}`);
   try {
     const fd = fsMod.openSync(tmpPath, "w");
     try {
-      fsMod.writeFileSync(fd, content, "utf8");
+      fsMod.writeFileSync(fd, content, typeof content === "string" ? "utf8" : undefined);
       fsMod.fsyncSync(fd);
     } finally {
       fsMod.closeSync(fd);

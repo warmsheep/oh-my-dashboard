@@ -21,6 +21,8 @@ export const CMD = {
   restoreBackup: "opencode.restoreBackup",
   diffBackup: "opencode.diffBackup",
   deleteBackup: "opencode.deleteBackup",
+  exportBackup: "opencode.exportBackup",
+  importBackup: "opencode.importBackup",
   refreshTree: "opencode.refreshTree",
   addModel: "opencode.addModel",
   deleteModel: "opencode.deleteModel",

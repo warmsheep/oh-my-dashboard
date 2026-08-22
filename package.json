@@ -2,7 +2,7 @@
   "name": "opencode-config-manager",
   "displayName": "OpenCode 配置管理器",
   "description": "管理 opencode / oh-my-opencode 配置：结构化修改、备份、恢复、命名模板一键切换",
-  "version": "0.19.0",
+  "version": "0.20.0",
   "publisher": "local",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -110,6 +110,16 @@
         "category": "OpenCode"
       },
       {
+        "command": "opencode.exportBackup",
+        "title": "导出备份（zip）",
+        "category": "OpenCode"
+      },
+      {
+        "command": "opencode.importBackup",
+        "title": "导入备份（zip）…",
+        "category": "OpenCode"
+      },
+      {
         "command": "opencode.refreshTree",
         "title": "刷新",
         "category": "OpenCode",
@@ -190,6 +200,10 @@
           "when": "view == opencodeExplorer && viewItem == backup"
         },
         {
+          "command": "opencode.exportBackup",
+          "when": "view == opencodeExplorer && viewItem == backup"
+        },
+        {
           "command": "opencode.deleteBackup",
           "when": "view == opencodeExplorer && viewItem == backup"
         },
@@ -215,6 +229,11 @@
           "command": "opencode.backupNow",
           "when": "view == opencodeExplorer && viewItem == backupRoot",
           "group": "inline@1"
+        },
+        {
+          "command": "opencode.importBackup",
+          "when": "view == opencodeExplorer && viewItem == backupRoot",
+          "group": "inline@2"
         },
         {
           "command": "opencode.capturePreset",
@@ -261,6 +280,10 @@
         },
         {
           "command": "opencode.deleteBackup",
+          "when": "false"
+        },
+        {
+          "command": "opencode.exportBackup",
           "when": "false"
         },
         {
@@ -316,6 +339,7 @@
     "package": "npm run compile && npm run build:webview && node -e \"require('node:fs').cpSync('webview-ui/build','dist-webview',{recursive:true})\" && vsce package --no-dependencies --allow-missing-repository --out build/packages"
   },
   "dependencies": {
+    "fflate": "^0.8.3",
     "jsonc-parser": "^3.3.1"
   },
   "devDependencies": {

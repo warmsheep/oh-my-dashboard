@@ -1,9 +1,14 @@
 import * as os from "node:os";
 import * as path from "node:path";
 import * as defaultFs from "node:fs";
+import { strFromU8, unzipSync, zipSync } from "fflate";
 import { writeFileAtomic } from "./atomicFile";
 import { assertContainedFileName } from "./pathSafety";
 import type { BackupEntry, BackupManifest, BackupReason } from "./types";
+
+/** Zip import caps — a backup is a handful of config files; anything bigger is hostile. */
+const ZIP_MAX_ENTRIES = 20_000;
+const ZIP_MAX_TOTAL_BYTES = 256 * 1024 * 1024;
 
 export interface BackupServiceOptions {
   configDir: string;
@@ -36,6 +41,23 @@ const MANAGED_FILES = ["opencode.json", "oh-my-opencode.json", "AGENTS.md"] as c
 const MANAGED_DIRS = ["command", "skills", "presets"] as const;
 const MANIFEST_FILE = "manifest.json";
 const ALL_REASONS = Object.keys(DEFAULT_RETENTION) as BackupReason[];
+
+/**
+ * Zip entry names use "/" on every platform; reject anything that could escape the
+ * staging dir when joined (absolute, drive letters, backslashes, ".." segments, NUL).
+ */
+function assertZipEntryName(name: string): void {
+  const bad =
+    name.length === 0 ||
+    name.startsWith("/") ||
+    name.includes("\\") ||
+    name.includes("\0") ||
+    /^[A-Za-z]:/.test(name) ||
+    name.split("/").some((seg) => seg === "..");
+  if (bad) {
+    throw new Error("BACKUP_IMPORT_INVALID");
+  }
+}
 
 export function isoFs(d: Date): string {
   return d.toISOString().replace(/:/g, "-").replace(/\./g, "-");
@@ -212,6 +234,130 @@ export class BackupService {
       }
     }
     return pairs;
+  }
+
+  /**
+   * Export a backup as a zip (entry names use "/" per the zip spec — platform-neutral).
+   * Backups hold no symlinks (create/restore dereference); a foreign symlink placed by
+   * hand matches neither isDirectory nor isFile and is skipped, never followed.
+   */
+  exportZip(dirName: string, targetFile: string): void {
+    this.assertDirName(dirName);
+    if (!this.readEntry(dirName)) {
+      throw new Error("BACKUP_NOT_FOUND");
+    }
+    const srcDir = path.join(this.backupsDir, dirName);
+    const files: Record<string, Uint8Array> = {};
+    const walk = (dir: string, rel: string): void => {
+      for (const ent of this.fs.readdirSync(dir, { withFileTypes: true })) {
+        const childRel = rel ? `${rel}/${ent.name}` : ent.name;
+        if (ent.isDirectory()) {
+          files[`${childRel}/`] = new Uint8Array(0); // explicit entry keeps empty dirs
+          walk(path.join(dir, ent.name), childRel);
+        } else if (ent.isFile()) {
+          files[childRel] = new Uint8Array(this.fs.readFileSync(path.join(dir, ent.name)));
+        }
+      }
+    };
+    walk(srcDir, "");
+    writeFileAtomic(targetFile, zipSync(files, { level: 6 }), this.fs);
+  }
+
+  /**
+   * Import a backup zip into the backups dir (staging + rename publish, same as create()).
+   * Entries are validated against traversal and capped in count/size; the manifest must be
+   * a version-1 backup manifest, and the target dirName is rebuilt from it (foreign reasons
+   * downgrade to "manual"; name collisions get an -import-N suffix).
+   */
+  importZip(zipFile: string): BackupEntry {
+    // Cap the compressed file itself first — readFileSync of a multi-GB "zip" would OOM
+    // before any other check runs.
+    const zipSize = this.fs.statSync(zipFile).size;
+    if (zipSize > ZIP_MAX_TOTAL_BYTES) {
+      throw new Error("BACKUP_IMPORT_INVALID");
+    }
+    // fflate's filter runs BEFORE inflating each entry and carries the header's declared
+    // originalSize — enforcing caps here keeps a well-formed zip bomb from ever being
+    // decompressed into extension-host memory.
+    let entryCount = 0;
+    let totalBytes = 0;
+    let capsExceeded = false;
+    let entries: Record<string, Uint8Array>;
+    try {
+      entries = unzipSync(new Uint8Array(this.fs.readFileSync(zipFile)), {
+        filter: (file) => {
+          entryCount += 1;
+          totalBytes += file.originalSize;
+          if (entryCount > ZIP_MAX_ENTRIES || totalBytes > ZIP_MAX_TOTAL_BYTES) {
+            capsExceeded = true;
+            return false;
+          }
+          return true;
+        },
+      });
+    } catch {
+      throw new Error("BACKUP_IMPORT_INVALID");
+    }
+    if (capsExceeded) {
+      throw new Error("BACKUP_IMPORT_INVALID");
+    }
+    for (const name of Object.keys(entries)) {
+      assertZipEntryName(name);
+    }
+    let manifest: BackupManifest;
+    try {
+      manifest = JSON.parse(strFromU8(entries[MANIFEST_FILE]!)) as BackupManifest;
+    } catch {
+      throw new Error("BACKUP_IMPORT_INVALID");
+    }
+    if (manifest.version !== 1 || typeof manifest.reason !== "string") {
+      throw new Error("BACKUP_IMPORT_INVALID");
+    }
+    // `in` walks the prototype chain ("constructor" would pass) — own-property only.
+    const reason: BackupReason = Object.hasOwn(DEFAULT_RETENTION, manifest.reason)
+      ? (manifest.reason as BackupReason)
+      : "manual";
+    let createdAt = new Date(manifest.createdAt);
+    if (Number.isNaN(createdAt.getTime())) {
+      createdAt = this.now();
+    }
+    const baseDirName = `${isoFs(createdAt)}-${reason}`;
+    let dirName = baseDirName;
+    for (let n = 1; this.fs.existsSync(path.join(this.backupsDir, dirName)); n += 1) {
+      dirName = `${baseDirName}-import-${n}`;
+    }
+
+    const staging = path.join(this.backupsDir, `.tmp-import-${process.pid}-${Math.random().toString(36).slice(2, 10)}`);
+    this.sweepStaging();
+    this.fs.mkdirSync(staging, { recursive: true });
+    try {
+      for (const name of Object.keys(entries)) {
+        const content = entries[name]!;
+        if (name.endsWith("/")) {
+          this.fs.mkdirSync(path.join(staging, ...name.split("/")), { recursive: true });
+          continue;
+        }
+        const target = path.join(staging, ...name.split("/"));
+        this.fs.mkdirSync(path.dirname(target), { recursive: true });
+        this.fs.writeFileSync(target, content);
+      }
+      this.fs.renameSync(staging, path.join(this.backupsDir, dirName));
+    } catch (error) {
+      this.fs.rmSync(staging, { recursive: true, force: true });
+      // Structural conflicts in a hostile zip (file `a` + `a/b`, dir `a/` + file `a`,
+      // Windows-illegal names) throw EEXIST/ENOTDIR/EISDIR — those mean "bad archive",
+      // while ENOSPC/EACCES are real disk problems worth surfacing as-is.
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "EEXIST" || code === "ENOTDIR" || code === "EISDIR") {
+        throw new Error("BACKUP_IMPORT_INVALID");
+      }
+      throw error;
+    }
+    const entry = this.readEntry(dirName);
+    if (!entry) {
+      throw new Error("BACKUP_IMPORT_INVALID");
+    }
+    return entry;
   }
 
   prune(reason?: BackupReason): BackupEntry[] {

@@ -325,6 +325,37 @@ function tests(): TestCase[] {
         assertNoJsoncErrors(path.join(configDir, "oh-my-opencode.json"));
       },
     },
+    {
+      name: "exportBackup → importBackup zip round-trip (programmatic args)",
+      fn: async () => {
+        assert.ok(manualBackupDirName, "requires a manual backup from the previous step");
+        const zipPath = path.join(os.tmpdir(), `ocm-e2e-${Date.now()}.zip`);
+        await vscode.commands.executeCommand(CMD.exportBackup, {
+          dirName: manualBackupDirName,
+          target: zipPath,
+        });
+        assert.ok(fs.existsSync(zipPath), "exported zip must exist");
+
+        await vscode.commands.executeCommand(CMD.importBackup, zipPath);
+        const backupsDir = path.join(configDir, "backups");
+        const imported = fs
+          .readdirSync(backupsDir, { withFileTypes: true })
+          .filter((entry) => entry.isDirectory() && entry.name.includes("-import-"))
+          .map((entry) => entry.name);
+        assert.equal(imported.length, 1, `expected one -import- copy, found: ${imported.join(", ")}`);
+
+        const original = fs.readFileSync(
+          path.join(backupsDir, manualBackupDirName, "opencode.json"),
+        );
+        const copy = fs.readFileSync(path.join(backupsDir, imported[0], "opencode.json"));
+        assert.ok(original.equals(copy), "imported backup content must match the original");
+        assert.ok(
+          fs.existsSync(path.join(backupsDir, imported[0], "manifest.json")),
+          "imported backup must carry manifest.json",
+        );
+        fs.rmSync(zipPath, { force: true });
+      },
+    },
   ];
 }
 
