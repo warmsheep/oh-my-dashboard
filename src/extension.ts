@@ -108,8 +108,10 @@ export function activate(ctx: vscode.ExtensionContext): void {
 
   registerCommands(ctx, { configStore, backupService, presetService, refreshAll, log });
 
+  const MANAGED_SUBDIRS = ["presets", "backups", "command", "skills"] as const;
   let watchTimer: NodeJS.Timeout | undefined;
   const onWatchEvent = (): void => {
+    armSubdirWatchers();
     if (watchTimer !== undefined) {
       clearTimeout(watchTimer);
     }
@@ -118,31 +120,57 @@ export function activate(ctx: vscode.ExtensionContext): void {
       refreshAll();
     }, 300);
   };
-  const watchers: fs.FSWatcher[] = [];
-  try {
-    watchers.push(fs.watch(configStore.configDir, { recursive: true }, onWatchEvent));
-    // The omo config lives outside the opencode config dir — watch it too (flat: only omo.jsonc matters).
-    const agentConfigDir = path.dirname(discovered.agentConfig.path);
-    if (agentConfigDir !== configStore.configDir && fs.existsSync(agentConfigDir)) {
-      watchers.push(fs.watch(agentConfigDir, onWatchEvent));
+
+  const watchers = new Set<fs.FSWatcher>();
+  const watchedDirs = new Set<string>();
+  const addWatch = (target: string, opts: fs.WatchOptions): void => {
+    if (watchedDirs.has(target)) {
+      return;
     }
-    ctx.subscriptions.push({
-      dispose: () => {
-        if (watchTimer !== undefined) {
-          clearTimeout(watchTimer);
-        }
-        for (const watcher of watchers) {
-          watcher.close();
-        }
-      },
-    });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    log(`fs.watch(${configStore.configDir}) 失败，将依赖手动刷新: ${message}`);
+    try {
+      watchers.add(fs.watch(target, opts, onWatchEvent));
+      watchedDirs.add(target);
+    } catch (error) {
+      log(`fs.watch(${target}) 失败: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  };
+
+  // configDir must stay flat: it hosts node_modules (~20k files) that are irrelevant to the
+  // extension — a recursive watch there costs seconds of inotify setup and blocks activation.
+  // Only the managed subdirs are watched recursively (a few dozen files).
+  const armSubdirWatchers = (): void => {
+    for (const name of MANAGED_SUBDIRS) {
+      const dir = path.join(configStore.configDir, name);
+      if (fs.existsSync(dir)) {
+        addWatch(dir, { recursive: true });
+      }
+    }
+  };
+  armSubdirWatchers();
+  addWatch(configStore.configDir, { recursive: false });
+  // The omo config lives outside the opencode config dir — watch it too (flat).
+  const agentConfigDir = path.dirname(discovered.agentConfig.path);
+  if (agentConfigDir !== configStore.configDir) {
+    addWatch(agentConfigDir, { recursive: false });
+  }
+
+  if (watchers.size === 0) {
+    const message = "所有文件监视器创建失败";
+    log(`fs.watch 失败，将依赖手动刷新: ${message}`);
     void vscode.window.showWarningMessage(
       `无法监视配置目录变更（${message}），请使用「OpenCode: 刷新」手动刷新`,
     );
   }
+  ctx.subscriptions.push({
+    dispose: () => {
+      if (watchTimer !== undefined) {
+        clearTimeout(watchTimer);
+      }
+      for (const watcher of watchers) {
+        watcher.close();
+      }
+    },
+  });
 }
 
 export function deactivate(): void {}
