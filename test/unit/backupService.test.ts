@@ -170,6 +170,70 @@ describe("BackupService named backups", () => {
   });
 });
 
+describe("BackupService extraDirs (user-level skills outside configDir)", () => {
+  let extraRoot: string;
+
+  beforeEach(() => {
+    extraRoot = fs.mkdtempSync(path.join(os.tmpdir(), "extra-"));
+  });
+
+  afterEach(() => {
+    fs.rmSync(extraRoot, { recursive: true, force: true });
+  });
+
+  it("create() snapshots each existing extra dir under its label and counts its files", () => {
+    seedFullTree();
+    const userSkills = path.join(extraRoot, ".agents", "skills");
+    fs.mkdirSync(path.join(userSkills, "pdf"), { recursive: true });
+    fs.writeFileSync(path.join(userSkills, "pdf", "SKILL.md"), "# pdf");
+    fs.writeFileSync(path.join(userSkills, "top.md"), "top");
+    const svc = new BackupService({
+      configDir,
+      hostname: "h",
+      now: () => new Date("2026-08-22T10:00:00.000Z"),
+      extraDirs: [{ label: "skills-user", src: userSkills }],
+    });
+
+    const entry = svc.create("manual");
+
+    expect(fs.readFileSync(path.join(entry.dir, "skills-user", "pdf", "SKILL.md"), "utf8")).toBe("# pdf");
+    expect(fs.readFileSync(path.join(entry.dir, "skills-user", "top.md"), "utf8")).toBe("top");
+    expect(entry.manifest.fileCount).toBe(7 + 2);
+  });
+
+  it("create() skips extra dirs that do not exist", () => {
+    fs.writeFileSync(path.join(configDir, "opencode.json"), "{}");
+    const svc = new BackupService({
+      configDir,
+      now: () => new Date("2026-08-22T10:00:00.000Z"),
+      extraDirs: [{ label: "skills-user", src: path.join(extraRoot, "missing", "skills") }],
+    });
+
+    const entry = svc.create("manual");
+
+    expect(entry.manifest.fileCount).toBe(1);
+    expect(fs.existsSync(path.join(entry.dir, "skills-user"))).toBe(false);
+  });
+
+  it("restore() copies extra dirs back to their absolute src, recreating missing parents", () => {
+    seedFullTree();
+    const userSkills = path.join(extraRoot, ".agents", "skills");
+    fs.mkdirSync(path.join(userSkills, "pdf"), { recursive: true });
+    fs.writeFileSync(path.join(userSkills, "pdf", "SKILL.md"), "# pdf");
+    const svc = new BackupService({
+      configDir,
+      now: seqNow("2026-08-22T10:00:00.000Z"),
+      extraDirs: [{ label: "skills-user", src: userSkills }],
+    });
+    const snap = svc.create("manual");
+
+    fs.rmSync(path.join(extraRoot, ".agents"), { recursive: true, force: true });
+    svc.restore(snap.dirName);
+
+    expect(fs.readFileSync(path.join(userSkills, "pdf", "SKILL.md"), "utf8")).toBe("# pdf");
+  });
+});
+
 describe("BackupService.list / remove", () => {
   it("lists sorted by dirName DESC (newest first) and remove() deletes the dir", () => {
     seedFullTree();

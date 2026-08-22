@@ -14,6 +14,13 @@ export interface BackupServiceOptions {
    * opencode.json + ~/.omo/omo.jsonc). Defaults to the legacy configDir-relative trio.
    */
   managedFiles?: readonly string[];
+  /**
+   * Extra absolute directories outside configDir to snapshot and restore (e.g. the
+   * user-level ~/.agents/skills dir). Each existing src is copied into the backup under
+   * label and restored back to the absolute src. Project-level skills are intentionally
+   * NOT passed here — they live in the user's repo.
+   */
+  extraDirs?: readonly { label: string; src: string }[];
 }
 
 export const DEFAULT_RETENTION: Record<BackupReason, number | null> = {
@@ -40,6 +47,7 @@ export class BackupService {
   private readonly fs: typeof import("node:fs");
   private readonly retention: Record<BackupReason, number | null>;
   private readonly managedFiles: readonly { label: string; src: string }[];
+  private readonly extraDirs: readonly { label: string; src: string }[];
 
   constructor(opts: BackupServiceOptions) {
     this.configDir = opts.configDir;
@@ -51,6 +59,7 @@ export class BackupService {
     this.managedFiles = opts.managedFiles
       ? opts.managedFiles.map((src) => ({ label: path.basename(src), src }))
       : MANAGED_FILES.map((name) => ({ label: name, src: path.join(opts.configDir, name) }));
+    this.extraDirs = opts.extraDirs ?? [];
   }
 
   create(reason: BackupReason, meta?: { preset?: string; name?: string }): BackupEntry {
@@ -70,6 +79,16 @@ export class BackupService {
       const src = path.join(this.configDir, name);
       if (!this.fs.existsSync(src)) continue;
       const dest = path.join(dir, name);
+      if (this.fs.statSync(src).isDirectory()) {
+        this.fs.cpSync(src, dest, { recursive: true });
+      } else {
+        this.fs.copyFileSync(src, dest);
+      }
+      fileCount += this.countFiles(dest);
+    }
+    for (const { label, src } of this.extraDirs) {
+      if (!this.fs.existsSync(src)) continue;
+      const dest = path.join(dir, label);
       if (this.fs.statSync(src).isDirectory()) {
         this.fs.cpSync(src, dest, { recursive: true });
       } else {
@@ -132,6 +151,13 @@ export class BackupService {
       const src = path.join(srcDir, name);
       if (this.fs.existsSync(src)) {
         this.fs.cpSync(src, path.join(this.configDir, name), { recursive: true });
+      }
+    }
+    for (const { label, src } of this.extraDirs) {
+      const backup = path.join(srcDir, label);
+      if (this.fs.existsSync(backup)) {
+        this.fs.mkdirSync(path.dirname(src), { recursive: true });
+        this.fs.cpSync(backup, src, { recursive: true });
       }
     }
   }

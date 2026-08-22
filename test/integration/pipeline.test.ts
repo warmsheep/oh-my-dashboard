@@ -276,4 +276,34 @@ describe("integration: core pipeline (capture → mutate → apply → backup �
     backup.restore(manual.dirName);
     expect(fs.readFileSync(omoPath, "utf8")).toBe(appliedText);
   });
+
+  it("scenario F: home-level skills (~/.agents/skills) round-trip via extraDirs, project skills untouched", () => {
+    const env = makeEnv({ now: seqNow("2026-08-22T12:00:00.000Z") });
+    const userSkillsDir = env.store.userSkillsDir;
+    expect(userSkillsDir).toBe(path.join(env.homeDir, ".agents", "skills"));
+    fs.mkdirSync(path.join(userSkillsDir, "pdf"), { recursive: true });
+    fs.writeFileSync(path.join(userSkillsDir, "pdf", "SKILL.md"), "# user pdf skill\n");
+    const discovered = env.store.discover();
+    const userLocation = discovered.skillLocations.find((l) => l.dir === userSkillsDir);
+    expect(userLocation?.scope).toBe("global");
+    expect(userLocation?.label).toBe("~/.agents/skills");
+    expect(userLocation?.skillNames).toEqual(["pdf"]);
+
+    // Mirrors the extension.ts wiring: user skills ride along via extraDirs.
+    const backup = new BackupService({
+      configDir: env.configDir,
+      hostname: "pipeline-test-host",
+      now: seqNow("2026-08-22T12:30:00.000Z"),
+      extraDirs: [{ label: "skills-user", src: userSkillsDir }],
+    });
+    const snap = backup.create("manual");
+    expect(fs.readFileSync(path.join(snap.dir, "skills-user", "pdf", "SKILL.md"), "utf8")).toBe("# user pdf skill\n");
+
+    fs.writeFileSync(path.join(userSkillsDir, "pdf", "SKILL.md"), "# vandalized\n");
+    fs.rmSync(path.join(env.configDir, "skills", "one", "x.md"));
+
+    backup.restore(snap.dirName);
+    expect(fs.readFileSync(path.join(userSkillsDir, "pdf", "SKILL.md"), "utf8")).toBe("# user pdf skill\n");
+    expect(readBytes(path.join(env.configDir, "skills", "one", "x.md"))).toEqual(Buffer.from(SKILL_X_SEED, "utf8"));
+  });
 });
