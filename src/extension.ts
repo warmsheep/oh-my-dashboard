@@ -6,7 +6,7 @@ import { ConfigStore } from "./core/configStore";
 import { QuotaService } from "./core/quotaService";
 import { validate } from "./core/jsoncEditor";
 import { PresetService } from "./core/presetService";
-import type { BackupEntry, DiscoveredConfig, JsoncError, ModelEntry, ModelSetting, Preset } from "./core/types";
+import type { BackupEntry, DiscoveredConfig, JsoncError, ModelEntry, ModelSetting, PluginEntry, Preset } from "./core/types";
 import { CONFIG_KEY, CONFIG_SECTION, OUTPUT_CHANNEL_NAME, VIEW } from "./constants";
 import { ConfigTreeDataProvider } from "./tree/provider";
 import { registerCommands } from "./ui/commands";
@@ -22,6 +22,7 @@ interface TreeDataSnapshot {
   parseErrors: Map<string, JsoncError[]>;
   assignments: { agents: Record<string, ModelSetting>; categories: Record<string, ModelSetting> };
   models: ModelEntry[];
+  plugins: PluginEntry[];
 }
 
 export function activate(ctx: vscode.ExtensionContext): void {
@@ -64,6 +65,8 @@ export function activate(ctx: vscode.ExtensionContext): void {
       discovered.agentConfig.path,
       path.join(discovered.configDir, "AGENTS.md"),
     ],
+    // User-level skills live outside configDir; project skills are excluded (they live in the user's repo).
+    extraDirs: [{ label: "skills-user", src: configStore.userSkillsDir }],
   });
   const presetService = new PresetService({
     presetsDir: discovered.presetsDir,
@@ -80,6 +83,7 @@ export function activate(ctx: vscode.ExtensionContext): void {
       backups: backupService.list(),
       assignments: configStore.ohMyAssignments(),
       models: configStore.listModelEntries(),
+      plugins: configStore.listPlugins(),
     };
   };
 
@@ -119,6 +123,10 @@ export function activate(ctx: vscode.ExtensionContext): void {
     "AGENTS.md",
     "models.json",
     "quota.json",
+    // lockfile churn in configDir = npm/bun install touched the plugin set
+    "package.json",
+    "package-lock.json",
+    "bun.lock",
   ]);
   const OMO_BASENAMES = new Set(["omo.jsonc", "omo.json"]);
 
@@ -202,6 +210,23 @@ export function activate(ctx: vscode.ExtensionContext): void {
   const agentConfigDir = path.dirname(discovered.agentConfig.path);
   if (agentConfigDir !== configStore.configDir) {
     addWatch(agentConfigDir, { recursive: false }, makeFlatHandler(agentConfigDir, OMO_BASENAMES));
+  }
+  // The opencode runtime bun-installs npm plugins into its cache; lockfile writes there signal
+  // plugin installs/uninstalls (the node_modules tree itself must stay unwatched).
+  const pluginCacheDir = configStore.pluginCacheDir;
+  if (pluginCacheDir !== configStore.configDir) {
+    addWatch(
+      pluginCacheDir,
+      { recursive: false },
+      makeFlatHandler(pluginCacheDir, new Set(["package.json", "bun.lock", "bun.lockb"])),
+    );
+  }
+  // Home-level skills dirs (~/.agents, ~/.claude, …) live outside configDir; watch each
+  // discovered one recursively (a few dozen files each) so skill edits refresh the tree.
+  for (const location of discovered.skillLocations) {
+    if (location.scope === "global" && location.dir !== path.join(configStore.configDir, "skills")) {
+      addWatch(location.dir, { recursive: true }, subdirHandler);
+    }
   }
 
   if (watchers.size === 0) {
