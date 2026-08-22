@@ -38,6 +38,7 @@ npm run package                                   # 编译+webview构建+同步d
 - 管理对象：`~/.config/opencode/` 下 `opencode.json`（或 `opencode.jsonc`）、`AGENTS.md`、`command/`、`skills/`；预设存 `presets/*.json`；备份存 `backups/<ISO时间戳>-manual/`（只有手动备份，无自动备份）。
 - agent/category 配置目标**不固定**：`ConfigStore.resolveAgentConfig()` 按 `~/.omo/omo.jsonc` → `~/.omo/omo.json` → `oh-my-opencode.jsonc` → `oh-my-opencode.json` → `oh-my-openagent.jsonc` → `oh-my-openagent.json` 顺序检测（与 oh-my-openagent 运行时同序）；都不存在时按 `~/.omo` 目录或 opencode.json 的 plugin 条目决定创建目标。omo 目标写 `[opencode]` 块内的 `reasoning` 键，legacy 目标写顶层 `variant` 键；应用时会清掉被改条目的冲突键（`variant`/`reasoning`/`models` 链）。
 - 模型清单：内置清单在 `src/core/builtinModels.ts`，首次使用 seed 到 `~/.config/opencode/models.json`（可手编、损坏自愈重建）。清单来源是 models.dev（opencode 官方目录）— 更新模型时以其 provider/model id 为准。
+- Coding Plan 额度：`src/core/quotaService.ts` 从 `~/.local/share/opencode/auth.json` 读 Kimi/GLM 凭据查官方接口（Kimi `api.kimi.com/coding/v1/usages`，GLM `open.bigmodel.cn/api/monitor/usage/quota/limit`，GLM unit 枚举 1=天/3=时/6=周）；MiMo 走 `platform.xiaomimimo.com` Dashboard Cookie（存 `<configDir>/quota.json`，只有月度窗口，无 5h/周）。e2e 通过 `XDG_DATA_HOME` 隔离避免真实网络请求。
 - 备份保留：手动备份永不清理；`DEFAULT_RETENTION` 里的 pre-* 规则仅为兼容旧版本残留备份。
 
 ## Git 约定
