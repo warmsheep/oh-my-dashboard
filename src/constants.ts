@@ -17,6 +17,7 @@ export const CMD = {
   exportPreset: "opencode.exportPreset",
   showPresetQuickPick: "opencode.showPresetQuickPick",
   backupNow: "opencode.backupNow",
+  renameBackup: "opencode.renameBackup",
   restoreBackup: "opencode.restoreBackup",
   diffBackup: "opencode.diffBackup",
   deleteBackup: "opencode.deleteBackup",

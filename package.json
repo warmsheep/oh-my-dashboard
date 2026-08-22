@@ -1,8 +1,8 @@
 {
   "name": "opencode-config-manager",
   "displayName": "OpenCode 配置管理器",
-  "description": "管理 opencode / oh-my-opencode 配置：结构化修改、备份、恢复、命名预设一键切换",
-  "version": "0.14.1",
+  "description": "管理 opencode / oh-my-opencode 配置：结构化修改、备份、恢复、命名模板一键切换",
+  "version": "0.15.0",
   "publisher": "local",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -37,12 +37,12 @@
     "commands": [
       {
         "command": "opencode.openConfigFile",
-        "title": "打开配置文件",
+        "title": "打开配置",
         "category": "OpenCode"
       },
       {
         "command": "opencode.createConfig",
-        "title": "创建缺失的配置文件",
+        "title": "创建缺失的配置",
         "category": "OpenCode"
       },
       {
@@ -52,40 +52,40 @@
       },
       {
         "command": "opencode.capturePreset",
-        "title": "从当前配置捕获预设",
+        "title": "从当前配置捕获模板",
         "category": "OpenCode",
         "icon": "$(add)"
       },
       {
         "command": "opencode.applyPreset",
-        "title": "应用预设",
+        "title": "应用模板",
         "category": "OpenCode",
         "icon": "$(play)"
       },
       {
         "command": "opencode.editPreset",
-        "title": "编辑预设（矩阵表单）",
+        "title": "编辑模板（矩阵表单）",
         "category": "OpenCode",
         "icon": "$(edit)"
       },
       {
         "command": "opencode.renamePreset",
-        "title": "重命名预设",
+        "title": "重命名模板",
         "category": "OpenCode"
       },
       {
         "command": "opencode.deletePreset",
-        "title": "删除预设",
+        "title": "删除模板",
         "category": "OpenCode"
       },
       {
         "command": "opencode.exportPreset",
-        "title": "导出预设到文件",
+        "title": "导出模板到文件",
         "category": "OpenCode"
       },
       {
         "command": "opencode.showPresetQuickPick",
-        "title": "切换预设…",
+        "title": "切换模板…",
         "category": "OpenCode"
       },
       {
@@ -139,6 +139,10 @@
       {
         "command": "opencode.quotaConfigureMimo",
         "title": "Coding Plan 额度：配置 MiMo Cookie"
+      },
+      {
+        "command": "opencode.renameBackup",
+        "title": "重命名备份"
       }
     ],
     "menus": {
@@ -175,6 +179,11 @@
         {
           "command": "opencode.restoreBackup",
           "when": "view == opencodeExplorer && viewItem == backup"
+        },
+        {
+          "command": "opencode.renameBackup",
+          "when": "view == opencodeExplorer && viewItem == backup",
+          "group": "-"
         },
         {
           "command": "opencode.diffBackup",
@@ -264,6 +273,10 @@
         },
         {
           "command": "opencode.openModelsFile",
+          "when": "false"
+        },
+        {
+          "command": "opencode.renameBackup",
           "when": "false"
         }
       ]
