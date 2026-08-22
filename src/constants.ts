@@ -24,19 +24,19 @@ export const CMD = {
   addModel: "opencode.addModel",
   deleteModel: "opencode.deleteModel",
   openModelsFile: "opencode.openModelsFile",
+  quotaRefresh: "opencode.quotaRefresh",
+  quotaConfigureMimo: "opencode.quotaConfigureMimo",
 } as const;
 
 export const VIEW = {
-  configFiles: "opencodeConfigFiles",
-  presets: "opencodePresets",
-  backups: "opencodeBackups",
-  models: "opencodeModels",
+  explorer: "opencodeExplorer",
 } as const;
 
 export const CONFIG_SECTION = "opencodeConfigManager";
 
 export const CONFIG_KEY = {
   configDirOverride: "opencodeConfigManager.configDirOverride",
+  quotaRefreshSeconds: "opencodeConfigManager.quota.refreshSeconds",
 } as const;
 
 export const PRESET_EDITOR_VIEW_TYPE = "opencode.presetEditor";

@@ -2,7 +2,7 @@
   "name": "opencode-config-manager",
   "displayName": "OpenCode 配置管理器",
   "description": "管理 opencode / oh-my-opencode 配置：结构化修改、备份、恢复、命名预设一键切换",
-  "version": "0.7.2",
+  "version": "0.14.1",
   "publisher": "local",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -12,7 +12,9 @@
   "categories": [
     "Other"
   ],
-  "activationEvents": [],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
   "main": "./dist/extension.js",
   "contributes": {
     "viewsContainers": {
@@ -27,20 +29,8 @@
     "views": {
       "opencodeConfig": [
         {
-          "id": "opencodeModels",
-          "name": "模型"
-        },
-        {
-          "id": "opencodeConfigFiles",
-          "name": "配置文件"
-        },
-        {
-          "id": "opencodePresets",
-          "name": "预设"
-        },
-        {
-          "id": "opencodeBackups",
-          "name": "备份"
+          "id": "opencodeExplorer",
+          "name": "OpenCode 配置"
         }
       ]
     },
@@ -141,78 +131,86 @@
         "title": "打开模型清单文件",
         "category": "OpenCode",
         "icon": "$(go-to-file)"
+      },
+      {
+        "command": "opencode.quotaRefresh",
+        "title": "Coding Plan 额度：刷新并查看详情"
+      },
+      {
+        "command": "opencode.quotaConfigureMimo",
+        "title": "Coding Plan 额度：配置 MiMo Cookie"
       }
     ],
     "menus": {
       "view/title": [
         {
           "command": "opencode.refreshTree",
-          "when": "view =~ /opencodeConfigFiles|opencodePresets|opencodeBackups/",
+          "when": "view == opencodeExplorer",
           "group": "navigation@99"
-        },
-        {
-          "command": "opencode.capturePreset",
-          "when": "view == opencodePresets",
-          "group": "navigation@1"
-        },
-        {
-          "command": "opencode.backupNow",
-          "when": "view == opencodeBackups",
-          "group": "navigation@1"
-        },
-        {
-          "command": "opencode.addModel",
-          "when": "view == opencodeModels",
-          "group": "navigation@1"
-        },
-        {
-          "command": "opencode.openModelsFile",
-          "when": "view == opencodeModels",
-          "group": "navigation@2"
         }
       ],
       "view/item/context": [
         {
           "command": "opencode.applyPreset",
-          "when": "view == opencodePresets && viewItem == preset",
+          "when": "view == opencodeExplorer && viewItem == preset",
           "group": "inline@1"
         },
         {
           "command": "opencode.editPreset",
-          "when": "view == opencodePresets && viewItem == preset",
+          "when": "view == opencodeExplorer && viewItem == preset",
           "group": "inline@2"
         },
         {
           "command": "opencode.renamePreset",
-          "when": "view == opencodePresets && viewItem == preset"
+          "when": "view == opencodeExplorer && viewItem == preset"
         },
         {
           "command": "opencode.deletePreset",
-          "when": "view == opencodePresets && viewItem == preset"
+          "when": "view == opencodeExplorer && viewItem == preset"
         },
         {
           "command": "opencode.exportPreset",
-          "when": "view == opencodePresets && viewItem == preset"
+          "when": "view == opencodeExplorer && viewItem == preset"
         },
         {
           "command": "opencode.restoreBackup",
-          "when": "view == opencodeBackups && viewItem == backup"
+          "when": "view == opencodeExplorer && viewItem == backup"
         },
         {
           "command": "opencode.diffBackup",
-          "when": "view == opencodeBackups && viewItem == backup"
+          "when": "view == opencodeExplorer && viewItem == backup"
         },
         {
           "command": "opencode.deleteBackup",
-          "when": "view == opencodeBackups && viewItem == backup"
+          "when": "view == opencodeExplorer && viewItem == backup"
         },
         {
           "command": "opencode.setAgentModel",
-          "when": "view == opencodeConfigFiles && viewItem =~ /agent|category/"
+          "when": "view == opencodeExplorer && viewItem =~ /agent|category/"
         },
         {
           "command": "opencode.deleteModel",
-          "when": "view == opencodeModels && viewItem == modelLocal"
+          "when": "view == opencodeExplorer && viewItem == modelLocal"
+        },
+        {
+          "command": "opencode.openModelsFile",
+          "when": "view == opencodeExplorer && viewItem == modelRoot",
+          "group": "inline@2"
+        },
+        {
+          "command": "opencode.addModel",
+          "when": "view == opencodeExplorer && viewItem == modelRoot",
+          "group": "inline@1"
+        },
+        {
+          "command": "opencode.backupNow",
+          "when": "view == opencodeExplorer && viewItem == backupRoot",
+          "group": "inline@1"
+        },
+        {
+          "command": "opencode.capturePreset",
+          "when": "view == opencodeExplorer && viewItem == presetRoot",
+          "group": "inline@1"
         }
       ],
       "commandPalette": [
@@ -284,6 +282,12 @@
           "type": "string",
           "title": "配置目录覆盖",
           "description": "配置目录覆盖（默认自动发现 ~/.config/opencode，尊重 XDG_CONFIG_HOME）"
+        },
+        "opencodeConfigManager.quota.refreshSeconds": {
+          "type": "number",
+          "default": 30,
+          "minimum": 0,
+          "description": "状态栏 Coding Plan 额度自动刷新间隔（秒，0 = 关闭自动刷新）"
         }
       }
     }
