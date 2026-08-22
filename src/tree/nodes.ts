@@ -1,5 +1,5 @@
 import * as path from "node:path";
-import type { BackupEntry, DirEntry, DiscoveredConfig, JsoncError, ModelEntry, ModelSetting, Preset } from "../core/types";
+import type { BackupEntry, DirEntry, DiscoveredConfig, JsoncError, ModelEntry, ModelSetting, PluginEntry, Preset } from "../core/types";
 
 export type NodeKind =
   | "configRoot"
@@ -17,6 +17,8 @@ export type NodeKind =
   | "modelProvider"
   | "model"
   | "modelAddAction"
+  | "pluginRoot"
+  | "plugin"
   | "dirEntry"
   | "fileEntry"
   | "guide"
@@ -182,19 +184,65 @@ function dirEntryNodes(entries: DirEntry[]): BaseNode[] {
 }
 
 function dirSummaryNodes(d: DiscoveredConfig): BaseNode[] {
-  const roots: { id: string; label: string; dir: string; tree: DirEntry[] }[] = [
+  const roots: { id: string; label: string; description?: string; dir: string; tree: DirEntry[] }[] = [
     { id: "dir:command", label: `command/ (${d.commandFiles.length})`, dir: d.commandDir, tree: d.commandTree },
-    { id: "dir:skills", label: `skills/ (${d.skillNames.length})`, dir: d.skillsDir, tree: d.skillsTree },
+    ...d.skillLocations.map((loc) => ({
+      id: `dir:skills:${loc.dir}`,
+      label: loc.label,
+      description: `${loc.scope === "global" ? "全局" : "项目"} ${loc.skillNames.length}`,
+      dir: loc.dir,
+      tree: loc.tree,
+    })),
   ];
   return roots.map((root) => ({
     kind: "dirSummary" as const,
     id: root.id,
     label: root.label,
+    description: root.description,
     tooltip: root.dir,
     contextValue: "dirSummary",
     collapsibleState: root.tree.length > 0 ? ("collapsed" as const) : ("none" as const),
     children: dirEntryNodes(root.tree),
+    command: "opencode.openConfigFile",
+    filePath: root.dir,
   }));
+}
+
+function pluginDescription(entry: PluginEntry): string {
+  if (entry.kind === "npm") {
+    if (!entry.installed) return "未安装";
+    return entry.version ?? "已安装";
+  }
+  return entry.installed ? "本地路径" : "缺失";
+}
+
+function pluginNodes(plugins: PluginEntry[]): BaseNode[] {
+  if (plugins.length === 0) {
+    return [
+      {
+        kind: "guide",
+        id: "guide:noPlugins",
+        label: "opencode.json 中未声明插件",
+        contextValue: "guide",
+        collapsibleState: "none",
+      },
+    ];
+  }
+  return plugins.map((entry, index) => {
+    // A path plugin pointing at one file needs no self-duplicating child.
+    // Plugin rows never navigate on click (no file window); only fileEntry rows inside do.
+    const selfFile = entry.tree.length === 1 && entry.tree[0].path === entry.resolvedPath;
+    return {
+      kind: "plugin" as const,
+      id: `plugin:${index}`,
+      label: entry.name,
+      description: pluginDescription(entry),
+      tooltip: `${entry.specifier}\n${entry.resolvedPath}`,
+      contextValue: "plugin",
+      collapsibleState: entry.tree.length > 0 && !selfFile ? ("collapsed" as const) : ("none" as const),
+      children: selfFile ? undefined : dirEntryNodes(entry.tree),
+    };
+  });
 }
 
 function pad2(n: number): string {
@@ -268,6 +316,8 @@ function modelNodes(models: ModelEntry[]): BaseNode[] {
  *   (omo.jsonc / oh-my-opencode.json...). When provided, the agent-config node gets
  *   agent/category children (KNOWN order first, extras alphabetical); when absent it stays a leaf.
  *   A config file counts as missing when its path is empty (see existence convention above).
+ * @param plugins Optional plugin entries from opencode.json's plugin array; when absent or
+ *   empty the 插件 section shows a single guide row.
  */
 export function buildConfigTree(
   d: DiscoveredConfig,
@@ -277,6 +327,7 @@ export function buildConfigTree(
   parseErrors: Map<string, JsoncError[]>,
   assignments?: Assignments,
   models?: ModelEntry[],
+  plugins?: PluginEntry[],
 ): BaseNode[] {
   const agentConfigPath = d.agentConfig.path;
   const ohMy = configFileNode(
@@ -388,5 +439,16 @@ export function buildConfigTree(
     { kind: "presetRoot", id: "root:presets", label: "模板", contextValue: "presetRoot", collapsibleState: "expanded", children: presetChildren },
     { kind: "backupRoot", id: "root:backups", label: "备份", contextValue: "backupRoot", collapsibleState: "expanded", children: backupChildren },
     { kind: "modelRoot", id: "root:models", label: "模型", contextValue: "modelRoot", collapsibleState: "expanded", children: modelChildren },
+    {
+      kind: "pluginRoot",
+      id: "root:plugins",
+      label: "插件",
+      tooltip: d.opencodeJson || undefined,
+      contextValue: "pluginRoot",
+      collapsibleState: "expanded",
+      children: pluginNodes(plugins ?? []),
+      command: "opencode.openConfigFile",
+      filePath: d.opencodeJson || undefined,
+    },
   ];
 }

@@ -72,6 +72,25 @@ export interface DirEntry {
   children?: DirEntry[];
 }
 
+/** One plugin declared in opencode.json[c] `plugin` (or V2 `plugins`) with its on-disk state. */
+export interface PluginEntry {
+  /** npm: package name without version suffix; path: basename of the resolved path. */
+  name: string;
+  /** Raw config entry (string form; `package` value for V2 object entries). */
+  specifier: string;
+  kind: "npm" | "path";
+  /**
+   * Existing install location, or the canonical would-be location when uninstalled
+   * (npm: runtime-cache node_modules path; path: the resolved file path).
+   */
+  resolvedPath: string;
+  /** Installed package.json version (npm installs only). */
+  version?: string;
+  installed: boolean;
+  /** Plugin file tree (nested node_modules / .git excluded); [] when not installed. */
+  tree: DirEntry[];
+}
+
 /** Where agent/category model assignments live on this machine. */
 export interface AgentConfigTarget {
   /** "omo": unified ~/.omo/omo.jsonc (latest oh-my-openagent). "legacy": oh-my-opencode.json[c] / oh-my-openagent.json[c]. */
@@ -84,6 +103,22 @@ export interface AgentConfigTarget {
   exists: boolean;
 }
 
+/**
+ * One discovered skills directory. Every home-level convention dir (cross-tool
+ * `~/.agents/skills`, Claude/opencode/Amp/Gemini/Cursor/Windsurf/Codex/… — see
+ * configStore for the ordered candidate list) carries the global scope; workspace
+ * `.agents| .claude | .opencode | .github | .gemini | .cursor | .windsurf`/skills dirs
+ * carry the project scope. Rows are reported only when the dir exists on disk.
+ */
+export interface SkillLocation {
+  scope: "global" | "project";
+  /** Display path: `~/…` for home dirs, workspace-relative for project dirs. */
+  label: string;
+  dir: string;
+  skillNames: string[];
+  tree: DirEntry[];
+}
+
 export interface DiscoveredConfig {
   configDir: string;
   opencodeJson: string;
@@ -92,10 +127,8 @@ export interface DiscoveredConfig {
   agentsMd: { scope: "global" | "project"; path: string; exists: boolean }[];
   commandDir: string;
   commandFiles: string[];
-  skillsDir: string;
-  skillNames: string[];
+  skillLocations: SkillLocation[];
   commandTree: DirEntry[];
-  skillsTree: DirEntry[];
   presetsDir: string;
   backupsDir: string;
 }

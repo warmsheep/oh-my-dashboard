@@ -317,18 +317,6 @@ async function openConfigFile(deps: ExtensionDeps, arg: unknown): Promise<void> 
       await openPathOrDirectory(node.filePath);
       return;
     }
-    if (node.kind === "dirSummary") {
-      const discovered = deps.configStore.discover(workspaceFolders());
-      const dir = node.label?.includes("command")
-        ? discovered.commandDir
-        : node.label?.toLowerCase().includes("skill")
-          ? discovered.skillsDir
-          : undefined;
-      if (dir) {
-        await pickFileInDirectory(dir);
-        return;
-      }
-    }
     if (node.label) {
       const discovered = deps.configStore.discover(workspaceFolders());
       const byLabel: Record<string, string> = {

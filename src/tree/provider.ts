@@ -1,8 +1,8 @@
 import * as vscode from "vscode";
-import type { BackupEntry, DiscoveredConfig, JsoncError, ModelEntry, ModelSetting, Preset } from "../core/types";
+import type { BackupEntry, DiscoveredConfig, JsoncError, ModelEntry, ModelSetting, PluginEntry, Preset } from "../core/types";
 import { buildConfigTree, CURRENT_PRESET_BADGE, type BaseNode } from "./nodes";
 
-export type TreeSection = "config" | "presets" | "backups" | "models";
+export type TreeSection = "config" | "presets" | "backups" | "models" | "plugins";
 
 export interface TreeDataSnapshot {
   discovered: DiscoveredConfig;
@@ -12,6 +12,7 @@ export interface TreeDataSnapshot {
   parseErrors: Map<string, JsoncError[]>;
   assignments?: { agents: Record<string, ModelSetting>; categories: Record<string, ModelSetting> };
   models?: ModelEntry[];
+  plugins?: PluginEntry[];
 }
 
 const COLLAPSIBLE: Record<BaseNode["collapsibleState"], vscode.TreeItemCollapsibleState> = {
@@ -66,6 +67,10 @@ function iconId(node: BaseNode): string {
       return "symbol-misc";
     case "modelAddAction":
       return "add";
+    case "pluginRoot":
+      return "extensions";
+    case "plugin":
+      return "plug";
     case "dirEntry":
       return "folder";
     case "fileEntry":
@@ -165,6 +170,7 @@ export class ConfigTreeDataProvider implements vscode.TreeDataProvider<BaseNode>
       this.cache.parseErrors,
       this.cache.assignments,
       this.cache.models,
+      this.cache.plugins,
     );
     return roots;
   }

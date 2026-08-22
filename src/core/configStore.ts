@@ -3,7 +3,17 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { getValue, parseSafe } from "./jsoncEditor";
 import { ensureLocalModelsFile, mergeModelOptions } from "./builtinModels";
-import type { AgentConfigTarget, DirEntry, DiscoveredConfig, ModelEntry, ModelOption, ModelSetting, ParseResult } from "./types";
+import type {
+  AgentConfigTarget,
+  DirEntry,
+  DiscoveredConfig,
+  ModelEntry,
+  ModelOption,
+  ModelSetting,
+  ParseResult,
+  PluginEntry,
+  SkillLocation,
+} from "./types";
 
 export interface ConfigStoreOptions {
   configDirOverride?: string;
@@ -11,20 +21,68 @@ export interface ConfigStoreOptions {
   homeDir?: string;
 }
 
-function readDirTree(dir: string, depth = 0): DirEntry[] {
+const PLUGIN_TREE_EXCLUDES = new Set(["node_modules", ".git"]);
+
+/**
+ * Project-level skills dir conventions, in display order: the cross-tool standard
+ * first, then per-tool native paths (agentskills.io spec + Claude Code / opencode /
+ * GitHub Copilot / Gemini CLI / Cursor / Windsurf docs).
+ */
+const PROJECT_SKILL_DIRS = [
+  ".agents/skills",
+  ".claude/skills",
+  ".opencode/skills",
+  ".github/skills",
+  ".gemini/skills",
+  ".cursor/skills",
+  ".windsurf/skills",
+] as const;
+
+function isPathPluginSpecifier(specifier: string): boolean {
+  // Mirrors upstream isPathPluginSpec (file:// / . / absolute) plus ~, which npm names cannot contain.
+  return specifier.startsWith("file://") || specifier.startsWith("~") || specifier.startsWith(".") || path.isAbsolute(specifier);
+}
+
+function npmPluginName(specifier: string): string {
+  // @scope/name@1.0.0 → cut at the 2nd @; name@1.0.0 → cut at the 1st.
+  const from = specifier.startsWith("@") ? specifier.indexOf("@", 1) : specifier.indexOf("@");
+  return from === -1 ? specifier : specifier.slice(0, from);
+}
+
+/** Dirent.isDirectory() is false for symlinks — follow the link before classifying. */
+function isDirEntry(entry: fs.Dirent, entryPath: string): boolean {
+  if (entry.isDirectory()) {
+    return true;
+  }
+  if (entry.isSymbolicLink()) {
+    try {
+      return fs.statSync(entryPath).isDirectory();
+    } catch {
+      return false;
+    }
+  }
+  return false;
+}
+
+function readDirTree(dir: string, depth = 0, exclude?: ReadonlySet<string>): DirEntry[] {
   if (depth > 8 || !fs.existsSync(dir)) {
     return [];
   }
-  const entries = fs.readdirSync(dir, { withFileTypes: true }).sort((a, b) => {
-    if (a.isDirectory() !== b.isDirectory()) {
-      return a.isDirectory() ? -1 : 1;
-    }
-    return a.name.localeCompare(b.name);
-  });
+  const entries = fs
+    .readdirSync(dir, { withFileTypes: true })
+    .filter((entry) => !exclude?.has(entry.name))
+    .sort((a, b) => {
+      const aDir = isDirEntry(a, path.join(dir, a.name));
+      const bDir = isDirEntry(b, path.join(dir, b.name));
+      if (aDir !== bDir) {
+        return aDir ? -1 : 1;
+      }
+      return a.name.localeCompare(b.name);
+    });
   return entries.map((entry) => {
     const entryPath = path.join(dir, entry.name);
-    if (entry.isDirectory()) {
-      const children = readDirTree(entryPath, depth + 1);
+    if (isDirEntry(entry, entryPath)) {
+      const children = readDirTree(entryPath, depth + 1, exclude);
       return {
         name: entry.name,
         path: entryPath,
@@ -72,6 +130,94 @@ export class ConfigStore {
   /** oh-my-openagent's unified config home (`~/.omo` on every platform). */
   get omoDir(): string {
     return path.join(this.homeDir, ".omo");
+  }
+
+  /** Cross-agent user-level skills dir (`~/.agents/skills`). */
+  get userSkillsDir(): string {
+    return path.join(this.homeDir, ".agents", "skills");
+  }
+
+  /**
+   * The opencode runtime's npm plugin cache: plugins from the `plugin` array are
+   * bun-installed here (~/.cache/opencode/node_modules on linux). XDG_CACHE_HOME and
+   * the darwin caches dir are honored like resolveConfigDir honors their config twins.
+   */
+  get pluginCacheDir(): string {
+    const xdg = this.env.XDG_CACHE_HOME;
+    if (typeof xdg === "string" && xdg.trim() !== "") {
+      return path.join(xdg, "opencode");
+    }
+    if (process.platform === "darwin") {
+      return path.join(this.homeDir, "Library", "Caches", "opencode");
+    }
+    return path.join(this.homeDir, ".cache", "opencode");
+  }
+
+  /**
+   * Plugins declared in opencode.json[c]: the `plugin` string array (V2 `plugins` as
+   * fallback, whose object entries expose a `package` field). npm entries resolve against
+   * the runtime cache first, then <configDir>/node_modules; path entries (~/, ./, /,
+   * file://) resolve against home / configDir. Declaration order is preserved.
+   */
+  listPlugins(): PluginEntry[] {
+    const text = this.readTextOrEmpty(this.resolveOpencodeConfigPath());
+    if (!text) {
+      return [];
+    }
+    const raw = getValue<unknown>(text, ["plugin"]) ?? getValue<unknown>(text, ["plugins"]);
+    if (!Array.isArray(raw)) {
+      return [];
+    }
+    return raw.flatMap((item) => {
+      const specifier =
+        typeof item === "string" ? item.trim() : item && typeof item === "object" && typeof (item as { package?: unknown }).package === "string" ? (item as { package: string }).package.trim() : "";
+      return specifier ? [this.resolvePlugin(specifier)] : [];
+    });
+  }
+
+  private resolvePlugin(specifier: string): PluginEntry {
+    return isPathPluginSpecifier(specifier) ? this.resolvePathPlugin(specifier) : this.resolveNpmPlugin(specifier);
+  }
+
+  private resolvePathPlugin(specifier: string): PluginEntry {
+    const spec = specifier.startsWith("file://") ? specifier.slice("file://".length) : specifier;
+    const resolved = spec.startsWith("~") ? path.join(this.homeDir, spec.slice(1)) : path.resolve(this.configDir, spec);
+    let stat: fs.Stats | undefined;
+    try {
+      stat = fs.statSync(resolved);
+    } catch {
+      stat = undefined;
+    }
+    const tree = stat?.isDirectory()
+      ? readDirTree(resolved, 0, PLUGIN_TREE_EXCLUDES)
+      : stat?.isFile()
+        ? [{ name: path.basename(resolved), path: resolved, isDir: false }]
+        : [];
+    return { name: path.basename(resolved), specifier, kind: "path", resolvedPath: resolved, installed: stat !== undefined, tree };
+  }
+
+  private resolveNpmPlugin(specifier: string): PluginEntry {
+    const name = npmPluginName(specifier);
+    const isInstalledDir = (candidate: string): boolean => {
+      try {
+        return fs.statSync(candidate).isDirectory();
+      } catch {
+        return false;
+      }
+    };
+    const cacheCandidate = path.join(this.pluginCacheDir, "node_modules", name);
+    const configCandidate = path.join(this.configDir, "node_modules", name);
+    const cacheHit = isInstalledDir(cacheCandidate);
+    const configHit = !cacheHit && isInstalledDir(configCandidate);
+    const resolvedPath = cacheHit ? cacheCandidate : configHit ? configCandidate : cacheCandidate;
+    const installed = cacheHit || configHit;
+    const version = installed ? this.installedPluginVersion(resolvedPath) : undefined;
+    return { name, specifier, kind: "npm", resolvedPath, installed, ...(version !== undefined ? { version } : {}), tree: installed ? readDirTree(resolvedPath, 0, PLUGIN_TREE_EXCLUDES) : [] };
+  }
+
+  private installedPluginVersion(dir: string): string | undefined {
+    const parsed = this.readParse<{ version?: unknown }>(path.join(dir, "package.json"));
+    return typeof parsed.value?.version === "string" ? parsed.value.version : undefined;
   }
 
   /**
@@ -143,7 +289,6 @@ export class ConfigStore {
     const ohMyOpencodeJson = path.join(configDir, "oh-my-opencode.json");
     const agentConfig = this.resolveAgentConfig();
     const commandDir = path.join(configDir, "command");
-    const skillsDir = path.join(configDir, "skills");
 
     const commandFiles = fs.existsSync(commandDir)
       ? fs
@@ -153,13 +298,65 @@ export class ConfigStore {
           .sort()
       : [];
 
-    const skillNames = fs.existsSync(skillsDir)
-      ? fs
-          .readdirSync(skillsDir, { withFileTypes: true })
-          .filter((entry) => entry.isDirectory())
-          .map((entry) => entry.name)
-          .sort()
-      : [];
+    const isSkillDir = (dir: string, entry: fs.Dirent): boolean =>
+      isDirEntry(entry, path.join(dir, entry.name)) && fs.existsSync(path.join(dir, entry.name, "SKILL.md"));
+
+    const listSkillNames = (dir: string): string[] =>
+      fs.existsSync(dir)
+        ? fs
+            .readdirSync(dir, { withFileTypes: true })
+            .filter((entry) => isSkillDir(dir, entry))
+            .map((entry) => entry.name)
+            .sort()
+        : [];
+
+    const homePrefix = this.homeDir + path.sep;
+    const displayPath = (dir: string): string =>
+      dir === this.homeDir || dir.startsWith(homePrefix) ? `~${dir.slice(this.homeDir.length)}` : dir;
+
+    const skillLocation = (scope: SkillLocation["scope"], label: string, dir: string): SkillLocation => ({
+      scope,
+      label,
+      dir,
+      skillNames: listSkillNames(dir),
+      tree: readDirTree(dir),
+    });
+
+    // Home-level convention dirs in canonical order (cross-tool standard → Claude → opencode →
+    // Amp XDG → Copilot → Gemini → Cursor → Windsurf → Codex legacy); the opencode runtime's
+    // own ~/.cache/opencode/skills plugin cache is deliberately not a candidate. Rows appear
+    // only when the dir exists; configDir/skills may coincide with a home candidate → dedupe.
+    const xdgConfig = typeof this.env.XDG_CONFIG_HOME === "string" && this.env.XDG_CONFIG_HOME.trim() !== ""
+      ? this.env.XDG_CONFIG_HOME
+      : path.join(this.homeDir, ".config");
+    const globalSkillCandidates = [
+      path.join(this.homeDir, ".agents", "skills"),
+      path.join(this.homeDir, ".claude", "skills"),
+      path.join(configDir, "skills"),
+      path.join(xdgConfig, "agents", "skills"),
+      path.join(xdgConfig, "amp", "skills"),
+      path.join(this.homeDir, ".copilot", "skills"),
+      path.join(this.homeDir, ".gemini", "skills"),
+      path.join(this.homeDir, ".cursor", "skills"),
+      path.join(this.homeDir, ".codeium", "windsurf", "skills"),
+      path.join(this.homeDir, ".codex", "skills"),
+    ];
+    const seenSkillDirs = new Set<string>();
+    const skillLocations: SkillLocation[] = [];
+    for (const candidate of globalSkillCandidates) {
+      if (!seenSkillDirs.has(candidate) && fs.existsSync(candidate)) {
+        seenSkillDirs.add(candidate);
+        skillLocations.push(skillLocation("global", displayPath(candidate), candidate));
+      }
+    }
+    for (const folder of workspaceFolders ?? []) {
+      for (const rel of PROJECT_SKILL_DIRS) {
+        const projectSkillsDir = path.join(folder, rel);
+        if (fs.existsSync(projectSkillsDir)) {
+          skillLocations.push(skillLocation("project", rel, projectSkillsDir));
+        }
+      }
+    }
 
     const agentsMd: DiscoveredConfig["agentsMd"] = [
       {
@@ -181,10 +378,8 @@ export class ConfigStore {
       agentsMd,
       commandDir,
       commandFiles,
-      skillsDir,
-      skillNames,
+      skillLocations,
       commandTree: readDirTree(commandDir),
-      skillsTree: readDirTree(skillsDir),
       presetsDir: path.join(configDir, "presets"),
       backupsDir: path.join(configDir, "backups"),
     };

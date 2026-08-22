@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { BackupEntry, DiscoveredConfig, JsoncError, ModelEntry, Preset } from "../../src/core/types";
+import type { BackupEntry, DiscoveredConfig, JsoncError, ModelEntry, PluginEntry, Preset } from "../../src/core/types";
 import { buildConfigTree, CURRENT_PRESET_BADGE, type BaseNode } from "../../src/tree/nodes";
 import { ConfigTreeDataProvider, type TreeDataSnapshot } from "../../src/tree/provider";
 
@@ -43,8 +43,29 @@ function makeDiscovered(overrides: Partial<DiscoveredConfig> = {}): DiscoveredCo
     ],
     commandDir: "/cfg/command",
     commandFiles: ["deploy.md", "git.md"],
-    skillsDir: "/cfg/skills",
-    skillNames: ["pdf", "xlsx"],
+    skillLocations: [
+      {
+        scope: "global",
+        label: "~/.agents/skills",
+        dir: "/home/t/.agents/skills",
+        skillNames: ["agentmail", "browser"],
+        tree: [],
+      },
+      {
+        scope: "global",
+        label: "/cfg/skills",
+        dir: "/cfg/skills",
+        skillNames: ["pdf", "xlsx"],
+        tree: [
+          {
+            name: "pdf",
+            path: "/cfg/skills/pdf",
+            isDir: true,
+            children: [{ name: "SKILL.md", path: "/cfg/skills/pdf/SKILL.md", isDir: false }],
+          },
+        ],
+      },
+    ],
     commandTree: [
       { name: "deploy.md", path: "/cfg/command/deploy.md", isDir: false },
       { name: "git.md", path: "/cfg/command/git.md", isDir: false },
@@ -53,14 +74,6 @@ function makeDiscovered(overrides: Partial<DiscoveredConfig> = {}): DiscoveredCo
         path: "/cfg/command/sub",
         isDir: true,
         children: [{ name: "nested.md", path: "/cfg/command/sub/nested.md", isDir: false }],
-      },
-    ],
-    skillsTree: [
-      {
-        name: "pdf",
-        path: "/cfg/skills/pdf",
-        isDir: true,
-        children: [{ name: "SKILL.md", path: "/cfg/skills/pdf/SKILL.md", isDir: false }],
       },
     ],
     presetsDir: "/cfg/presets",
@@ -147,6 +160,50 @@ const MODEL_ENTRIES: ModelEntry[] = [
   },
 ];
 
+const PLUGINS: PluginEntry[] = [
+  {
+    name: "@scope/installed",
+    specifier: "@scope/installed@latest",
+    kind: "npm",
+    resolvedPath: "/home/t/.cache/opencode/node_modules/@scope/installed",
+    version: "0.0.3",
+    installed: true,
+    tree: [
+      { name: "package.json", path: "/home/t/.cache/opencode/node_modules/@scope/installed/package.json", isDir: false },
+      {
+        name: "src",
+        path: "/home/t/.cache/opencode/node_modules/@scope/installed/src",
+        isDir: true,
+        children: [{ name: "index.ts", path: "/home/t/.cache/opencode/node_modules/@scope/installed/src/index.ts", isDir: false }],
+      },
+    ],
+  },
+  {
+    name: "missing-pkg",
+    specifier: "missing-pkg",
+    kind: "npm",
+    resolvedPath: "/home/t/.cache/opencode/node_modules/missing-pkg",
+    installed: false,
+    tree: [],
+  },
+  {
+    name: "local.ts",
+    specifier: "~/local.ts",
+    kind: "path",
+    resolvedPath: "/home/t/local.ts",
+    installed: true,
+    tree: [{ name: "local.ts", path: "/home/t/local.ts", isDir: false }],
+  },
+  {
+    name: "gone-dir",
+    specifier: "./gone-dir",
+    kind: "path",
+    resolvedPath: "/cfg/gone-dir",
+    installed: false,
+    tree: [],
+  },
+];
+
 function makeSnapshot(overrides: Partial<TreeDataSnapshot> = {}): TreeDataSnapshot {
   return {
     discovered: makeDiscovered(),
@@ -188,9 +245,9 @@ describe("buildConfigTree — full shape", () => {
     MODEL_ENTRIES,
   );
 
-  it("returns exactly four roots in order 配置 / 模板 / 备份 / 模型, all expanded", () => {
-    expect(roots.map((r) => r.label)).toEqual(["配置", "模板", "备份", "模型"]);
-    expect(roots.map((r) => r.kind)).toEqual(["configRoot", "presetRoot", "backupRoot", "modelRoot"]);
+  it("returns exactly five roots in order 配置 / 模板 / 备份 / 模型 / 插件, all expanded", () => {
+    expect(roots.map((r) => r.label)).toEqual(["配置", "模板", "备份", "模型", "插件"]);
+    expect(roots.map((r) => r.kind)).toEqual(["configRoot", "presetRoot", "backupRoot", "modelRoot", "pluginRoot"]);
     expect(roots.every((r) => r.collapsibleState === "expanded")).toBe(true);
   });
 
@@ -217,6 +274,7 @@ describe("buildConfigTree — full shape", () => {
       "configFile",
       "agentsMd",
       "agentsMd",
+      "dirSummary",
       "dirSummary",
       "dirSummary",
     ]);
@@ -291,7 +349,7 @@ describe("buildConfigTree — full shape", () => {
     expect(project.description).toBe("（不存在）");
   });
 
-  it("dirSummary rows: expandable tree with subdirs and clickable files", () => {
+  it("dirSummary rows: one skills node per location — path label + 全局/项目 count description", () => {
     const kids = roots[0].children!;
     const command = find(kids, "dir:command");
     expect(command).toMatchObject({
@@ -299,6 +357,8 @@ describe("buildConfigTree — full shape", () => {
       tooltip: "/cfg/command",
       contextValue: "dirSummary",
       collapsibleState: "collapsed",
+      command: "opencode.openConfigFile",
+      filePath: "/cfg/command",
     });
     const sub = find(command.children!, "dir:/cfg/command/sub");
     expect(sub.kind).toBe("dirEntry");
@@ -307,11 +367,71 @@ describe("buildConfigTree — full shape", () => {
     expect(nested.kind).toBe("fileEntry");
     expect(nested.command).toBe("opencode.openConfigFile");
     expect(nested.filePath).toBe("/cfg/command/sub/nested.md");
+
+    const agents = find(kids, "dir:skills:/home/t/.agents/skills");
+    expect(agents).toMatchObject({
+      label: "~/.agents/skills",
+      description: "全局 2",
+      tooltip: "/home/t/.agents/skills",
+      contextValue: "dirSummary",
+      collapsibleState: "none",
+      command: "opencode.openConfigFile",
+      filePath: "/home/t/.agents/skills",
+    });
+
+    const global = find(kids, "dir:skills:/cfg/skills");
+    expect(global).toMatchObject({
+      label: "/cfg/skills",
+      description: "全局 2",
+      tooltip: "/cfg/skills",
+      collapsibleState: "collapsed",
+      command: "opencode.openConfigFile",
+      filePath: "/cfg/skills",
+    });
     const skillFile = find(
-      find(find(kids, "dir:skills").children!, "dir:/cfg/skills/pdf").children!,
+      find(global.children!, "dir:/cfg/skills/pdf").children!,
       "file:/cfg/skills/pdf/SKILL.md",
     );
     expect(skillFile.command).toBe("opencode.openConfigFile");
+  });
+
+  it("dirSummary rows: project skills locations get a per-folder stable id", () => {
+    const projectRoots = buildConfigTree(
+      makeDiscovered({
+        skillLocations: [
+          { scope: "global", label: "~/.agents/skills", dir: "/home/t/.agents/skills", skillNames: [], tree: [] },
+          { scope: "global", label: "/cfg/skills", dir: "/cfg/skills", skillNames: [], tree: [] },
+          {
+            scope: "project",
+            label: ".opencode/skills",
+            dir: "/work/proj-a/.opencode/skills",
+            skillNames: ["local-skill"],
+            tree: [
+              {
+                name: "local-skill",
+                path: "/work/proj-a/.opencode/skills/local-skill",
+                isDir: true,
+                children: [
+                  { name: "SKILL.md", path: "/work/proj-a/.opencode/skills/local-skill/SKILL.md", isDir: false },
+                ],
+              },
+            ],
+          },
+        ],
+      }),
+      [],
+      null,
+      [],
+      new Map<string, JsoncError[]>(),
+    );
+    const kids = projectRoots[0].children!;
+    const project = find(kids, "dir:skills:/work/proj-a/.opencode/skills");
+    expect(project.label).toBe(".opencode/skills");
+    expect(project.description).toBe("项目 1");
+    expect(project.tooltip).toBe("/work/proj-a/.opencode/skills");
+    expect(project.command).toBe("opencode.openConfigFile");
+    expect(project.filePath).toBe("/work/proj-a/.opencode/skills");
+    expect(project.collapsibleState).toBe("collapsed");
   });
 
   it("preset section: captureAction first, then presets sorted by name", () => {
@@ -372,7 +492,7 @@ describe("buildConfigTree — missing configs guide", () => {
       command: "opencode.createConfig",
       collapsibleState: "none",
     });
-    expect(kids.slice(1).map((k) => k.kind)).toEqual(["configFile", "configFile", "agentsMd", "agentsMd", "dirSummary", "dirSummary"]);
+    expect(kids.slice(1).map((k) => k.kind)).toEqual(["configFile", "configFile", "agentsMd", "agentsMd", "dirSummary", "dirSummary", "dirSummary"]);
   });
 });
 
@@ -481,6 +601,80 @@ describe("buildConfigTree — empty sections", () => {
 });
 
 // ---------------------------------------------------------------------------
+// e2. Plugin section
+// ---------------------------------------------------------------------------
+
+describe("buildConfigTree — plugin section", () => {
+  const roots = buildConfigTree(
+    makeDiscovered(),
+    [],
+    null,
+    [],
+    new Map<string, JsoncError[]>(),
+    undefined,
+    [],
+    PLUGINS,
+  );
+
+  it("pluginRoot: 插件 header clicking opens the opencode config", () => {
+    const root = roots[4];
+    expect(root).toMatchObject({
+      kind: "pluginRoot",
+      id: "root:plugins",
+      label: "插件",
+      tooltip: "/cfg/opencode.json",
+      contextValue: "pluginRoot",
+      collapsibleState: "expanded",
+      command: "opencode.openConfigFile",
+      filePath: "/cfg/opencode.json",
+    });
+  });
+
+  it("plugin nodes: name labels, state descriptions, click does not navigate", () => {
+    const kids = roots[4].children!;
+    expect(kids.map((k) => k.kind)).toEqual(["plugin", "plugin", "plugin", "plugin"]);
+    expect(kids.map((k) => k.label)).toEqual(["@scope/installed", "missing-pkg", "local.ts", "gone-dir"]);
+    expect(kids.map((k) => k.description)).toEqual(["0.0.3", "未安装", "本地路径", "缺失"]);
+    for (const kid of kids) {
+      expect(kid.command).toBeUndefined();
+      expect(kid.filePath).toBeUndefined();
+      expect(kid.tooltip).toContain(kid.label);
+      expect(kid.tooltip).toContain("\n");
+    }
+  });
+
+  it("plugin nodes with trees are collapsed and expose dirEntry/fileEntry grandchildren", () => {
+    const kids = roots[4].children!;
+    expect(kids.map((k) => k.collapsibleState)).toEqual(["collapsed", "none", "none", "none"]);
+    const installed = kids[0].children!;
+    expect(installed.map((c) => c.kind)).toEqual(["fileEntry", "dirEntry"]);
+    const src = installed[1];
+    expect(src.command).toBeUndefined(); // dirs expand, they don't navigate
+    expect(src.children![0]).toMatchObject({
+      kind: "fileEntry",
+      command: "opencode.openConfigFile",
+      filePath: "/home/t/.cache/opencode/node_modules/@scope/installed/src/index.ts",
+    });
+    expect(kids[2].children).toBeUndefined(); // single-file path plugin: plain leaf row
+  });
+
+  it("shows a single guide row when no plugins are declared (also when param omitted)", () => {
+    const empty = buildConfigTree(makeDiscovered(), [], null, [], new Map(), undefined, [], [])[4].children!;
+    expect(empty).toHaveLength(1);
+    expect(empty[0]).toMatchObject({
+      kind: "guide",
+      id: "guide:noPlugins",
+      label: "opencode.json 中未声明插件",
+      collapsibleState: "none",
+    });
+    expect(empty[0].command).toBeUndefined();
+
+    const omitted = buildConfigTree(makeDiscovered(), [], null, [], new Map())[4].children!;
+    expect(omitted[0].id).toBe("guide:noPlugins");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // f. Unique stable ids across the whole tree
 // ---------------------------------------------------------------------------
 
@@ -508,12 +702,12 @@ describe("buildConfigTree — id uniqueness", () => {
 // ---------------------------------------------------------------------------
 
 describe("ConfigTreeDataProvider", () => {
-  it("root returns the four section roots in fixed order", async () => {
+  it("root returns the five section roots in fixed order", async () => {
     const snap = makeSnapshot();
     const provider = new ConfigTreeDataProvider(() => snap);
 
     const roots = await provider.getChildren();
-    expect(roots.map((r) => r.kind)).toEqual(["configRoot", "presetRoot", "backupRoot", "modelRoot"]);
+    expect(roots.map((r) => r.kind)).toEqual(["configRoot", "presetRoot", "backupRoot", "modelRoot", "pluginRoot"]);
 
     const configKids = await provider.getChildren(roots[0]);
     expect(configKids.map((k) => k.kind)).toEqual([
@@ -521,6 +715,7 @@ describe("ConfigTreeDataProvider", () => {
       "configFile",
       "agentsMd",
       "agentsMd",
+      "dirSummary",
       "dirSummary",
       "dirSummary",
     ]);
@@ -570,6 +765,27 @@ describe("ConfigTreeDataProvider", () => {
       { kind: "configFile", id: "config:opencode.json", label: "opencode.json", filePath: "/cfg/opencode.json" },
     ]);
     expect((item.iconPath as unknown as { id: string }).id).toBe("file");
+  });
+
+  it("getTreeItem maps a plugin node: plug icon, no click command", async () => {
+    const snap = makeSnapshot({ plugins: PLUGINS });
+    const provider = new ConfigTreeDataProvider(() => snap);
+    const roots = (await provider.getChildren())!;
+    const node = (await provider.getChildren(roots[4]))[0];
+
+    const item = provider.getTreeItem(node);
+    expect(item.collapsibleState).toBe(1); // Collapsed — has a file tree
+    expect(item.command).toBeUndefined();
+    expect((item.iconPath as unknown as { id: string }).id).toBe("plug");
+
+    const rootItem = provider.getTreeItem(roots[4]);
+    expect((rootItem.iconPath as unknown as { id: string }).id).toBe("extensions");
+    expect(rootItem.command?.arguments?.[0]).toEqual({
+      kind: "pluginRoot",
+      id: "root:plugins",
+      label: "插件",
+      filePath: "/cfg/opencode.json",
+    });
   });
 
   it("maps collapsibleState strings to None/Collapsed/Expanded and guide gets info icon", () => {

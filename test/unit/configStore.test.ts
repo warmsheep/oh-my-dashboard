@@ -6,6 +6,7 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import * as os from "node:os";
@@ -79,24 +80,31 @@ describe("ConfigStore.discover", () => {
     writeFileSync(path.join(configDir, "command", "notes.txt"), "not a command");
     mkdirSync(path.join(configDir, "skills", "one"), { recursive: true });
     mkdirSync(path.join(configDir, "skills", "two"), { recursive: true });
+    writeFileSync(path.join(configDir, "skills", "one", "SKILL.md"), "# one");
+    writeFileSync(path.join(configDir, "skills", "two", "SKILL.md"), "# two");
     writeFileSync(path.join(configDir, "AGENTS.md"), "# agents");
 
     const wsWithAgentsMd = sandbox();
     writeFileSync(path.join(wsWithAgentsMd, "AGENTS.md"), "# project agents");
     const wsWithoutAgentsMd = sandbox();
 
-    const store = new ConfigStore({ configDirOverride: configDir, homeDir: sandbox() });
+    const home = sandbox();
+    const store = new ConfigStore({ configDirOverride: configDir, homeDir: home });
     const d = store.discover([wsWithAgentsMd, wsWithoutAgentsMd]);
 
     expect(d.configDir).toBe(configDir);
     expect(d.opencodeJson).toBe(path.join(configDir, "opencode.json"));
     expect(d.ohMyOpencodeJson).toBe(path.join(configDir, "oh-my-opencode.json"));
     expect(d.commandDir).toBe(path.join(configDir, "command"));
-    expect(d.skillsDir).toBe(path.join(configDir, "skills"));
     expect(d.presetsDir).toBe(path.join(configDir, "presets"));
     expect(d.backupsDir).toBe(path.join(configDir, "backups"));
     expect(d.commandFiles).toEqual(["x.md"]);
-    expect(d.skillNames).toEqual(["one", "two"]);
+    // Only skills dirs that exist on disk are reported; home-level candidates all carry the global scope.
+    expect(
+      d.skillLocations.map((l) => ({ scope: l.scope, label: l.label, dir: l.dir, skillNames: l.skillNames })),
+    ).toEqual([
+      { scope: "global", label: configDir + path.sep + "skills", dir: path.join(configDir, "skills"), skillNames: ["one", "two"] },
+    ]);
     expect(d.agentsMd).toEqual([
       { scope: "global", path: path.join(configDir, "AGENTS.md"), exists: true },
       { scope: "project", path: path.join(wsWithAgentsMd, "AGENTS.md"), exists: true },
@@ -104,14 +112,153 @@ describe("ConfigStore.discover", () => {
     ]);
   });
 
-  it("does not throw on an empty config dir; paths still present, arrays empty", () => {
+  it("does not throw on an empty config dir; no skill rows when no candidate dir exists", () => {
     const dir = sandbox();
-    const store = new ConfigStore({ configDirOverride: dir, homeDir: sandbox() });
+    const home = sandbox();
+    const store = new ConfigStore({ configDirOverride: dir, homeDir: home });
     const d = store.discover();
     expect(d.opencodeJson).toBe(path.join(dir, "opencode.json"));
     expect(d.commandFiles).toEqual([]);
-    expect(d.skillNames).toEqual([]);
+    expect(d.skillLocations).toEqual([]);
     expect(d.agentsMd).toEqual([{ scope: "global", path: path.join(dir, "AGENTS.md"), exists: false }]);
+  });
+
+  it("discovers ~/.agents/skills as 全局 with a dir tree, ignoring non-skill entries and the opencode cache", () => {
+    const configDir = seedConfigDir();
+    const home = sandbox();
+    mkdirSync(path.join(home, ".agents", "skills", "pdf"), { recursive: true });
+    mkdirSync(path.join(home, ".agents", "skills", "xlsx"), { recursive: true });
+    writeFileSync(path.join(home, ".agents", "skills", "pdf", "SKILL.md"), "# pdf");
+    writeFileSync(path.join(home, ".agents", "skills", "xlsx", "SKILL.md"), "# xlsx");
+    writeFileSync(path.join(home, ".agents", "skills", "README.md"), "not a skill");
+    mkdirSync(path.join(home, ".agents", "skills", "not-a-skill"), { recursive: true });
+    // opencode-managed plugin cache must never show up as a managed location
+    mkdirSync(path.join(home, ".cache", "opencode", "skills", "cached-skill"), { recursive: true });
+
+    const d = new ConfigStore({ configDirOverride: configDir, homeDir: home }).discover();
+
+    expect(d.skillLocations).toHaveLength(1);
+    const row = d.skillLocations[0];
+    expect(row.scope).toBe("global");
+    expect(row.label).toBe("~/.agents/skills");
+    expect(row.dir).toBe(path.join(home, ".agents", "skills"));
+    expect(row.skillNames).toEqual(["pdf", "xlsx"]);
+    const pdf = row.tree.find((e) => e.name === "pdf");
+    expect(pdf?.isDir).toBe(true);
+    expect(pdf?.children?.map((c) => c.name)).toEqual(["SKILL.md"]);
+    expect(row.tree.some((e) => e.name === "cached-skill")).toBe(false);
+  });
+
+  it("reports every common home-level skills dir as 全局 in canonical order with tilde labels", () => {
+    const configDir = seedConfigDir();
+    const home = sandbox();
+    for (const rel of [
+      ".agents/skills/a",
+      ".claude/skills/b",
+      ".codex/skills/c",
+      ".copilot/skills/d",
+      ".gemini/skills/e",
+      ".cursor/skills/f",
+      ".codeium/windsurf/skills/g",
+      ".config/agents/skills/h",
+      ".config/amp/skills/i",
+    ]) {
+      mkdirSync(path.join(home, rel), { recursive: true });
+      const skill = rel.split("/").pop()!;
+      writeFileSync(path.join(home, rel, "SKILL.md"), `# ${skill}`);
+    }
+    mkdirSync(path.join(configDir, "skills", "j"), { recursive: true });
+    writeFileSync(path.join(configDir, "skills", "j", "SKILL.md"), "# j");
+
+    const d = new ConfigStore({ configDirOverride: configDir, homeDir: home }).discover();
+
+    expect(d.skillLocations.map((l) => l.scope)).toEqual(d.skillLocations.map(() => "global"));
+    expect(d.skillLocations.map((l) => l.label)).toEqual([
+      "~/.agents/skills",
+      "~/.claude/skills",
+      configDir + path.sep + "skills",
+      "~/.config/agents/skills",
+      "~/.config/amp/skills",
+      "~/.copilot/skills",
+      "~/.gemini/skills",
+      "~/.cursor/skills",
+      "~/.codeium/windsurf/skills",
+      "~/.codex/skills",
+    ]);
+    expect(d.skillLocations.map((l) => l.skillNames.flat())).toEqual([["a"], ["b"], ["j"], ["h"], ["i"], ["d"], ["e"], ["f"], ["g"], ["c"]].map((n) => n));
+  });
+
+  it("honors XDG_CONFIG_HOME for the XDG-style global skills candidates", () => {
+    const configDir = seedConfigDir();
+    const home = sandbox();
+    const xdg = sandbox();
+    mkdirSync(path.join(xdg, "agents", "skills", "amp-skill"), { recursive: true });
+    writeFileSync(path.join(xdg, "agents", "skills", "amp-skill", "SKILL.md"), "# amp");
+
+    const d = new ConfigStore({ configDirOverride: configDir, homeDir: home, env: { XDG_CONFIG_HOME: xdg } }).discover();
+
+    const amp = d.skillLocations.find((l) => l.dir === path.join(xdg, "agents", "skills"));
+    expect(amp?.scope).toBe("global");
+    expect(amp?.skillNames).toEqual(["amp-skill"]);
+  });
+
+  it("counts symlinked skill dirs (e.g. ~/.claude/skills → ~/.agents/skills entries)", () => {
+    const configDir = seedConfigDir();
+    const home = sandbox();
+    mkdirSync(path.join(home, ".agents", "skills", "pdf"), { recursive: true });
+    writeFileSync(path.join(home, ".agents", "skills", "pdf", "SKILL.md"), "# pdf");
+    mkdirSync(path.join(home, ".claude", "skills"), { recursive: true });
+    symlinkSync(path.join(home, ".agents", "skills", "pdf"), path.join(home, ".claude", "skills", "pdf"));
+
+    const d = new ConfigStore({ configDirOverride: configDir, homeDir: home }).discover();
+
+    const claude = d.skillLocations.find((l) => l.dir === path.join(home, ".claude", "skills"));
+    expect(claude?.skillNames).toEqual(["pdf"]);
+    const linked = claude?.tree.find((e) => e.name === "pdf");
+    expect(linked?.isDir).toBe(true);
+  });
+
+  it("dedupes when configDir itself is one of the home-level candidates", () => {
+    const home = sandbox();
+    const claudeConfig = path.join(home, ".claude");
+    mkdirSync(path.join(claudeConfig, "skills", "s"), { recursive: true });
+    writeFileSync(path.join(claudeConfig, "skills", "s", "SKILL.md"), "# s");
+
+    const d = new ConfigStore({ configDirOverride: claudeConfig, homeDir: home }).discover();
+
+    expect(d.skillLocations).toHaveLength(1);
+    expect(d.skillLocations[0].dir).toBe(path.join(claudeConfig, "skills"));
+    expect(d.skillLocations[0].label).toBe("~/.claude/skills");
+  });
+
+  it("discovers project skills from every common project dir in candidate order", () => {
+    const configDir = seedConfigDir();
+    const home = sandbox();
+    const ws = sandbox();
+    for (const rel of [".agents/skills", ".claude/skills", ".opencode/skills", ".github/skills", ".gemini/skills", ".cursor/skills", ".windsurf/skills"]) {
+      const skillDir = path.join(ws, rel, "demo");
+      mkdirSync(skillDir, { recursive: true });
+      writeFileSync(path.join(skillDir, "SKILL.md"), "# demo");
+    }
+    const wsOnlyNative = sandbox();
+    mkdirSync(path.join(wsOnlyNative, ".opencode", "skills", "only-opencode"), { recursive: true });
+    writeFileSync(path.join(wsOnlyNative, ".opencode", "skills", "only-opencode", "SKILL.md"), "# x");
+    const wsWithout = sandbox();
+
+    const d = new ConfigStore({ configDirOverride: configDir, homeDir: home }).discover([ws, wsOnlyNative, wsWithout]);
+
+    const projects = d.skillLocations.filter((l) => l.scope === "project");
+    expect(projects.map((l) => `${l.label} @ ${l.dir}`)).toEqual([
+      `.agents/skills @ ${path.join(ws, ".agents", "skills")}`,
+      `.claude/skills @ ${path.join(ws, ".claude", "skills")}`,
+      `.opencode/skills @ ${path.join(ws, ".opencode", "skills")}`,
+      `.github/skills @ ${path.join(ws, ".github", "skills")}`,
+      `.gemini/skills @ ${path.join(ws, ".gemini", "skills")}`,
+      `.cursor/skills @ ${path.join(ws, ".cursor", "skills")}`,
+      `.windsurf/skills @ ${path.join(ws, ".windsurf", "skills")}`,
+      `.opencode/skills @ ${path.join(wsOnlyNative, ".opencode", "skills")}`,
+    ]);
+    expect(projects.every((l) => l.skillNames.length === 1)).toBe(true);
   });
 });
 
