@@ -219,9 +219,9 @@ function tests(): TestCase[] {
       },
     },
     {
-      name: "backupNow creates a *-manual backup with manifest.json",
+      name: "backupNow creates a named *-manual backup with manifest.json",
       fn: async () => {
-        await vscode.commands.executeCommand(CMD.backupNow);
+        await vscode.commands.executeCommand(CMD.backupNow, "e2e 备份");
         const backupsDir = path.join(configDir, "backups");
         assert.ok(fs.existsSync(backupsDir), "backups dir must exist after backupNow");
         const dirNames = fs
@@ -235,9 +235,11 @@ function tests(): TestCase[] {
         assert.ok(fs.existsSync(manifestPath), `manifest.json missing in ${newest}`);
         const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8")) as {
           reason: string;
+          name?: string;
           fileCount: number;
         };
         assert.equal(manifest.reason, "manual");
+        assert.equal(manifest.name, "e2e 备份");
         assert.ok(manifest.fileCount >= 2, "manual backup should contain both managed config files");
         manualBackupDirName = newest;
       },

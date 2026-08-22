@@ -360,8 +360,11 @@ export function buildConfigTree(
           .map((b): BaseNode => ({
             kind: "backup",
             id: `backup:${b.dirName}`,
-            label: `${formatBackupStamp(b.manifest.createdAt)} ${BACKUP_REASON_LABELS[b.manifest.reason] ?? b.manifest.reason}`,
-            description: b.manifest.preset ? `预设 ${b.manifest.preset}` : undefined,
+            // The timestamp is display-only (from manifest.createdAt); the dir keeps its id.
+            label: b.manifest.name
+              ? `${b.manifest.name} · ${formatBackupStamp(b.manifest.createdAt)}`
+              : `${formatBackupStamp(b.manifest.createdAt)} ${BACKUP_REASON_LABELS[b.manifest.reason] ?? b.manifest.reason}`,
+            description: b.manifest.preset ? `模板 ${b.manifest.preset}` : undefined,
             tooltip: `${b.dir}（${b.manifest.fileCount} 个文件）`,
             contextValue: "backup",
             collapsibleState: "none",
@@ -381,8 +384,8 @@ export function buildConfigTree(
   ];
 
   return [
-    { kind: "configRoot", id: "root:config", label: "配置文件", tooltip: d.configDir, contextValue: "configRoot", collapsibleState: "expanded", children: configChildren },
-    { kind: "presetRoot", id: "root:presets", label: "预设", contextValue: "presetRoot", collapsibleState: "expanded", children: presetChildren },
+    { kind: "configRoot", id: "root:config", label: "配置", tooltip: d.configDir, contextValue: "configRoot", collapsibleState: "expanded", children: configChildren },
+    { kind: "presetRoot", id: "root:presets", label: "模板", contextValue: "presetRoot", collapsibleState: "expanded", children: presetChildren },
     { kind: "backupRoot", id: "root:backups", label: "备份", contextValue: "backupRoot", collapsibleState: "expanded", children: backupChildren },
     { kind: "modelRoot", id: "root:models", label: "模型", contextValue: "modelRoot", collapsibleState: "expanded", children: modelChildren },
   ];

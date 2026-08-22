@@ -188,8 +188,8 @@ describe("buildConfigTree — full shape", () => {
     MODEL_ENTRIES,
   );
 
-  it("returns exactly four roots in order 配置文件 / 预设 / 备份 / 模型, all expanded", () => {
-    expect(roots.map((r) => r.label)).toEqual(["配置文件", "预设", "备份", "模型"]);
+  it("returns exactly four roots in order 配置 / 模板 / 备份 / 模型, all expanded", () => {
+    expect(roots.map((r) => r.label)).toEqual(["配置", "模板", "备份", "模型"]);
     expect(roots.map((r) => r.kind)).toEqual(["configRoot", "presetRoot", "backupRoot", "modelRoot"]);
     expect(roots.every((r) => r.collapsibleState === "expanded")).toBe(true);
   });
@@ -330,7 +330,7 @@ describe("buildConfigTree — full shape", () => {
     const kids = roots[2].children!;
     expect(kids.map((k) => k.id)).toEqual(["backup:20260821-100000-pre-apply", "backup:20260819-090000-manual"]);
     expect(kids[0].label).toBe("2026-08-21 10:00 应用前");
-    expect(kids[0].description).toBe("预设 deep-work");
+    expect(kids[0].description).toBe("模板 deep-work");
     expect(kids[0].contextValue).toBe("backup");
     expect(kids[0].tooltip).toContain("/cfg/backups/20260821-100000-pre-apply");
     expect(kids[0].tooltip).toContain("2");
@@ -434,9 +434,23 @@ describe("buildConfigTree — current preset marker", () => {
     expect(deep.tooltip).toContain("2026-08-20T08:30:00.000Z");
   });
 
+  it("named backups show `名称 · 时间`; the timestamp is display-only from createdAt", () => {
+    const snap = makeSnapshot({
+      backups: [
+        makeBackup(
+          { name: "升级前", createdAt: "2026-08-21T10:00:00.000Z", reason: "manual" },
+          { dirName: "2026-08-21T10-00-00-000Z-manual", dir: "/cfg/backups/2026-08-21T10-00-00-000Z-manual" },
+        ),
+      ],
+    });
+    const kids = buildConfigTree(snap.discovered, snap.presets, snap.currentPreset, snap.backups, snap.parseErrors)[2].children!;
+    expect(kids[0].label).toBe("升级前 · 2026-08-21 10:00");
+    expect(kids[0].id).toBe("backup:2026-08-21T10-00-00-000Z-manual");
+  });
+
   it("backup description carries manifest.preset name", () => {
     const newest = roots[2].children![0];
-    expect(newest.description).toBe("预设 deep-work");
+    expect(newest.description).toBe("模板 deep-work");
   });
 });
 

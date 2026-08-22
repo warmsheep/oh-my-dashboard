@@ -45,23 +45,23 @@ const BACKUP_REASON_LABELS: Record<string, string> = {
 export function registerCommands(ctx: vscode.ExtensionContext, deps: ExtensionDeps): void {
   const disposables = [
     vscode.commands.registerCommand(CMD.openConfigFile, (arg?: unknown) =>
-      run(deps, "打开配置文件失败", () => openConfigFile(deps, arg)),
+      run(deps, "打开配置失败", () => openConfigFile(deps, arg)),
     ),
     vscode.commands.registerCommand(CMD.createConfig, () =>
-      run(deps, "创建配置文件失败", () => createConfig(deps)),
+      run(deps, "创建配置失败", () => createConfig(deps)),
     ),
     vscode.commands.registerCommand(CMD.setAgentModel, (arg?: unknown) =>
       run(deps, "设置模型失败", () => setAgentModel(deps, arg)),
     ),
     vscode.commands.registerCommand(CMD.capturePreset, (arg?: unknown) =>
-      run(deps, "捕获预设失败", () => capturePreset(deps, arg)),
+      run(deps, "捕获模板失败", () => capturePreset(deps, arg)),
     ),
     vscode.commands.registerCommand(CMD.applyPreset, (arg?: unknown) =>
-      run(deps, "应用预设失败", () => applyPresetCommand(deps, arg)),
+      run(deps, "应用模板失败", () => applyPresetCommand(deps, arg)),
     ),
     vscode.commands.registerCommand(CMD.editPreset, (arg?: unknown) =>
-      run(deps, "打开预设编辑器失败", async () => {
-        const name = presetNameFromArg(arg) ?? (await pickPreset(deps, false, "选择要编辑的预设"));
+      run(deps, "打开模板编辑器失败", async () => {
+        const name = presetNameFromArg(arg) ?? (await pickPreset(deps, false, "选择要编辑的模板"));
         if (!name) {
           return;
         }
@@ -69,23 +69,22 @@ export function registerCommands(ctx: vscode.ExtensionContext, deps: ExtensionDe
       }),
     ),
     vscode.commands.registerCommand(CMD.renamePreset, (arg?: unknown) =>
-      run(deps, "重命名预设失败", () => renamePreset(deps, arg)),
+      run(deps, "重命名模板失败", () => renamePreset(deps, arg)),
     ),
     vscode.commands.registerCommand(CMD.deletePreset, (arg?: unknown) =>
-      run(deps, "删除预设失败", () => deletePreset(deps, arg)),
+      run(deps, "删除模板失败", () => deletePreset(deps, arg)),
     ),
     vscode.commands.registerCommand(CMD.exportPreset, (arg?: unknown) =>
-      run(deps, "导出预设失败", () => exportPreset(deps, arg)),
+      run(deps, "导出模板失败", () => exportPreset(deps, arg)),
     ),
     vscode.commands.registerCommand(CMD.showPresetQuickPick, () =>
-      run(deps, "切换预设失败", () => applyPresetCommand(deps, undefined, true)),
+      run(deps, "切换模板失败", () => applyPresetCommand(deps, undefined, true)),
     ),
-    vscode.commands.registerCommand(CMD.backupNow, () =>
-      run(deps, "创建备份失败", () => {
-        const entry = deps.backupService.create("manual");
-        deps.refreshAll();
-        void vscode.window.showInformationMessage(`已创建备份 ${entry.dirName}`);
-      }),
+    vscode.commands.registerCommand(CMD.backupNow, (arg?: unknown) =>
+      run(deps, "创建备份失败", () => backupNow(deps, arg)),
+    ),
+    vscode.commands.registerCommand(CMD.renameBackup, (arg?: unknown) =>
+      run(deps, "重命名备份失败", () => renameBackup(deps, arg)),
     ),
     vscode.commands.registerCommand(CMD.restoreBackup, (arg?: unknown) =>
       run(deps, "恢复备份失败", () => restoreBackup(deps, arg)),
@@ -241,10 +240,10 @@ async function pickPreset(
     presetName: preset.name,
   }));
   if (includeCapture) {
-    items.push({ label: "➕ 捕获新预设…", presetName: null });
+    items.push({ label: "➕ 捕获新模板…", presetName: null });
   }
   if (items.length === 0) {
-    void vscode.window.showInformationMessage("尚无预设，可先从当前配置捕获一个");
+    void vscode.window.showInformationMessage("尚无模板，可先从当前配置捕获一个");
     return undefined;
   }
   const picked = await vscode.window.showQuickPick(items, { placeHolder });
@@ -370,11 +369,11 @@ async function openConfigFile(deps: ExtensionDeps, arg: unknown): Promise<void> 
   }
   if (items.length === 0) {
     void vscode.window.showInformationMessage(
-      "未发现任何配置文件，可先执行「OpenCode: 创建缺失的配置文件」创建",
+      "未发现任何配置，可先执行「OpenCode: 创建缺失的配置」创建",
     );
     return;
   }
-  const picked = await vscode.window.showQuickPick(items, { placeHolder: "打开配置文件" });
+  const picked = await vscode.window.showQuickPick(items, { placeHolder: "打开配置" });
   if (picked) {
     await openPathOrDirectory(picked.path);
   }
@@ -423,7 +422,7 @@ async function createConfig(deps: ExtensionDeps): Promise<void> {
   ];
   const targets = allTargets.filter((target) => !fs.existsSync(target.filePath));
   if (targets.length === 0) {
-    void vscode.window.showInformationMessage("所有配置文件均已存在");
+    void vscode.window.showInformationMessage("所有配置均已存在");
     return;
   }
   const picked = await vscode.window.showQuickPick(
@@ -432,7 +431,7 @@ async function createConfig(deps: ExtensionDeps): Promise<void> {
       description: target.filePath,
       target,
     })),
-    { placeHolder: "选择要创建的配置文件" },
+    { placeHolder: "选择要创建的配置" },
   );
   if (!picked) {
     return;
@@ -531,7 +530,7 @@ async function capturePreset(deps: ExtensionDeps, arg: unknown): Promise<void> {
     typeof arg === "string" && arg.length > 0 ? arg : presetNameFromArg(arg);
   if (!name) {
     const input = await vscode.window.showInputBox({
-      prompt: "预设名称",
+      prompt: "模板名称",
       placeHolder: "重度创作",
       validateInput: validatePresetName,
     });
@@ -542,7 +541,7 @@ async function capturePreset(deps: ExtensionDeps, arg: unknown): Promise<void> {
   }
   const preset = deps.presetService.capture(name);
   deps.refreshAll();
-  void vscode.window.showInformationMessage(`已捕获预设 ${preset.name}`);
+  void vscode.window.showInformationMessage(`已捕获模板 ${preset.name}`);
 }
 
 async function applyPresetCommand(
@@ -552,7 +551,7 @@ async function applyPresetCommand(
 ): Promise<void> {
   let name = presetNameFromArg(arg);
   if (!name) {
-    const picked = await pickPreset(deps, includeCapture, "切换预设（当前项在最前）");
+    const picked = await pickPreset(deps, includeCapture, "切换模板（当前项在最前）");
     if (picked === undefined) {
       return;
     }
@@ -564,16 +563,16 @@ async function applyPresetCommand(
   }
   const result = deps.presetService.apply(name);
   deps.refreshAll();
-  void vscode.window.showInformationMessage(`已应用预设 ${name}（${result.changes.length} 处变更）`);
+  void vscode.window.showInformationMessage(`已应用模板 ${name}（${result.changes.length} 处变更）`);
 }
 
 async function renamePreset(deps: ExtensionDeps, arg: unknown): Promise<void> {
-  const oldName = presetNameFromArg(arg) ?? (await pickPreset(deps, false, "选择要重命名的预设"));
+  const oldName = presetNameFromArg(arg) ?? (await pickPreset(deps, false, "选择要重命名的模板"));
   if (!oldName) {
     return;
   }
   const input = await vscode.window.showInputBox({
-    prompt: "新的预设名称",
+    prompt: "新的模板名称",
     value: oldName,
     validateInput: (value) => {
       const base = validatePresetName(value);
@@ -581,7 +580,7 @@ async function renamePreset(deps: ExtensionDeps, arg: unknown): Promise<void> {
         return base;
       }
       if (value !== oldName && deps.presetService.exists(value)) {
-        return `预设 ${value} 已存在`;
+        return `模板 ${value} 已存在`;
       }
       return undefined;
     },
@@ -595,11 +594,11 @@ async function renamePreset(deps: ExtensionDeps, arg: unknown): Promise<void> {
 }
 
 async function deletePreset(deps: ExtensionDeps, arg: unknown): Promise<void> {
-  const name = presetNameFromArg(arg) ?? (await pickPreset(deps, false, "选择要删除的预设"));
+  const name = presetNameFromArg(arg) ?? (await pickPreset(deps, false, "选择要删除的模板"));
   if (!name) {
     return;
   }
-  const confirm = await vscode.window.showWarningMessage(`删除预设 ${name}？`, {
+  const confirm = await vscode.window.showWarningMessage(`删除模板 ${name}？`, {
     modal: true,
     detail: "删除后无法恢复",
   }, "删除");
@@ -608,11 +607,11 @@ async function deletePreset(deps: ExtensionDeps, arg: unknown): Promise<void> {
   }
   deps.presetService.remove(name);
   deps.refreshAll();
-  void vscode.window.showInformationMessage(`已删除预设 ${name}`);
+  void vscode.window.showInformationMessage(`已删除模板 ${name}`);
 }
 
 async function exportPreset(deps: ExtensionDeps, arg: unknown): Promise<void> {
-  const name = presetNameFromArg(arg) ?? (await pickPreset(deps, false, "选择要导出的预设"));
+  const name = presetNameFromArg(arg) ?? (await pickPreset(deps, false, "选择要导出的模板"));
   if (!name) {
     return;
   }
@@ -624,7 +623,52 @@ async function exportPreset(deps: ExtensionDeps, arg: unknown): Promise<void> {
     return;
   }
   deps.presetService.exportTo(name, target.fsPath);
-  void vscode.window.showInformationMessage(`已导出预设 ${name} → ${target.fsPath}`);
+  void vscode.window.showInformationMessage(`已导出模板 ${name} → ${target.fsPath}`);
+}
+
+async function backupNow(deps: ExtensionDeps, arg: unknown): Promise<void> {
+  // Programmatic name (e2e / command-line style invocation) bypasses the input box.
+  let name: string | undefined = typeof arg === "string" && arg.trim().length > 0 ? arg.trim() : undefined;
+  if (name === undefined) {
+    const input = await vscode.window.showInputBox({
+      title: "创建备份",
+      prompt: "为这次备份起个名字，便于以后识别",
+      value: "手动备份",
+      ignoreFocusOut: true,
+      validateInput: (value) => (value.trim().length === 0 ? "名称不能为空" : undefined),
+    });
+    if (!input) {
+      return;
+    }
+    name = input.trim();
+  }
+  deps.backupService.create("manual", { name });
+  deps.refreshAll();
+  void vscode.window.showInformationMessage(`已创建备份「${name}」`);
+}
+
+async function renameBackup(deps: ExtensionDeps, arg: unknown): Promise<void> {
+  const entry = backupFromArg(deps, arg) ?? (await pickBackup(deps, "选择要重命名的备份"));
+  if (!entry) {
+    return;
+  }
+  const input = await vscode.window.showInputBox({
+    title: "重命名备份",
+    prompt: "修改备份的显示名称",
+    value: entry.manifest.name ?? BACKUP_REASON_LABELS[entry.manifest.reason] ?? entry.manifest.reason,
+    ignoreFocusOut: true,
+    validateInput: (value) => (value.trim().length === 0 ? "名称不能为空" : undefined),
+  });
+  if (!input) {
+    return;
+  }
+  const next = input.trim();
+  if (next.length === 0 || next === entry.manifest.name) {
+    return;
+  }
+  deps.backupService.rename(entry.dirName, next);
+  deps.refreshAll();
+  void vscode.window.showInformationMessage(`备份已重命名为「${next}」`);
 }
 
 async function restoreBackup(deps: ExtensionDeps, arg: unknown): Promise<void> {
