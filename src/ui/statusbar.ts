@@ -13,7 +13,7 @@ export interface StatusBar extends vscode.Disposable {
 
 export function createStatusBar(deps: StatusBarDeps): StatusBar {
   const item = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
-  item.name = "OpenCode 预设";
+  item.name = "OpenCode 模板";
   item.command = CMD.showPresetQuickPick;
 
   const update = (): void => {
@@ -28,13 +28,13 @@ export function createStatusBar(deps: StatusBarDeps): StatusBar {
       try {
         appliedAt = deps.presetService.load(name).appliedAt ?? null;
       } catch (error) {
-        deps.log(`statusbar: 读取预设 ${name} 失败: ${errorMessage(error)}`);
+        deps.log(`statusbar: 读取模板 ${name} 失败: ${errorMessage(error)}`);
       }
     }
-    item.text = `$(bookmark) 预设: ${name ?? "无"}`;
+    item.text = `$(bookmark) 模板: ${name ?? "无"}`;
     item.tooltip = name
-      ? `当前预设: ${name}${appliedAt ? `\n应用时间: ${appliedAt}` : "\n尚未在本机应用"}`
-      : "未应用任何预设（点击切换）";
+      ? `当前模板: ${name}${appliedAt ? `\n应用时间: ${appliedAt}` : "\n尚未在本机应用"}`
+      : "未应用任何模板（点击切换）";
     item.show();
   };
 

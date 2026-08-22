@@ -447,7 +447,7 @@ export default function App() {
     if (!current) return;
     if (!current.name.trim()) {
       setNameMissing(true);
-      setError("预设名称不能为空");
+      setError("模板名称不能为空");
       nameInputRef.current?.focus();
       return;
     }
@@ -491,7 +491,7 @@ export default function App() {
     >
       <main className="page">
         <header className="page-head">
-          <h1>预设矩阵编辑器</h1>
+          <h1>模板矩阵编辑器</h1>
           <p>
             为各 Agent 与 Category 指定模型和 variant；未设置的行继承默认配置。
           </p>
@@ -510,7 +510,7 @@ export default function App() {
         <fieldset className="meta" disabled={busy}>
           <div className="field">
             <label htmlFor="preset-name">
-              预设名称
+              模板名称
               <i className="req" aria-hidden="true">
                 *
               </i>
@@ -537,7 +537,7 @@ export default function App() {
               value={form.description}
               autoComplete="off"
               spellCheck={false}
-              placeholder="可选，一句话说明这个预设的用途"
+              placeholder="可选，一句话说明这个模板的用途"
               onChange={(e) =>
                 patchForm((f) => ({ ...f, description: e.target.value }))
               }

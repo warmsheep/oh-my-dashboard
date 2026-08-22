@@ -39,7 +39,7 @@ export async function openPresetEditor(
   const html = readWebviewHtml(ctx, deps);
   if (html === undefined) {
     void vscode.window.showErrorMessage(
-      "预设编辑器前端资源缺失（dist-webview/index.html），请先运行 npm run build:webview",
+      "模板编辑器前端资源缺失（dist-webview/index.html），请先运行 npm run build:webview",
     );
     return;
   }
@@ -47,7 +47,7 @@ export async function openPresetEditor(
   const distWebviewUri = vscode.Uri.joinPath(ctx.extensionUri, "dist-webview");
   const panel = vscode.window.createWebviewPanel(
     PRESET_EDITOR_VIEW_TYPE,
-    `编辑预设: ${name ?? "新建"}`,
+    `编辑模板: ${name ?? "新建"}`,
     vscode.ViewColumn.Active,
     {
       enableScripts: true,
@@ -72,7 +72,7 @@ export async function openPresetEditor(
       try {
         preset = deps.presetService.load(currentName);
       } catch (error) {
-        deps.log(`presetEditor: 读取预设 ${currentName} 失败: ${errorMessage(error)}`);
+        deps.log(`presetEditor: 读取模板 ${currentName} 失败: ${errorMessage(error)}`);
       }
     }
     return {
@@ -104,13 +104,13 @@ export async function openPresetEditor(
     const newName = message.name.trim();
     const action = message.apply ? "apply" : "save";
     if (!PRESET_NAME_PATTERN.test(newName)) {
-      reply(action, false, "预设名须为 1-64 个字符，且不含 / 或 \\");
+      reply(action, false, "模板名须为 1-64 个字符，且不含 / 或 \\");
       return;
     }
     const original =
       currentName !== null && deps.presetService.exists(currentName) ? currentName : null;
     if (newName !== original && deps.presetService.exists(newName)) {
-      reply(action, false, `预设 ${newName} 已存在`);
+      reply(action, false, `模板 ${newName} 已存在`);
       return;
     }
     let createdAt = new Date().toISOString();
@@ -144,7 +144,7 @@ export async function openPresetEditor(
     }
     deps.refreshAll();
     currentName = newName;
-    panel.title = `编辑预设: ${newName}`;
+    panel.title = `编辑模板: ${newName}`;
     reply(action, true);
   };
 
