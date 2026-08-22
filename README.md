@@ -8,8 +8,8 @@ VSCode 扩展：管理 [opencode](https://opencode.ai) 与 [oh-my-opencode](http
   - 自动识别本机生效的 agent 配置：新版 oh-my-openagent 的统一配置 `~/.omo/omo.jsonc`（`[opencode]` 块），或旧版 `oh-my-opencode.json[c]` / `oh-my-openagent.json[c]`（与运行时同序：`oh-my-opencode` 优先，`.jsonc` 优先于 `.json`）
   - `opencode.json`（JSONC，保留注释与尾逗号；`opencode.jsonc` 亦可识别）、`AGENTS.md`（全局+项目级）、`command/`、`skills/`
   - agent/category 节点点击 → QuickPick 选模型与 variant，程序化写回（omo 目标写 `reasoning` 键，同时清理冲突的 `variant`/`models` 链）
-- **预设**：从当前配置捕获；Webview 矩阵编辑器（批量设模型、逐行 variant）；应用采用合并语义（预设未列出的键不动）
-- **备份**：手动「立即备份」；manifest 记录原因；与当前配置 diff 对比；恢复时明确警告覆盖（应用/恢复不再自动产生备份）
+- **模板**（原「预设」）：从当前配置捕获；Webview 矩阵编辑器（批量设模型、逐行 variant）；应用采用合并语义（预设未列出的键不动）
+- **备份**：手动「立即备份」会要求输入备份名称（名称仅用于展示，时间戳自动附带且不入名称）；历史备份可右键「重命名备份」；manifest 记录原因；与当前配置 diff 对比；恢复时明确警告覆盖（应用/恢复不再自动产生备份）
 - **状态栏**：显示当前预设，点击快速切换（`Ctrl+Alt+P`）
 - **Coding Plan 额度**（状态栏右侧）：实时显示 Kimi / GLM / MiMo 剩余额度（5 小时窗口、周额度；MiMo 为月度额度+余额）
   - Kimi / GLM 自动读取 opencode 凭据（`~/.local/share/opencode/auth.json`），无需额外配置
@@ -29,7 +29,7 @@ code --install-extension build/packages/opencode-config-manager-0.3.0.vsix
 ## 使用
 
 1. 点击活动栏 OpenCode 图标打开面板
-2. 首次：点「从当前配置捕获…」存一个基线预设
+2. 首次：点「从当前配置捕获…」存一个基线模板
 3. 改模型：展开 `oh-my-opencode.json` → 点任意 agent → 选模型
 4. 切换：状态栏或预设区右键「应用」
 5. 后悔药：变更前先「立即备份」，需要时备份区右键「恢复」/「对比」
