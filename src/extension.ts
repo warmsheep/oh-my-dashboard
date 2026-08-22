@@ -3,6 +3,7 @@ import * as path from "node:path";
 import * as vscode from "vscode";
 import { BackupService } from "./core/backupService";
 import { ConfigStore } from "./core/configStore";
+import { QuotaService } from "./core/quotaService";
 import { validate } from "./core/jsoncEditor";
 import { PresetService } from "./core/presetService";
 import type { BackupEntry, DiscoveredConfig, JsoncError, ModelEntry, ModelSetting, Preset } from "./core/types";
@@ -10,6 +11,7 @@ import { CONFIG_KEY, CONFIG_SECTION, OUTPUT_CHANNEL_NAME, VIEW } from "./constan
 import { ConfigTreeDataProvider } from "./tree/provider";
 import { registerCommands } from "./ui/commands";
 import { createStatusBar } from "./ui/statusbar";
+import { createQuotaStatusBar } from "./ui/quotaStatusBar";
 import { notifyPresetEditorsModelsChanged } from "./webview/presetEditorHost";
 
 interface TreeDataSnapshot {
@@ -81,58 +83,106 @@ export function activate(ctx: vscode.ExtensionContext): void {
     };
   };
 
-  const providers = {
-    configFiles: new ConfigTreeDataProvider("config", dataLoader),
-    presets: new ConfigTreeDataProvider("presets", dataLoader),
-    backups: new ConfigTreeDataProvider("backups", dataLoader),
-    models: new ConfigTreeDataProvider("models", dataLoader),
-  };
-  ctx.subscriptions.push(
-    vscode.window.registerTreeDataProvider(VIEW.configFiles, providers.configFiles),
-    vscode.window.registerTreeDataProvider(VIEW.presets, providers.presets),
-    vscode.window.registerTreeDataProvider(VIEW.backups, providers.backups),
-    vscode.window.registerTreeDataProvider(VIEW.models, providers.models),
-  );
+  // One merged view instead of four: every collapsed→expand transition of a view pane costs
+  // renderer-side layout + when-clause evaluation over all extensions' contributions (2-3s in a
+  // long-lived code-server window, independent of extension-side speed). A single always-visible
+  // view restores via the fast path; the four sections expand as plain tree nodes (milliseconds).
+  const provider = new ConfigTreeDataProvider(dataLoader);
+  ctx.subscriptions.push(vscode.window.registerTreeDataProvider(VIEW.explorer, provider));
 
   const statusbar = createStatusBar({ presetService, log });
   ctx.subscriptions.push(statusbar);
 
+  const quotaService = new QuotaService({
+    quotaConfigPath: path.join(discovered.configDir, "quota.json"),
+  });
+  ctx.subscriptions.push(createQuotaStatusBar({ quotaService, configDir: discovered.configDir, log }));
+
   const refreshAll = (): void => {
-    providers.configFiles.refresh();
-    providers.presets.refresh();
-    providers.backups.refresh();
-    providers.models.refresh();
+    provider.refresh();
     statusbar.update();
     notifyPresetEditorsModelsChanged(configStore.listModels());
   };
 
   registerCommands(ctx, { configStore, backupService, presetService, refreshAll, log });
 
+  void provider.warmup();
+
   const MANAGED_SUBDIRS = ["presets", "backups", "command", "skills"] as const;
+  const MANAGED_BASENAMES = new Set([
+    "opencode.json",
+    "opencode.jsonc",
+    "oh-my-opencode.json",
+    "oh-my-opencode.jsonc",
+    "oh-my-openagent.json",
+    "oh-my-openagent.jsonc",
+    "AGENTS.md",
+    "models.json",
+    "quota.json",
+  ]);
+  const OMO_BASENAMES = new Set(["omo.jsonc", "omo.json"]);
+
   let watchTimer: NodeJS.Timeout | undefined;
-  const onWatchEvent = (): void => {
+  const lastFileContents = new Map<string, string>();
+  const pendingTriggers = new Set<string>();
+  const scheduleRefresh = (file?: string): void => {
     armSubdirWatchers();
+    if (file !== undefined) {
+      pendingTriggers.add(file);
+    }
     if (watchTimer !== undefined) {
       clearTimeout(watchTimer);
     }
     watchTimer = setTimeout(() => {
       watchTimer = undefined;
-      refreshAll();
+      // Skip the re-render entirely when every triggering file's bytes are unchanged —
+      // e.g. another window rewrote models.json with identical content.
+      const changed = [...pendingTriggers].filter((p) => {
+        try {
+          const current = fs.readFileSync(p, "utf8");
+          if (lastFileContents.get(p) === current) {
+            return false;
+          }
+          lastFileContents.set(p, current);
+        } catch {
+          // vanished files count as changed
+        }
+        return true;
+      });
+      pendingTriggers.clear();
+      if (changed.length > 0) {
+        refreshAll();
+      }
     }, 300);
+  };
+
+  // Flat watchers must filter by filename: configDir and ~/.omo both host unrelated churn
+  // (node_modules, omo runtime/codegraph/lsp state files) that would otherwise trigger a
+  // full refresh storm on every write.
+  const makeFlatHandler = (dir: string, allowed: Set<string>) => {
+    return (_event: string, filename: string | Buffer | null): void => {
+      const base = filename === null ? "" : path.basename(filename.toString());
+      if (allowed.has(base)) {
+        scheduleRefresh(path.join(dir, base));
+      }
+    };
   };
 
   const watchers = new Set<fs.FSWatcher>();
   const watchedDirs = new Set<string>();
-  const addWatch = (target: string, opts: fs.WatchOptions): void => {
+  const addWatch = (target: string, opts: fs.WatchOptions, handler: (event: string, filename: string | Buffer | null) => void): void => {
     if (watchedDirs.has(target)) {
       return;
     }
     try {
-      watchers.add(fs.watch(target, opts, onWatchEvent));
+      watchers.add(fs.watch(target, opts, handler));
       watchedDirs.add(target);
     } catch (error) {
       log(`fs.watch(${target}) 失败: ${error instanceof Error ? error.message : String(error)}`);
     }
+  };
+  const subdirHandler = (): void => {
+    scheduleRefresh();
   };
 
   // configDir must stay flat: it hosts node_modules (~20k files) that are irrelevant to the
@@ -142,16 +192,16 @@ export function activate(ctx: vscode.ExtensionContext): void {
     for (const name of MANAGED_SUBDIRS) {
       const dir = path.join(configStore.configDir, name);
       if (fs.existsSync(dir)) {
-        addWatch(dir, { recursive: true });
+        addWatch(dir, { recursive: true }, subdirHandler);
       }
     }
   };
   armSubdirWatchers();
-  addWatch(configStore.configDir, { recursive: false });
-  // The omo config lives outside the opencode config dir — watch it too (flat).
+  addWatch(configStore.configDir, { recursive: false }, makeFlatHandler(configStore.configDir, MANAGED_BASENAMES));
+  // The omo config lives outside the opencode config dir — watch it too (flat, filtered).
   const agentConfigDir = path.dirname(discovered.agentConfig.path);
   if (agentConfigDir !== configStore.configDir) {
-    addWatch(agentConfigDir, { recursive: false });
+    addWatch(agentConfigDir, { recursive: false }, makeFlatHandler(agentConfigDir, OMO_BASENAMES));
   }
 
   if (watchers.size === 0) {

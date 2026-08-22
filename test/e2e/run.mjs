@@ -152,6 +152,7 @@ async function main() {
       extensionTestsEnv: {
         XDG_CONFIG_HOME: seedRoot,
         HOME: fakeHome,
+        XDG_DATA_HOME: path.join(fakeHome, ".local", "share"),
       },
     });
   } catch (error) {

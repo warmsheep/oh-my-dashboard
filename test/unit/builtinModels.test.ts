@@ -71,6 +71,17 @@ describe("ensureLocalModelsFile", () => {
     expect(ensureLocalModelsFile(dir).length).toBe(BUILTIN_MODELS.length);
   });
 
+  it("healed file is not rewritten again: repeated calls leave mtime unchanged", () => {
+    const dir = tmpConfigDir();
+    const file = path.join(dir, LOCAL_MODELS_FILE);
+    fs.writeFileSync(file, "{ broken json");
+    ensureLocalModelsFile(dir);
+    const mtimeAfterHeal = fs.statSync(file).mtimeMs;
+    ensureLocalModelsFile(dir);
+    ensureLocalModelsFile(dir);
+    expect(fs.statSync(file).mtimeMs).toBe(mtimeAfterHeal);
+  });
+
   it("builtin catalog covers all required families with unique ids", () => {
     const families: Record<string, RegExp> = {
       GLM: /^zhipuai-coding-plan\/glm-/,
