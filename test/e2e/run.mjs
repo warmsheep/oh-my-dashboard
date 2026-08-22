@@ -74,6 +74,16 @@ function seedConfigHome() {
   fs.mkdirSync(path.join(opencodeDir, "skills", "e2e-skill"), { recursive: true });
   fs.writeFileSync(path.join(opencodeDir, "skills", "e2e-skill", "SKILL.md"), "# e2e skill stub\n");
 
+  // The fixture opencode.jsonc declares "@happycastle/opencode-openmemory@latest" in its
+  // plugin array — seed the package as installed so the plugin section has a real entry.
+  const pluginDir = path.join(opencodeDir, "node_modules", "@happycastle", "opencode-openmemory");
+  fs.mkdirSync(pluginDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(pluginDir, "package.json"),
+    `${JSON.stringify({ name: "@happycastle/opencode-openmemory", version: "0.0.3" }, null, 2)}\n`,
+  );
+  fs.writeFileSync(path.join(pluginDir, "index.js"), "// e2e plugin stub\n");
+
   console.log(`[e2e:runner] seeded XDG_CONFIG_HOME=${seedRoot}`);
   return seedRoot;
 }

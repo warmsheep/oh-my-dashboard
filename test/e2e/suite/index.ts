@@ -16,6 +16,7 @@ import * as path from "node:path";
 import { promisify } from "node:util";
 import * as vscode from "vscode";
 import { CMD } from "../../../src/constants";
+import { ConfigStore } from "../../../src/core/configStore";
 import { validate } from "../../../src/core/jsoncEditor";
 
 const sleep = promisify(setTimeout);
@@ -171,6 +172,34 @@ function tests(): TestCase[] {
         assert.ok(
           document.fileName.endsWith("opencode.json"),
           `active document should be opencode.json, got: ${document.fileName}`,
+        );
+      },
+    },
+    {
+      name: "plugins: listPlugins resolves the seeded npm install; plugin file opens",
+      fn: async () => {
+        // Same env as the extension host: XDG_CONFIG_HOME/HOME are set by run.mjs.
+        const store = new ConfigStore();
+        const plugins = store.listPlugins();
+        const installed = plugins.find((p) => p.name === "@happycastle/opencode-openmemory");
+        assert.ok(installed, `npm plugin not listed: ${plugins.map((p) => p.name).join(", ")}`);
+        assert.equal(installed.kind, "npm");
+        assert.equal(installed.installed, true);
+        assert.equal(installed.version, "0.0.3");
+        assert.ok(
+          installed.resolvedPath.endsWith(path.join("node_modules", "@happycastle", "opencode-openmemory")),
+          `unexpected resolvedPath: ${installed.resolvedPath}`,
+        );
+        const pathEntry = plugins.find((p) => p.kind === "path");
+        assert.ok(pathEntry, "fixture path plugin (~/.config/.../dist/index.js) must be listed");
+        assert.equal(pathEntry.installed, false, "path entry points outside the seeded HOME — must be uninstalled");
+
+        await vscode.commands.executeCommand(CMD.openConfigFile, { filePath: path.join(installed.resolvedPath, "index.js") });
+        const document = vscode.window.activeTextEditor?.document;
+        assert.ok(document, "expected an active text editor after opening the plugin file");
+        assert.ok(
+          document.fileName.endsWith(path.join("opencode-openmemory", "index.js")),
+          `active document should be the plugin entry file, got: ${document.fileName}`,
         );
       },
     },
