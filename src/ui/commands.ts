@@ -9,7 +9,7 @@ import { KNOWN_AGENTS, KNOWN_CATEGORIES, VARIANTS } from "../core/types";
 import type { BackupService } from "../core/backupService";
 import type { ConfigStore } from "../core/configStore";
 import type { PresetService } from "../core/presetService";
-import { CMD, FILE_TEMPLATES, MODEL_ID_PATTERN, PRESET_NAME_PATTERN } from "../constants";
+import { CMD, FILE_TEMPLATES, MODEL_ID_PATTERN, presetNameError } from "../constants";
 import { openPresetEditor } from "../webview/presetEditorHost";
 
 export interface ExtensionDeps {
@@ -205,7 +205,7 @@ function backupFromArg(deps: ExtensionDeps, arg: unknown): BackupEntry | undefin
 }
 
 function validatePresetName(value: string): string | undefined {
-  return PRESET_NAME_PATTERN.test(value) ? undefined : "名称须为 1-64 个字符，且不含 / 或 \\";
+  return presetNameError(value);
 }
 
 interface PresetPickItem extends vscode.QuickPickItem {
@@ -484,7 +484,7 @@ async function setAgentModel(deps: ExtensionDeps, arg: unknown): Promise<void> {
   const discovered = deps.configStore.discover(workspaceFolders());
   const agentConfig = discovered.agentConfig;
   const agentFileName = path.basename(agentConfig.path);
-  const raw = deps.configStore.readTextOrEmpty(agentConfig.path);
+  const raw = deps.configStore.readTextForEdit(agentConfig.path);
   if (raw.length > 0) {
     const errors = validate(raw);
     if (errors.length > 0) {
@@ -720,8 +720,19 @@ async function deleteBackup(deps: ExtensionDeps, arg: unknown): Promise<void> {
   void vscode.window.showInformationMessage(`已删除备份 ${entry.dirName}`);
 }
 
+const FRIENDLY_ERRORS: Record<string, string> = {
+  INVALID_PRESET_NAME: "模板名称不合法",
+  PRESET_NOT_FOUND: "模板不存在",
+  PRESET_INVALID: "模板文件已损坏（JSON 解析失败）",
+  INVALID_BACKUP_NAME: "备份名称不合法",
+  BACKUP_NOT_FOUND: "备份不存在",
+  BACKUP_PUBLISH_FAILED: "备份发布失败（manifest 缺失）",
+  CONFIG_UNREADABLE: "配置文件存在但无法读取（权限或被占用），已中止以防覆盖",
+};
+
 function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  const raw = error instanceof Error ? error.message : String(error);
+  return FRIENDLY_ERRORS[raw] ?? raw;
 }
 
 function modelIdFromArg(arg: unknown): string | undefined {

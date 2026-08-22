@@ -31,8 +31,14 @@ function makeCtx(opencodeJson?: string): Ctx {
   return { home, configDir, store: new ConfigStore({ configDirOverride: configDir, homeDir: home, env: {} }) };
 }
 
+/** bun-era flat layout: <cache>/node_modules/<name>. */
 function pluginCacheModules(home: string): string {
   return path.join(home, ".cache", "opencode", "node_modules");
+}
+
+/** Modern arborist layout: <cache>/packages/<dirKey>/node_modules/<name>. */
+function pluginPackagesDir(home: string, dirKey: string, name: string): string {
+  return path.join(home, ".cache", "opencode", "packages", dirKey, "node_modules", ...name.split("/"));
 }
 
 function seedNpmPlugin(
@@ -118,21 +124,49 @@ describe("ConfigStore.listPlugins — npm entries", () => {
     expect(list.every((p) => p.kind === "npm")).toBe(true);
     expect(list.every((p) => p.installed)).toBe(false);
     expect(list.every((p) => p.tree)).toEqual(true); // all empty arrays
-    expect(list.every((p) => p.resolvedPath === path.join(pluginCacheModules(home), p.name))).toBe(true);
+    // Uninstalled entries report the modern expected location: packages/<spec>/node_modules/<name>
+    // (bare names get the "@latest" dir key, matching opencode's resolvePluginTarget).
+    expect(list.map((p) => p.resolvedPath)).toEqual([
+      pluginPackagesDir(home, "@scope/name@latest", "@scope/name"),
+      pluginPackagesDir(home, "@scope2/plain@latest", "@scope2/plain"),
+      pluginPackagesDir(home, "pkg@1.2.3", "pkg"),
+      pluginPackagesDir(home, "bare@latest", "bare"),
+    ]);
   });
 
-  it("resolves an install in the runtime cache dir and reads its version + file tree", () => {
+  it("resolves an install in the runtime cache packages/ layout and reads its version + file tree", () => {
     const { store, home } = makeCtx(`{"plugin":["@scope/name@latest"]}`);
-    seedNpmPlugin(pluginCacheModules(home), "@scope/name", { "dist/index.js": "export {}" });
+    const dir = pluginPackagesDir(home, "@scope/name@latest", "@scope/name");
+    const nodeModules = dir.slice(0, dir.indexOf("node_modules") + "node_modules".length);
+    seedNpmPlugin(nodeModules, "@scope/name", { "dist/index.js": "export {}" });
     const [entry] = store.listPlugins();
     expect(entry.installed).toBe(true);
     expect(entry.version).toBe("1.2.3");
-    expect(entry.resolvedPath).toBe(path.join(pluginCacheModules(home), "@scope/name"));
+    expect(entry.resolvedPath).toBe(dir);
     const names = entry.tree.map((e) => e.name);
     expect(names).toEqual(["dist", "package.json"]); // dirs first, files after, alphabetical
     const dist = entry.tree.find((e) => e.name === "dist")!;
     expect(dist.isDir).toBe(true);
     expect(dist.children?.map((c) => c.name)).toEqual(["index.js"]);
+  });
+
+  it("resolves installs from the legacy bun-era flat cache layout", () => {
+    const { store, home } = makeCtx(`{"plugin":["legacy-pkg"]}`);
+    seedNpmPlugin(pluginCacheModules(home), "legacy-pkg", { "index.js": "" });
+    const [entry] = store.listPlugins();
+    expect(entry.installed).toBe(true);
+    expect(entry.resolvedPath).toBe(path.join(pluginCacheModules(home), "legacy-pkg"));
+    expect(entry.version).toBe("1.2.3");
+  });
+
+  it("finds installs under packages/ via scan when the dir key drifts from our reconstruction", () => {
+    const { store, home } = makeCtx(`{"plugin":["drifty"]}`);
+    // opencode normalized the spec differently (e.g. npa lowercasing) — the scan still finds it.
+    const dir = pluginPackagesDir(home, "drifty@^2.0.0", "drifty");
+    seedNpmPlugin(path.dirname(dir), "drifty");  // unscoped: dirname(node_modules/drifty) = node_modules
+    const [entry] = store.listPlugins();
+    expect(entry.installed).toBe(true);
+    expect(entry.resolvedPath).toBe(dir);
   });
 
   it("falls back to configDir/node_modules when the cache dir has no install", () => {
@@ -146,10 +180,11 @@ describe("ConfigStore.listPlugins — npm entries", () => {
 
   it("prefers the runtime cache install when both locations exist", () => {
     const { store, home, configDir } = makeCtx(`{"plugin":["dual"]}`);
-    seedNpmPlugin(pluginCacheModules(home), "dual", {}, `{"name":"dual","version":"9.9.9"}`);
+    const dir = pluginPackagesDir(home, "dual@latest", "dual");
+    seedNpmPlugin(path.dirname(dir), "dual", {}, `{"name":"dual","version":"9.9.9"}`);
     seedNpmPlugin(path.join(configDir, "node_modules"), "dual");
     const [entry] = store.listPlugins();
-    expect(entry.resolvedPath).toBe(path.join(pluginCacheModules(home), "dual"));
+    expect(entry.resolvedPath).toBe(dir);
     expect(entry.version).toBe("9.9.9");
   });
 

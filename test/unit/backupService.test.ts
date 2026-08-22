@@ -421,3 +421,74 @@ describe("BackupService.diffPairs", () => {
     ]);
   });
 });
+
+describe("BackupService path-traversal guard", () => {
+  it("remove/rename/restore reject dirNames that escape the backups dir", () => {
+    seedFullTree();
+    const svc = new BackupService({ configDir, now: seqNow("2026-08-21T15:04:00.000Z") });
+    const entry = svc.create("manual");
+
+    for (const evil of ["../escape", "..", "/abs/name", "a/b"]) {
+      expect(() => svc.remove(evil)).toThrow("INVALID_BACKUP_NAME");
+      expect(() => svc.rename(evil, "x")).toThrow("INVALID_BACKUP_NAME");
+      expect(() => svc.restore(evil)).toThrow("INVALID_BACKUP_NAME");
+    }
+    if (process.platform === "win32") {
+      // Backslash is a separator only on Windows; on POSIX it's a legal (contained) filename char.
+      expect(() => svc.remove("..\\escape")).toThrow("INVALID_BACKUP_NAME");
+    }
+    expect(fs.existsSync(entry.dir)).toBe(true);
+  });
+});
+
+describe("BackupService staging + symlink handling", () => {
+  it("create() publishes via staging: no .tmp-* residue, staged dirs invisible to list()", () => {
+    seedFullTree();
+    const svc = new BackupService({ configDir, now: seqNow("2026-08-21T15:04:00.000Z") });
+    // A leftover staging dir from a crashed run (even with a manifest) must stay invisible.
+    const stale = path.join(configDir, "backups", ".tmp-2026-01-01T00-00-00-000Z-manual");
+    fs.mkdirSync(stale, { recursive: true });
+    fs.writeFileSync(path.join(stale, "manifest.json"), JSON.stringify({ version: 1, reason: "manual", createdAt: "2026-01-01T00:00:00.000Z", fileCount: 0, machine: "x" }));
+
+    const entry = svc.create("manual");
+    expect(fs.existsSync(entry.dir)).toBe(true);
+    const names = fs.readdirSync(path.join(configDir, "backups"));
+    expect(names.filter((n) => n.startsWith(".tmp-"))).toEqual([]); // stale swept, nothing left behind
+    expect(svc.list().map((e) => e.dirName)).toEqual([entry.dirName]);
+  });
+
+  it("snapshots symlinked skill content by dereference (no symlink privilege needed on Windows)", () => {
+    seedFullTree();
+    const realDir = path.join(configDir, "skills", "real-skill");
+    fs.mkdirSync(realDir, { recursive: true });
+    fs.writeFileSync(path.join(realDir, "SKILL.md"), "# real");
+    fs.symlinkSync(
+      realDir,
+      path.join(configDir, "skills", "linked-skill"),
+      process.platform === "win32" ? "junction" : "dir",
+    );
+
+    const svc = new BackupService({ configDir, now: seqNow("2026-08-21T15:04:00.000Z") });
+    const entry = svc.create("manual");
+
+    const copy = path.join(entry.dir, "skills", "linked-skill", "SKILL.md");
+    expect(fs.readFileSync(copy, "utf8")).toBe("# real");
+    expect(fs.lstatSync(path.join(entry.dir, "skills", "linked-skill")).isSymbolicLink()).toBe(false);
+
+    svc.restore(entry.dirName);
+    expect(fs.readFileSync(path.join(configDir, "skills", "linked-skill", "SKILL.md"), "utf8")).toBe("# real");
+  });
+
+  it("restore() keeps the live config intact when a managed file copy is impossible", () => {
+    seedFullTree();
+    const svc = new BackupService({ configDir, now: seqNow("2026-08-21T15:04:00.000Z") });
+    const entry = svc.create("manual");
+    // Make the backup's opencode.json a directory — readFileSync will throw, and the
+    // live file must not be truncated (atomic write never starts).
+    fs.rmSync(path.join(entry.dir, "opencode.json"));
+    fs.mkdirSync(path.join(entry.dir, "opencode.json"));
+    const before = fs.readFileSync(path.join(configDir, "opencode.json"), "utf8");
+    expect(() => svc.restore(entry.dirName)).toThrow();
+    expect(fs.readFileSync(path.join(configDir, "opencode.json"), "utf8")).toBe(before);
+  });
+});

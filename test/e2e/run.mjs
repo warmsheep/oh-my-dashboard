@@ -75,8 +75,19 @@ function seedConfigHome() {
   fs.writeFileSync(path.join(opencodeDir, "skills", "e2e-skill", "SKILL.md"), "# e2e skill stub\n");
 
   // The fixture opencode.jsonc declares "@happycastle/opencode-openmemory@latest" in its
-  // plugin array — seed the package as installed so the plugin section has a real entry.
-  const pluginDir = path.join(opencodeDir, "node_modules", "@happycastle", "opencode-openmemory");
+  // plugin array — seed it in the modern arborist layout under an isolated XDG_CACHE_HOME:
+  // <XDG_CACHE_HOME>/opencode/packages/<spec>/node_modules/<name>.
+  const cacheHome = path.join(seedRoot, ".cache");
+  const pluginDir = path.join(
+    cacheHome,
+    "opencode",
+    "packages",
+    "@happycastle",
+    "opencode-openmemory@latest",
+    "node_modules",
+    "@happycastle",
+    "opencode-openmemory",
+  );
   fs.mkdirSync(pluginDir, { recursive: true });
   fs.writeFileSync(
     path.join(pluginDir, "package.json"),
@@ -85,7 +96,7 @@ function seedConfigHome() {
   fs.writeFileSync(path.join(pluginDir, "index.js"), "// e2e plugin stub\n");
 
   console.log(`[e2e:runner] seeded XDG_CONFIG_HOME=${seedRoot}`);
-  return seedRoot;
+  return { seedRoot, cacheHome };
 }
 
 /** Recursive fingerprint (relpath/mtime/size) to detect any accidental write
@@ -123,6 +134,11 @@ function fileStamp(file) {
   return `${stat.mtimeMs} ${stat.size}`;
 }
 
+/** Portable synchronous sleep — `sleep` does not exist on Windows. */
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, ms);
+}
+
 function removeWithRetries(target, attempts = 5) {
   for (let i = 0; i < attempts; i += 1) {
     try {
@@ -133,9 +149,29 @@ function removeWithRetries(target, attempts = 5) {
         console.warn(`[e2e:runner] could not remove ${target}: ${error}`);
         return;
       }
-      spawnSync("sleep", ["1"]);
+      sleepSync(1_000);
     }
   }
+}
+
+/**
+ * Directories the safety guard fingerprints before/after the run: the runner's own
+ * OPENCODE_CONFIG_DIR / XDG_CONFIG_HOME/opencode plus the default ~/.config/opencode.
+ * Mirrors ConfigStore.resolveConfigDir — opencode uses xdg-basedir, which has no
+ * platform branches (same ~/.config fallback on Linux, macOS and Windows).
+ */
+function realConfigDirCandidates() {
+  const dirs = [];
+  const explicit = process.env.OPENCODE_CONFIG_DIR;
+  if (typeof explicit === "string" && explicit.trim() !== "") {
+    dirs.push(explicit.trim());
+  }
+  const xdg = process.env.XDG_CONFIG_HOME;
+  if (typeof xdg === "string" && xdg.trim() !== "") {
+    dirs.push(path.join(xdg, "opencode"));
+  }
+  dirs.push(path.join(os.homedir(), ".config", "opencode"));
+  return [...new Set(dirs)];
 }
 
 async function main() {
@@ -145,12 +181,12 @@ async function main() {
   }
 
   prepareWebviewAssets();
-  const seedRoot = seedConfigHome();
+  const { seedRoot, cacheHome } = seedConfigHome();
   const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), "ocm-e2e-home-"));
 
-  const realConfigDir = path.join(os.homedir(), ".config", "opencode");
+  const guardDirs = realConfigDirCandidates();
   const realOmoFiles = ["omo.jsonc", "omo.json"].map((name) => path.join(os.homedir(), ".omo", name));
-  const beforeConfig = fingerprint(realConfigDir);
+  const beforeConfig = guardDirs.map(fingerprint);
   const beforeOmo = realOmoFiles.map(fileStamp);
 
   let failed = false;
@@ -161,8 +197,14 @@ async function main() {
       launchArgs: ["--disable-gpu", "--disable-extensions"],
       extensionTestsEnv: {
         XDG_CONFIG_HOME: seedRoot,
+        XDG_CACHE_HOME: cacheHome,
         HOME: fakeHome,
+        USERPROFILE: fakeHome,
         XDG_DATA_HOME: path.join(fakeHome, ".local", "share"),
+        // resolveConfigDir gives OPENCODE_CONFIG_DIR top precedence — an inherited real
+        // value would redirect the extension to the real config dir despite the XDG seed.
+        // resolveConfigDir treats empty as unset, so this masks any inherited value.
+        OPENCODE_CONFIG_DIR: "",
       },
     });
   } catch (error) {
@@ -170,12 +212,12 @@ async function main() {
     failed = true;
   }
 
-  const afterConfig = fingerprint(realConfigDir);
-  if (beforeConfig !== afterConfig) {
-    console.error("[e2e:runner] SAFETY VIOLATION: real ~/.config/opencode changed during the run!");
+  const afterConfig = guardDirs.map(fingerprint);
+  if (beforeConfig.join("|") !== afterConfig.join("|")) {
+    console.error(`[e2e:runner] SAFETY VIOLATION: real config dir changed during the run (${guardDirs.join(", ")})!`);
     failed = true;
   } else {
-    console.log("[e2e:runner] real ~/.config/opencode untouched ✔");
+    console.log(`[e2e:runner] real config dirs untouched ✔ (${guardDirs.join(", ")})`);
   }
   const afterOmo = realOmoFiles.map(fileStamp);
   if (beforeOmo.join("|") !== afterOmo.join("|")) {

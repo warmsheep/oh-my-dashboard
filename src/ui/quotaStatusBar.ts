@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as vscode from "vscode";
 import { formatQuotaBar, normalizeMimoCookie, type QuotaSegmentColor, type QuotaService, type QuotaSnapshot, type QuotaWindow } from "../core/quotaService";
+import { writeFileAtomic } from "../core/configStore";
 import { applyEdits, parseSafe } from "../core/jsoncEditor";
 import { CMD, CONFIG_KEY, CONFIG_SECTION } from "../constants";
 
@@ -251,9 +252,14 @@ export function createQuotaStatusBar(deps: QuotaStatusBarDeps): QuotaStatusBar {
   const commandDisposables = [
     vscode.commands.registerCommand(CMD.quotaRefresh, () => void showQuotaDetail()),
     vscode.commands.registerCommand(CMD.quotaConfigureMimo, async () => {
-      const saved = await configureMimoCookie({ configDir: deps.configDir, log: deps.log });
-      if (saved) {
-        void refresh();
+      try {
+        const saved = await configureMimoCookie({ configDir: deps.configDir, log: deps.log });
+        if (saved) {
+          void refresh();
+        }
+      } catch (error) {
+        deps.log(`quota: 配置 MiMo Cookie 失败: ${errorMessage(error)}`);
+        void vscode.window.showErrorMessage(`配置 MiMo Cookie 失败: ${errorMessage(error)}`);
       }
     }),
   ];
@@ -303,13 +309,12 @@ export async function configureMimoCookie(deps: { configDir: string; log(message
     { path: ["mimo", "cookie"], value: cookie, op: "set" },
   ]);
   fs.mkdirSync(deps.configDir, { recursive: true });
-  const tmp = `${file}.tmp-${process.pid}-${Math.random().toString(36).slice(2, 10)}`;
-  fs.writeFileSync(tmp, next, "utf8");
+  writeFileAtomic(file, next);
+  // The cookie is a credential: restrict to owner-read on POSIX (no-op on Windows).
   try {
-    fs.renameSync(tmp, file);
-  } catch (error) {
-    fs.rmSync(tmp, { force: true });
-    throw error;
+    fs.chmodSync(file, 0o600);
+  } catch {
+    deps.log("quota: 无法设置 quota.json 权限为 600（平台不支持）");
   }
   deps.log("quota: 已写入 MiMo Cookie（quota.json）");
   void vscode.window.showInformationMessage("MiMo Cookie 已保存，正在刷新额度");

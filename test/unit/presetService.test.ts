@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { chmodSync } from "node:fs";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -155,6 +156,104 @@ describe("PresetService.save / load / exists", () => {
     expect(() => env.service.save({ ...preset, name: "" })).toThrow("INVALID_PRESET_NAME");
     expect(() => env.service.save({ ...preset, name: "x".repeat(65) })).toThrow("INVALID_PRESET_NAME");
     expect(() => env.service.load("missing")).toThrow("PRESET_NOT_FOUND");
+  });
+
+  it("rejects names that are illegal on Windows (creation-time only)", () => {
+    const env = makeEnv();
+    const preset: Preset = {
+      name: "ok",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      appliedAt: null,
+      defaults: { model: null },
+      agents: {},
+      categories: {},
+    };
+    for (const name of ["a:b", "CON", "con.txt", "name.", "name ", "a?b"]) {
+      expect(() => env.service.save({ ...preset, name })).toThrow("INVALID_PRESET_NAME");
+    }
+  });
+
+  it("guards every name-taking entry point against path traversal", () => {
+    const env = makeEnv();
+    const preset: Preset = {
+      name: "base",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      appliedAt: null,
+      defaults: { model: null },
+      agents: {},
+      categories: {},
+    };
+    env.service.save(preset);
+    for (const evil of ["../escape", "..", "/abs/name"]) {
+      expect(() => env.service.load(evil)).toThrow("INVALID_PRESET_NAME");
+      expect(() => env.service.remove(evil)).toThrow("INVALID_PRESET_NAME");
+      expect(() => env.service.apply(evil)).toThrow("INVALID_PRESET_NAME");
+      expect(() => env.service.exportTo(evil, "/tmp/x.json")).toThrow("INVALID_PRESET_NAME");
+      expect(() => env.service.rename(evil, "new")).toThrow("INVALID_PRESET_NAME");
+    }
+    // "..\\escape": on POSIX the backslash is a legal filename char → contained (and simply
+    // not found); on win32 it is a separator → the guard rejects it.
+    if (process.platform === "win32") {
+      expect(() => env.service.load("..\\escape")).toThrow("INVALID_PRESET_NAME");
+    } else {
+      expect(() => env.service.load("..\\escape")).toThrow("PRESET_NOT_FOUND");
+    }
+  });
+
+  it.skipIf(process.platform === "win32")(
+    "re-saving an existing preset with a legacy (non-portable) name stays allowed",
+    () => {
+      const env = makeEnv();
+      // "my:preset.json" — a name an old version could create on POSIX/macOS; creation-time
+      // validation now rejects it, but the on-disk file must remain usable end to end.
+      fs.mkdirSync(env.presetsDir, { recursive: true });
+      const legacy: Preset = {
+        name: "my:preset",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        appliedAt: null,
+        defaults: { model: null },
+        agents: { oracle: { model: "a/b" } },
+        categories: {},
+      };
+      fs.writeFileSync(path.join(env.presetsDir, "my:preset.json"), JSON.stringify(legacy));
+
+      expect(env.service.list().map((p) => p.name)).toContain("my:preset");
+      expect(env.service.load("my:preset").agents.oracle.model).toBe("a/b");
+      const result = env.service.apply("my:preset"); // used to throw INVALID_PRESET_NAME at the final save
+      expect(result.preset.appliedAt).not.toBeNull();
+      expect(env.service.load("my:preset").appliedAt).not.toBeNull();
+    },
+  );
+
+  it("reports a hand-corrupted preset file as PRESET_INVALID", () => {
+    const env = makeEnv();
+    fs.mkdirSync(env.presetsDir, { recursive: true });
+    fs.writeFileSync(path.join(env.presetsDir, "broken.json"), "{ not json");
+    expect(() => env.service.load("broken")).toThrow("PRESET_INVALID");
+    expect(env.service.list().map((p) => p.name)).not.toContain("broken");
+  });
+
+  it("case-only rename on a case-insensitive filesystem does not delete the preset", () => {
+    const env = makeEnv();
+    const darwin = new PresetService({
+      presetsDir: env.presetsDir,
+      configStore: env.store,
+      platform: "darwin",
+    });
+    darwin.save({
+      name: "Foo",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      appliedAt: null,
+      defaults: { model: null },
+      agents: {},
+      categories: {},
+    });
+    darwin.rename("Foo", "foo");
+    // On a case-insensitive FS both paths are one file; the guard skips the delete so
+    // the renamed preset survives. (On this Linux runner both files physically exist,
+    // which is exactly what proves the rmSync was skipped.)
+    expect(darwin.load("foo").name).toBe("foo");
+    expect(fs.existsSync(path.join(env.presetsDir, "Foo.json"))).toBe(true);
   });
 });
 
@@ -443,4 +542,31 @@ describe("PresetService.apply — omo target", () => {
     expect(validate(text)).toEqual([]);
     expect(getValue(text, ["[opencode]", "agents", "oracle"])).toEqual({ model: "x/y", reasoning: "high" });
   });
+});
+
+describe("PresetService.apply — unreadable config safety", () => {
+  it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+    "aborts with CONFIG_UNREADABLE and writes nothing when a config exists but cannot be read",
+    () => {
+      const env = makeEnv();
+      env.service.save({
+        name: "p",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        appliedAt: null,
+        defaults: { model: "x/y" },
+        agents: { oracle: { model: "a/b" } },
+        categories: {},
+      });
+      const agentBefore = fs.readFileSync(env.ohMyPath, "utf8");
+      const opencodeBefore = fs.readFileSync(env.opencodePath, "utf8");
+      chmodSync(env.opencodePath, 0o000);
+      try {
+        expect(() => env.service.apply("p")).toThrow("CONFIG_UNREADABLE");
+        expect(fs.readFileSync(env.ohMyPath, "utf8")).toBe(agentBefore);
+      } finally {
+        chmodSync(env.opencodePath, 0o644);
+      }
+      expect(fs.readFileSync(env.opencodePath, "utf8")).toBe(opencodeBefore);
+    },
+  );
 });

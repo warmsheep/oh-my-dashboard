@@ -1,4 +1,5 @@
 import {
+  chmodSync,
   copyFileSync,
   existsSync,
   mkdirSync,
@@ -13,7 +14,7 @@ import * as os from "node:os";
 import { BUILTIN_MODELS } from "../../src/core/builtinModels";
 import * as path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { ConfigStore } from "../../src/core/configStore";
+import { ConfigStore, writeFileAtomic } from "../../src/core/configStore";
 
 const FIXTURES_DIR = path.resolve(process.cwd(), "test/fixtures");
 
@@ -44,21 +45,30 @@ afterEach(() => {
 });
 
 describe("ConfigStore.resolveConfigDir", () => {
+  it("prefers $OPENCODE_CONFIG_DIR over everything else", () => {
+    expect(
+      ConfigStore.resolveConfigDir(
+        { OPENCODE_CONFIG_DIR: "/custom/dir", XDG_CONFIG_HOME: "/tmp/xdg-root" },
+        "/home/tester",
+      ),
+    ).toBe("/custom/dir");
+  });
+
   it("prefers $XDG_CONFIG_HOME/opencode when XDG_CONFIG_HOME is set", () => {
     expect(ConfigStore.resolveConfigDir({ XDG_CONFIG_HOME: "/tmp/xdg-root" }, "/home/tester")).toBe(
       path.join("/tmp/xdg-root", "opencode"),
     );
   });
 
-  it("defaults to ~/.config/opencode on linux", () => {
-    expect(ConfigStore.resolveConfigDir({}, "/home/tester", "linux")).toBe(
+  it("defaults to ~/.config/opencode (opencode's xdg-basedir has no platform branches: same on linux/macOS/win32)", () => {
+    expect(ConfigStore.resolveConfigDir({}, "/home/tester")).toBe(
       path.join("/home/tester", ".config", "opencode"),
     );
-  });
-
-  it("uses ~/Library/Application Support/opencode on darwin", () => {
-    expect(ConfigStore.resolveConfigDir({}, "/Users/tester", "darwin")).toBe(
-      path.join("/Users/tester", "Library", "Application Support", "opencode"),
+    expect(ConfigStore.resolveConfigDir({}, "/Users/tester")).toBe(
+      path.join("/Users/tester", ".config", "opencode"),
+    );
+    expect(ConfigStore.resolveConfigDir({}, "C:\\Users\\tester")).toBe(
+      path.join("C:\\Users\\tester", ".config", "opencode"),
     );
   });
 
@@ -208,7 +218,12 @@ describe("ConfigStore.discover", () => {
     mkdirSync(path.join(home, ".agents", "skills", "pdf"), { recursive: true });
     writeFileSync(path.join(home, ".agents", "skills", "pdf", "SKILL.md"), "# pdf");
     mkdirSync(path.join(home, ".claude", "skills"), { recursive: true });
-    symlinkSync(path.join(home, ".agents", "skills", "pdf"), path.join(home, ".claude", "skills", "pdf"));
+    // Junctions need no privilege on Windows (unlike "dir" symlinks) and satisfy statSync follow.
+    symlinkSync(
+      path.join(home, ".agents", "skills", "pdf"),
+      path.join(home, ".claude", "skills", "pdf"),
+      process.platform === "win32" ? "junction" : "dir",
+    );
 
     const d = new ConfigStore({ configDirOverride: configDir, homeDir: home }).discover();
 
@@ -278,6 +293,108 @@ describe("ConfigStore.writeAtomic", () => {
     store.writeAtomic(target, "old content that is much longer");
     store.writeAtomic(target, "new");
     expect(readFileSync(target, "utf8")).toBe("new");
+  });
+});
+
+describe("ConfigStore.pluginCacheDir", () => {
+  it("prefers $XDG_CACHE_HOME/opencode on every platform", () => {
+    const store = new ConfigStore({ homeDir: "/home/t", env: { XDG_CACHE_HOME: "/xdg-cache" }, platform: "darwin" });
+    expect(store.pluginCacheDir).toBe(path.join("/xdg-cache", "opencode"));
+  });
+
+  it("uses ~/.cache/opencode on linux, macOS and win32 alike (xdg-basedir has no platform branches)", () => {
+    expect(new ConfigStore({ homeDir: "/home/t", env: {}, platform: "linux" }).pluginCacheDir).toBe(
+      path.join("/home/t", ".cache", "opencode"),
+    );
+    expect(new ConfigStore({ homeDir: "/Users/t", env: {}, platform: "darwin" }).pluginCacheDir).toBe(
+      path.join("/Users/t", ".cache", "opencode"),
+    );
+    expect(new ConfigStore({ homeDir: "C:\\Users\\t", env: {}, platform: "win32" }).pluginCacheDir).toBe(
+      path.join("C:\\Users\\t", ".cache", "opencode"),
+    );
+  });
+});
+
+describe("writeFileAtomic", () => {
+  type FakeFs = Pick<
+    typeof import("node:fs"),
+    "openSync" | "writeFileSync" | "fsyncSync" | "closeSync" | "renameSync" | "rmSync"
+  >;
+  const fakeFs = (renameImpl: (tmp: string, target: string) => void): { fs: FakeFs; calls: string[] } => {
+    const calls: string[] = [];
+    return {
+      calls,
+      fs: {
+        openSync: () => 3,
+        writeFileSync: () => undefined,
+        fsyncSync: () => undefined,
+        closeSync: () => undefined,
+        renameSync: (tmp: unknown, target: unknown) => {
+          calls.push("rename");
+          renameImpl(String(tmp), String(target));
+        },
+        rmSync: () => {
+          calls.push("rm");
+        },
+      } as unknown as FakeFs,
+    };
+  };
+
+  it("retries transient Windows lock errors (EPERM/EACCES/EBUSY) then succeeds", () => {
+    let failures = 2;
+    const { fs, calls } = fakeFs(() => {
+      if (failures > 0) {
+        failures -= 1;
+        const err = new Error("operation not permitted") as NodeJS.ErrnoException;
+        err.code = "EPERM";
+        throw err;
+      }
+    });
+    writeFileAtomic(path.join(sandbox(), "out.json"), "x", fs);
+    expect(calls).toEqual(["rename", "rename", "rename"]);
+  });
+
+  it("does not retry non-lock errors and cleans up the tmp file", () => {
+    const { fs, calls } = fakeFs(() => {
+      const err = new Error("no such file or directory") as NodeJS.ErrnoException;
+      err.code = "ENOENT";
+      throw err;
+    });
+    expect(() => writeFileAtomic(path.join(sandbox(), "out.json"), "x", fs)).toThrow("no such file");
+    expect(calls).toEqual(["rename", "rm"]);
+  });
+
+  it("gives up after 5 attempts on persistent EPERM and cleans up", () => {
+    const { fs, calls } = fakeFs(() => {
+      const err = new Error("operation not permitted") as NodeJS.ErrnoException;
+      err.code = "EPERM";
+      throw err;
+    });
+    expect(() => writeFileAtomic(path.join(sandbox(), "out.json"), "x", fs)).toThrow("operation not permitted");
+    expect(calls.filter((c) => c === "rename")).toHaveLength(5);
+    expect(calls[calls.length - 1]).toBe("rm");
+  });
+
+  it("cleans up the tmp file when the write itself fails (e.g. ENOSPC)", () => {
+    const calls: string[] = [];
+    const failingFs = {
+      openSync: () => 3,
+      writeFileSync: () => {
+        const err = new Error("no space left on device") as NodeJS.ErrnoException;
+        err.code = "ENOSPC";
+        throw err;
+      },
+      fsyncSync: () => undefined,
+      closeSync: () => undefined,
+      renameSync: () => {
+        calls.push("rename");
+      },
+      rmSync: () => {
+        calls.push("rm");
+      },
+    } as unknown as Parameters<typeof writeFileAtomic>[2];
+    expect(() => writeFileAtomic(path.join(sandbox(), "out.json"), "x", failingFs)).toThrow("no space left");
+    expect(calls).toEqual(["rm"]); // tmp removed, rename never attempted
   });
 });
 
@@ -510,4 +627,78 @@ describe("ConfigStore.ohMyAssignments (omo target)", () => {
     const { agents } = new ConfigStore({ configDirOverride: configDir, homeDir: home }).ohMyAssignments();
     expect(agents).toEqual({ oracle: { model: "a/b", variant: "xhigh" } });
   });
+});
+
+describe("ConfigStore hostile-environment tolerance", () => {
+  it.skipIf(process.platform === "win32" || process.getuid?.() === 0)("readTextOrEmpty returns '' for an unreadable (chmod 000) file", () => {
+    const dir = sandbox();
+    const file = path.join(dir, "opencode.json");
+    writeFileSync(file, "{}");
+    chmodSync(file, 0o000);
+    try {
+      expect(new ConfigStore({ configDirOverride: dir }).readTextOrEmpty(file)).toBe("");
+    } finally {
+      chmodSync(file, 0o644);
+    }
+  });
+
+  it("readDirTree terminates on an ancestor symlink without duplicating nodes", () => {
+    const dir = seedConfigDir();
+    const commandDir = path.join(dir, "command");
+    mkdirSync(path.join(commandDir, "real"), { recursive: true });
+    writeFileSync(path.join(commandDir, "real", "a.md"), "a");
+    symlinkSync(commandDir, path.join(commandDir, "self"), process.platform === "win32" ? "junction" : "dir");
+
+    const tree = new ConfigStore({ configDirOverride: dir }).discover().commandTree;
+    expect(tree.map((e) => e.name)).toEqual(["real", "self"]);
+    const self = tree.find((e) => e.name === "self");
+    expect(self?.isDir).toBe(true);
+    expect(self?.children).toBeUndefined(); // already visited via the real path
+  });
+
+  it("a single unreadable subdir degrades to empty instead of breaking discover()", () => {
+    const dir = seedConfigDir();
+    mkdirSync(path.join(dir, "command"), { recursive: true });
+    writeFileSync(path.join(dir, "command", "a.md"), "a");
+    const asRoot = process.getuid?.() === 0;
+    if (process.platform !== "win32" && !asRoot) {
+      chmodSync(path.join(dir, "command"), 0o000);
+    }
+    try {
+      const d = new ConfigStore({ configDirOverride: dir }).discover();
+      expect(Array.isArray(d.commandFiles)).toBe(true);
+      if (process.platform !== "win32" && !asRoot) {
+        expect(d.commandFiles).toEqual([]); // unreadable dir degrades to empty, not a crash
+      } else {
+        expect(d.commandFiles).toEqual(["a.md"]);
+      }
+      expect(d.commandDir).toBe(path.join(dir, "command"));
+    } finally {
+      if (process.platform !== "win32" && !asRoot) {
+        chmodSync(path.join(dir, "command"), 0o755);
+      }
+    }
+  });
+});
+
+describe("ConfigStore.readTextForEdit", () => {
+  it("returns '' for a genuinely absent file", () => {
+    const dir = sandbox();
+    expect(new ConfigStore({ configDirOverride: dir }).readTextForEdit(path.join(dir, "nope.json"))).toBe("");
+  });
+
+  it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+    "throws CONFIG_UNREADABLE for an existing but unreadable file",
+    () => {
+      const dir = sandbox();
+      const file = path.join(dir, "opencode.json");
+      writeFileSync(file, "{}");
+      chmodSync(file, 0o000);
+      try {
+        expect(() => new ConfigStore({ configDirOverride: dir }).readTextForEdit(file)).toThrow("CONFIG_UNREADABLE");
+      } finally {
+        chmodSync(file, 0o644);
+      }
+    },
+  );
 });

@@ -1,5 +1,6 @@
 import * as defaultFs from "node:fs";
 import * as path from "node:path";
+import { writeFileAtomic } from "./atomicFile";
 import type { ModelOption } from "./types";
 
 export const LOCAL_MODELS_FILE = "models.json";
@@ -115,13 +116,27 @@ function parseLocalModels(text: string): ModelOption[] {
 export function ensureLocalModelsFile(configDir: string, fs: typeof defaultFs = defaultFs): ModelOption[] {
   const file = path.join(configDir, LOCAL_MODELS_FILE);
   if (fs.existsSync(file)) {
-    const models = parseLocalModels(fs.readFileSync(file, "utf8"));
+    let models: ModelOption[];
+    try {
+      models = parseLocalModels(fs.readFileSync(file, "utf8"));
+    } catch {
+      // Exists but unreadable (permissions/AV lock): degrade read-only — a rewrite
+      // would hit the same permission wall, and the built-in catalog keeps things working.
+      return BUILTIN_MODELS.map((m) => ({ ...m }));
+    }
     if (models.length > 0) {
       return models;
     }
+    // Self-heal below rewrites the file wholesale — keep the user's (broken) edit as
+    // models.json.bak so custom entries are recoverable.
+    try {
+      fs.copyFileSync(file, `${file}.bak`);
+    } catch {
+      // best-effort backup; healing proceeds regardless
+    }
   }
   fs.mkdirSync(configDir, { recursive: true });
-  fs.writeFileSync(file, serialize(BUILTIN_MODELS));
+  writeFileAtomic(file, serialize(BUILTIN_MODELS), fs);
   return BUILTIN_MODELS.map((m) => ({ ...m }));
 }
 
@@ -150,7 +165,7 @@ export interface LocalModelInput {
 function writeLocalModels(configDir: string, models: ModelOption[], fs: typeof defaultFs = defaultFs): void {
   const file = path.join(configDir, LOCAL_MODELS_FILE);
   fs.mkdirSync(configDir, { recursive: true });
-  fs.writeFileSync(file, serialize(models));
+  writeFileAtomic(file, serialize(models), fs);
 }
 
 export function addLocalModel(configDir: string, input: LocalModelInput, fs: typeof defaultFs = defaultFs): ModelOption {

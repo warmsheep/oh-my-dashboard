@@ -7,7 +7,7 @@ import type { ModelOption, ModelSetting, Preset, Variant } from "../core/types";
 import type { ConfigStore } from "../core/configStore";
 import type { PresetService } from "../core/presetService";
 import type { PresetRow, WebviewInitPayload } from "../shared/protocol";
-import { PRESET_EDITOR_VIEW_TYPE, PRESET_NAME_PATTERN, presetDraftKey } from "../constants";
+import { PRESET_EDITOR_VIEW_TYPE, presetDraftKey, presetNameError } from "../constants";
 
 export interface PresetEditorDeps {
   configStore: ConfigStore;
@@ -29,7 +29,7 @@ export async function openPresetEditor(
   deps: PresetEditorDeps,
   name: string | null,
 ): Promise<void> {
-  const panelKey = name ?? "__new__";
+  let panelKey = name ?? "__new__";
   const existing = openPanels.get(panelKey);
   if (existing) {
     existing.reveal();
@@ -61,8 +61,21 @@ export async function openPresetEditor(
   let currentName: string | null = name;
   let lastInit: WebviewInitPayload | undefined;
   let resolveReady: () => void;
-  const ready = new Promise<void>((resolve) => {
-    resolveReady = resolve;
+  let readySettled = false;
+  const ready = new Promise<void>((resolve, reject) => {
+    resolveReady = () => {
+      if (!readySettled) {
+        readySettled = true;
+        resolve();
+      }
+    };
+    // A webview that fails to boot (bad bundle, CSP mismatch) must not hang the command.
+    setTimeout(() => {
+      if (!readySettled) {
+        readySettled = true;
+        reject(new Error("模板编辑器初始化超时"));
+      }
+    }, 20_000);
   });
 
   const buildInitPayload = (): WebviewInitPayload => {
@@ -103,8 +116,9 @@ export async function openPresetEditor(
   const handleSave = (message: SavePayload): void => {
     const newName = message.name.trim();
     const action = message.apply ? "apply" : "save";
-    if (!PRESET_NAME_PATTERN.test(newName)) {
-      reply(action, false, "模板名须为 1-64 个字符，且不含 / 或 \\");
+    const nameError = presetNameError(newName);
+    if (nameError !== undefined) {
+      reply(action, false, nameError);
       return;
     }
     const original =
@@ -144,6 +158,12 @@ export async function openPresetEditor(
     }
     deps.refreshAll();
     currentName = newName;
+    if (newName !== panelKey) {
+      // Re-key so a later editPreset(newName) reuses this panel instead of opening a duplicate.
+      openPanels.delete(panelKey);
+      openPanels.set(newName, panel);
+      panelKey = newName;
+    }
     panel.title = `编辑模板: ${newName}`;
     reply(action, true);
   };
@@ -181,10 +201,11 @@ export async function openPresetEditor(
     }
   });
 
-  panel.onDidDispose(() => {
-    listener.dispose();
-    openPanels.delete(panelKey);
-  });
+    panel.onDidDispose(() => {
+      listener.dispose();
+      openPanels.delete(panelKey);
+      resolveReady(); // unblock a caller still awaiting the ready handshake
+    });
 
   panel.webview.html = buildHtml(panel, html, distWebviewUri);
   await ready;

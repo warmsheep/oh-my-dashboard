@@ -1,7 +1,11 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
+import { writeFileAtomic } from "./atomicFile";
 import { getValue, parseSafe } from "./jsoncEditor";
+
+export { writeFileAtomic } from "./atomicFile";
 import { ensureLocalModelsFile, mergeModelOptions } from "./builtinModels";
 import type {
   AgentConfigTarget,
@@ -19,6 +23,8 @@ export interface ConfigStoreOptions {
   configDirOverride?: string;
   env?: Record<string, string | undefined>;
   homeDir?: string;
+  /** Defaults to process.platform; injectable so win32/darwin branches are unit-testable. */
+  platform?: NodeJS.Platform;
 }
 
 const PLUGIN_TREE_EXCLUDES = new Set(["node_modules", ".git"]);
@@ -64,12 +70,35 @@ function isDirEntry(entry: fs.Dirent, entryPath: string): boolean {
   return false;
 }
 
-function readDirTree(dir: string, depth = 0, exclude?: ReadonlySet<string>): DirEntry[] {
+/**
+ * A single unreadable dir (EACCES/EPERM) or one deleted mid-scan (ENOENT race) must not
+ * break discovery of everything else — degrade that subtree to empty instead.
+ */
+function readdirSafe(dir: string): fs.Dirent[] {
+  try {
+    return fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+}
+
+function readDirTree(dir: string, depth = 0, exclude?: ReadonlySet<string>, visited: Set<string> = new Set()): DirEntry[] {
   if (depth > 8 || !fs.existsSync(dir)) {
     return [];
   }
-  const entries = fs
-    .readdirSync(dir, { withFileTypes: true })
+  // Symlink cycles terminate via the depth cap, but k self-links still fan out k^8 —
+  // a visited set of real paths kills both cycles and fan-out.
+  let real: string;
+  try {
+    real = fs.realpathSync(dir);
+  } catch {
+    real = dir;
+  }
+  if (visited.has(real)) {
+    return [];
+  }
+  visited.add(real);
+  const entries = readdirSafe(dir)
     .filter((entry) => !exclude?.has(entry.name))
     .sort((a, b) => {
       const aDir = isDirEntry(a, path.join(dir, a.name));
@@ -82,7 +111,7 @@ function readDirTree(dir: string, depth = 0, exclude?: ReadonlySet<string>): Dir
   return entries.map((entry) => {
     const entryPath = path.join(dir, entry.name);
     if (isDirEntry(entry, entryPath)) {
-      const children = readDirTree(entryPath, depth + 1, exclude);
+      const children = readDirTree(entryPath, depth + 1, exclude, visited);
       return {
         name: entry.name,
         path: entryPath,
@@ -97,28 +126,32 @@ function readDirTree(dir: string, depth = 0, exclude?: ReadonlySet<string>): Dir
 export class ConfigStore {
   private readonly env: Record<string, string | undefined>;
   private readonly homeDir: string;
+  private readonly platform: NodeJS.Platform;
   private readonly configDirOverride?: string;
 
   constructor(opts: ConfigStoreOptions = {}) {
     this.env = opts.env ?? process.env;
     this.homeDir = opts.homeDir ?? os.homedir();
+    this.platform = opts.platform ?? process.platform;
     this.configDirOverride = opts.configDirOverride;
   }
 
   static resolveConfigDir(
     env?: Record<string, string | undefined>,
     homeDir?: string,
-    platform?: NodeJS.Platform,
   ): string {
     const effectiveEnv = env ?? process.env;
     const home = homeDir ?? os.homedir();
-    const effectivePlatform = platform ?? process.platform;
+    // opencode resolves its config dir via xdg-basedir, which has NO platform branches:
+    // $XDG_CONFIG_HOME/opencode else ~/.config/opencode on Linux, macOS AND Windows alike
+    // (darwin does NOT use ~/Library/Application Support). OPENCODE_CONFIG_DIR overrides all.
+    const explicit = effectiveEnv.OPENCODE_CONFIG_DIR;
+    if (typeof explicit === "string" && explicit.trim() !== "") {
+      return explicit.trim();
+    }
     const xdg = effectiveEnv.XDG_CONFIG_HOME;
     if (typeof xdg === "string" && xdg.trim() !== "") {
       return path.join(xdg, "opencode");
-    }
-    if (effectivePlatform === "darwin") {
-      return path.join(home, "Library", "Application Support", "opencode");
     }
     return path.join(home, ".config", "opencode");
   }
@@ -138,17 +171,15 @@ export class ConfigStore {
   }
 
   /**
-   * The opencode runtime's npm plugin cache: plugins from the `plugin` array are
-   * bun-installed here (~/.cache/opencode/node_modules on linux). XDG_CACHE_HOME and
-   * the darwin caches dir are honored like resolveConfigDir honors their config twins.
+   * The opencode runtime's npm plugin cache root ($XDG_CACHE_HOME/opencode else
+   * ~/.cache/opencode on every platform — same xdg-basedir semantics as the config dir).
+   * Modern opencode (arborist) installs each plugin under packages/<spec>/node_modules/<name>;
+   * bun-era installs lived at node_modules/<name> directly under this root.
    */
   get pluginCacheDir(): string {
     const xdg = this.env.XDG_CACHE_HOME;
     if (typeof xdg === "string" && xdg.trim() !== "") {
       return path.join(xdg, "opencode");
-    }
-    if (process.platform === "darwin") {
-      return path.join(this.homeDir, "Library", "Caches", "opencode");
     }
     return path.join(this.homeDir, ".cache", "opencode");
   }
@@ -180,7 +211,16 @@ export class ConfigStore {
   }
 
   private resolvePathPlugin(specifier: string): PluginEntry {
-    const spec = specifier.startsWith("file://") ? specifier.slice("file://".length) : specifier;
+    // fileURLToPath handles percent-encoding and Windows drive URLs (file:///C:/x);
+    // relative forms like file://./x are not valid absolute URLs and fall back to slicing.
+    let spec = specifier;
+    if (specifier.startsWith("file://")) {
+      try {
+        spec = fileURLToPath(specifier);
+      } catch {
+        spec = specifier.slice("file://".length);
+      }
+    }
     const resolved = spec.startsWith("~") ? path.join(this.homeDir, spec.slice(1)) : path.resolve(this.configDir, spec);
     let stat: fs.Stats | undefined;
     try {
@@ -196,6 +236,15 @@ export class ConfigStore {
     return { name: path.basename(resolved), specifier, kind: "path", resolvedPath: resolved, installed: stat !== undefined, tree };
   }
 
+  /** Mirrors opencode's npm.ts sanitize(): on win32, path-illegal chars become "_". */
+  private sanitizePkgDir(spec: string): string {
+    if (this.platform !== "win32") {
+      return spec;
+    }
+    const illegal = new Set(["<", ">", ":", '"', "|", "?", "*"]);
+    return Array.from(spec, (char) => (illegal.has(char) || char.charCodeAt(0) < 32 ? "_" : char)).join("");
+  }
+
   private resolveNpmPlugin(specifier: string): PluginEntry {
     const name = npmPluginName(specifier);
     const isInstalledDir = (candidate: string): boolean => {
@@ -205,14 +254,32 @@ export class ConfigStore {
         return false;
       }
     };
-    const cacheCandidate = path.join(this.pluginCacheDir, "node_modules", name);
-    const configCandidate = path.join(this.configDir, "node_modules", name);
-    const cacheHit = isInstalledDir(cacheCandidate);
-    const configHit = !cacheHit && isInstalledDir(configCandidate);
-    const resolvedPath = cacheHit ? cacheCandidate : configHit ? configCandidate : cacheCandidate;
-    const installed = cacheHit || configHit;
-    const version = installed ? this.installedPluginVersion(resolvedPath) : undefined;
-    return { name, specifier, kind: "npm", resolvedPath, installed, ...(version !== undefined ? { version } : {}), tree: installed ? readDirTree(resolvedPath, 0, PLUGIN_TREE_EXCLUDES) : [] };
+    // Modern opencode (arborist) installs each plugin isolated under
+    // packages/<spec>/node_modules/<name> — the dir key is `${name}@latest` for bare names,
+    // else the raw specifier (see resolvePluginTarget + Npm.directory in opencode's source).
+    const dirKey = this.sanitizePkgDir(specifier === name ? `${name}@latest` : specifier);
+    const packagesRoot = path.join(this.pluginCacheDir, "packages");
+    const candidates = [
+      path.join(packagesRoot, dirKey, "node_modules", name),
+      path.join(this.pluginCacheDir, "node_modules", name), // bun-era flat layout
+      path.join(this.configDir, "node_modules", name),
+    ];
+    let resolvedPath: string | undefined = candidates.find(isInstalledDir);
+    if (resolvedPath === undefined && fs.existsSync(packagesRoot)) {
+      // Scan fallback: the exact dir key may drift from our reconstruction (npa normalization,
+      // dist-tags) — any packages/<dir>/node_modules/<name> hit counts as installed.
+      for (const entry of readdirSafe(packagesRoot)) {
+        const candidate = path.join(packagesRoot, entry.name, "node_modules", name);
+        if (isInstalledDir(candidate)) {
+          resolvedPath = candidate;
+          break;
+        }
+      }
+    }
+    const installed = resolvedPath !== undefined;
+    const finalPath = resolvedPath ?? candidates[0]!;
+    const version = installed ? this.installedPluginVersion(finalPath) : undefined;
+    return { name, specifier, kind: "npm", resolvedPath: finalPath, installed, ...(version !== undefined ? { version } : {}), tree: installed ? readDirTree(finalPath, 0, PLUGIN_TREE_EXCLUDES) : [] };
   }
 
   private installedPluginVersion(dir: string): string | undefined {
@@ -291,8 +358,7 @@ export class ConfigStore {
     const commandDir = path.join(configDir, "command");
 
     const commandFiles = fs.existsSync(commandDir)
-      ? fs
-          .readdirSync(commandDir, { withFileTypes: true })
+      ? readdirSafe(commandDir)
           .filter((entry) => entry.isFile() && entry.name.endsWith(".md"))
           .map((entry) => entry.name)
           .sort()
@@ -303,16 +369,19 @@ export class ConfigStore {
 
     const listSkillNames = (dir: string): string[] =>
       fs.existsSync(dir)
-        ? fs
-            .readdirSync(dir, { withFileTypes: true })
+        ? readdirSafe(dir)
             .filter((entry) => isSkillDir(dir, entry))
             .map((entry) => entry.name)
             .sort()
         : [];
 
+    // NTFS and default APFS are case-insensitive: compare folded, display original.
+    const fold = (p: string): string => (this.platform === "win32" || this.platform === "darwin" ? p.toLowerCase() : p);
     const homePrefix = this.homeDir + path.sep;
     const displayPath = (dir: string): string =>
-      dir === this.homeDir || dir.startsWith(homePrefix) ? `~${dir.slice(this.homeDir.length)}` : dir;
+      fold(dir) === fold(this.homeDir) || fold(dir).startsWith(fold(homePrefix))
+        ? `~${dir.slice(this.homeDir.length)}`
+        : dir;
 
     const skillLocation = (scope: SkillLocation["scope"], label: string, dir: string): SkillLocation => ({
       scope,
@@ -344,8 +413,8 @@ export class ConfigStore {
     const seenSkillDirs = new Set<string>();
     const skillLocations: SkillLocation[] = [];
     for (const candidate of globalSkillCandidates) {
-      if (!seenSkillDirs.has(candidate) && fs.existsSync(candidate)) {
-        seenSkillDirs.add(candidate);
+      if (!seenSkillDirs.has(fold(candidate)) && fs.existsSync(candidate)) {
+        seenSkillDirs.add(fold(candidate));
         skillLocations.push(skillLocation("global", displayPath(candidate), candidate));
       }
     }
@@ -390,7 +459,26 @@ export class ConfigStore {
   }
 
   readTextOrEmpty(filePath: string): string {
-    return fs.existsSync(filePath) ? fs.readFileSync(filePath, "utf8") : "";
+    // existsSync guards absence, not permission: a chmod-000 or AV-locked config must
+    // degrade to "empty" rather than kill discovery/activation.
+    try {
+      return fs.existsSync(filePath) ? fs.readFileSync(filePath, "utf8") : "";
+    } catch {
+      return "";
+    }
+  }
+
+  /**
+   * Read-before-write variant: "" only when the file is genuinely absent. An existing
+   * but unreadable file must ABORT the edit — treating it as empty would let apply()
+   * overwrite real user config with a fabricated minimal one.
+   */
+  readTextForEdit(filePath: string): string {
+    try {
+      return fs.existsSync(filePath) ? fs.readFileSync(filePath, "utf8") : "";
+    } catch {
+      throw new Error("CONFIG_UNREADABLE");
+    }
   }
 
   readParse<T>(filePath: string): ParseResult<T> {
@@ -398,21 +486,7 @@ export class ConfigStore {
   }
 
   writeAtomic(filePath: string, content: string): void {
-    const dir = path.dirname(filePath);
-    const tmpPath = path.join(dir, `.tmp-${process.pid}-${Math.random().toString(36).slice(2, 10)}`);
-    const fd = fs.openSync(tmpPath, "w");
-    try {
-      fs.writeFileSync(fd, content, "utf8");
-      fs.fsyncSync(fd);
-    } finally {
-      fs.closeSync(fd);
-    }
-    try {
-      fs.renameSync(tmpPath, filePath);
-    } catch (error) {
-      fs.rmSync(tmpPath, { force: true });
-      throw error;
-    }
+    writeFileAtomic(filePath, content);
   }
 
   listModels(): ModelOption[] {

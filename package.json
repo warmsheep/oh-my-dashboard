@@ -2,7 +2,7 @@
   "name": "opencode-config-manager",
   "displayName": "OpenCode 配置管理器",
   "description": "管理 opencode / oh-my-opencode 配置：结构化修改、备份、恢复、命名模板一键切换",
-  "version": "0.18.1",
+  "version": "0.19.0",
   "publisher": "local",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -294,7 +294,7 @@
         "opencodeConfigManager.configDirOverride": {
           "type": "string",
           "title": "配置目录覆盖",
-          "description": "配置目录覆盖（默认自动发现 ~/.config/opencode，尊重 XDG_CONFIG_HOME）"
+          "description": "配置目录覆盖（默认与 opencode 运行时一致：OPENCODE_CONFIG_DIR > XDG_CONFIG_HOME/opencode > ~/.config/opencode）"
         },
         "opencodeConfigManager.quota.refreshSeconds": {
           "type": "number",

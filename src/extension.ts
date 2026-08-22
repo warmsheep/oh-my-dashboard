@@ -103,9 +103,18 @@ export function activate(ctx: vscode.ExtensionContext): void {
   ctx.subscriptions.push(createQuotaStatusBar({ quotaService, configDir: discovered.configDir, log }));
 
   const refreshAll = (): void => {
-    provider.refresh();
-    statusbar.update();
-    notifyPresetEditorsModelsChanged(configStore.listModels());
+    // Called from the fs.watch debounce timer too — a throwing loader must degrade
+    // to a log line there, never an uncaught exception in a timer callback.
+    // refresh() can throw synchronously (sync loadData) or reject asynchronously.
+    try {
+      void provider.refresh().then(undefined, (error: unknown) => {
+        log(`refresh 失败: ${error instanceof Error ? error.message : String(error)}`);
+      });
+      statusbar.update();
+      notifyPresetEditorsModelsChanged(configStore.listModels());
+    } catch (error) {
+      log(`refreshAll 失败: ${error instanceof Error ? error.message : String(error)}`);
+    }
   };
 
   registerCommands(ctx, { configStore, backupService, presetService, refreshAll, log });
@@ -133,9 +142,14 @@ export function activate(ctx: vscode.ExtensionContext): void {
   let watchTimer: NodeJS.Timeout | undefined;
   const lastFileContents = new Map<string, string>();
   const pendingTriggers = new Set<string>();
+  // Recursive subdir watchers carry no file identity — they force the next refresh so a
+  // real subdir change can't be swallowed by an unchanged file event in the same window.
+  let forceNextRefresh = false;
   const scheduleRefresh = (file?: string): void => {
     armSubdirWatchers();
-    if (file !== undefined) {
+    if (file === undefined) {
+      forceNextRefresh = true;
+    } else {
       pendingTriggers.add(file);
     }
     if (watchTimer !== undefined) {
@@ -143,6 +157,8 @@ export function activate(ctx: vscode.ExtensionContext): void {
     }
     watchTimer = setTimeout(() => {
       watchTimer = undefined;
+      const forced = forceNextRefresh;
+      forceNextRefresh = false;
       // Skip the re-render entirely when every triggering file's bytes are unchanged —
       // e.g. another window rewrote models.json with identical content.
       const changed = [...pendingTriggers].filter((p) => {
@@ -158,7 +174,7 @@ export function activate(ctx: vscode.ExtensionContext): void {
         return true;
       });
       pendingTriggers.clear();
-      if (changed.length > 0) {
+      if (forced || changed.length > 0) {
         refreshAll();
       }
     }, 300);
@@ -196,12 +212,21 @@ export function activate(ctx: vscode.ExtensionContext): void {
   // configDir must stay flat: it hosts node_modules (~20k files) that are irrelevant to the
   // extension — a recursive watch there costs seconds of inotify setup and blocks activation.
   // Only the managed subdirs are watched recursively (a few dozen files).
+  // Runs on every scheduleRefresh so dirs created after activation (presets/, and the
+  // plugin cache's packages/ once opencode first installs a plugin) get armed too.
   const armSubdirWatchers = (): void => {
     for (const name of MANAGED_SUBDIRS) {
       const dir = path.join(configStore.configDir, name);
       if (fs.existsSync(dir)) {
         addWatch(dir, { recursive: true }, subdirHandler);
       }
+    }
+    // opencode installs npm plugins isolated under <cache>/packages/<spec>/ (arborist);
+    // a flat watch there catches per-plugin dir creation/removal. Root lockfile writes
+    // (bun-era layout) are covered by the pluginCacheDir watch below.
+    const packagesDir = path.join(configStore.pluginCacheDir, "packages");
+    if (configStore.pluginCacheDir !== configStore.configDir && fs.existsSync(packagesDir)) {
+      addWatch(packagesDir, { recursive: false }, subdirHandler);
     }
   };
   armSubdirWatchers();
@@ -211,7 +236,7 @@ export function activate(ctx: vscode.ExtensionContext): void {
   if (agentConfigDir !== configStore.configDir) {
     addWatch(agentConfigDir, { recursive: false }, makeFlatHandler(agentConfigDir, OMO_BASENAMES));
   }
-  // The opencode runtime bun-installs npm plugins into its cache; lockfile writes there signal
+  // The opencode runtime installs npm plugins into its cache; lockfile writes there signal
   // plugin installs/uninstalls (the node_modules tree itself must stay unwatched).
   const pluginCacheDir = configStore.pluginCacheDir;
   if (pluginCacheDir !== configStore.configDir) {

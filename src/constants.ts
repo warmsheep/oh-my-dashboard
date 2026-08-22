@@ -42,8 +42,11 @@ export const CONFIG_KEY = {
 
 export const PRESET_EDITOR_VIEW_TYPE = "opencode.presetEditor";
 
-/** Preset names: 1–64 chars, no path separators. */
-export const PRESET_NAME_PATTERN = /^[^/\\]{1,64}$/;
+/**
+ * Preset name validation is owned by src/core/pathSafety.ts (single source for the
+ * tree/commands/webview layers). Re-exported here so existing imports keep working.
+ */
+export { PRESET_NAME_PATTERN, presetNameError } from "./core/pathSafety";
 
 /** Free-text model ids entered by hand: `provider/model`. */
 export const MODEL_ID_PATTERN = /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/;

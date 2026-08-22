@@ -1,6 +1,8 @@
 import * as os from "node:os";
 import * as path from "node:path";
 import * as defaultFs from "node:fs";
+import { writeFileAtomic } from "./atomicFile";
+import { assertContainedFileName } from "./pathSafety";
 import type { BackupEntry, BackupManifest, BackupReason } from "./types";
 
 export interface BackupServiceOptions {
@@ -66,98 +68,137 @@ export class BackupService {
     const at = this.now();
     const dirName = `${isoFs(at)}-${reason}`;
     const dir = path.join(this.backupsDir, dirName);
-    this.fs.mkdirSync(dir, { recursive: true });
+    // Build in a hidden staging sibling and publish by rename: a mid-copy failure
+    // (EPERM/ENOSPC/ENOENT race) must not leave a manifest-less partial backup that
+    // list() can never see or prune.
+    const staging = path.join(this.backupsDir, `.tmp-${dirName}`);
+    this.sweepStaging();
+    this.fs.rmSync(staging, { recursive: true, force: true });
+    this.fs.mkdirSync(staging, { recursive: true });
 
-    let fileCount = 0;
-    for (const { label, src } of this.managedFiles) {
-      if (this.fs.existsSync(src)) {
-        this.fs.copyFileSync(src, path.join(dir, label));
-        fileCount++;
+    try {
+      let fileCount = 0;
+      for (const { label, src } of this.managedFiles) {
+        if (this.fs.existsSync(src)) {
+          this.fs.copyFileSync(src, path.join(staging, label));
+          fileCount++;
+        }
       }
-    }
-    for (const name of MANAGED_DIRS) {
-      const src = path.join(this.configDir, name);
-      if (!this.fs.existsSync(src)) continue;
-      const dest = path.join(dir, name);
-      if (this.fs.statSync(src).isDirectory()) {
-        this.fs.cpSync(src, dest, { recursive: true });
-      } else {
-        this.fs.copyFileSync(src, dest);
+      for (const name of MANAGED_DIRS) {
+        const src = path.join(this.configDir, name);
+        if (!this.fs.existsSync(src)) continue;
+        const dest = path.join(staging, name);
+        if (this.fs.statSync(src).isDirectory()) {
+          // dereference: snapshots store real content — recreating symlinks needs
+          // privileges on Windows (EPERM without Developer Mode).
+          this.fs.cpSync(src, dest, { recursive: true, dereference: true });
+        } else {
+          this.fs.copyFileSync(src, dest);
+        }
+        fileCount += this.countFiles(dest);
       }
-      fileCount += this.countFiles(dest);
-    }
-    for (const { label, src } of this.extraDirs) {
-      if (!this.fs.existsSync(src)) continue;
-      const dest = path.join(dir, label);
-      if (this.fs.statSync(src).isDirectory()) {
-        this.fs.cpSync(src, dest, { recursive: true });
-      } else {
-        this.fs.copyFileSync(src, dest);
+      for (const { label, src } of this.extraDirs) {
+        if (!this.fs.existsSync(src)) continue;
+        const dest = path.join(staging, label);
+        if (this.fs.statSync(src).isDirectory()) {
+          this.fs.cpSync(src, dest, { recursive: true, dereference: true });
+        } else {
+          this.fs.copyFileSync(src, dest);
+        }
+        fileCount += this.countFiles(dest);
       }
-      fileCount += this.countFiles(dest);
+
+      const manifest: BackupManifest = {
+        version: 1,
+        reason,
+        ...(meta?.name !== undefined && meta.name.length > 0 ? { name: meta.name } : {}),
+        ...(meta?.preset !== undefined ? { preset: meta.preset } : {}),
+        createdAt: at.toISOString(),
+        fileCount,
+        machine: this.hostname,
+      };
+      writeFileAtomic(path.join(staging, MANIFEST_FILE), JSON.stringify(manifest, null, 2), this.fs);
+      this.fs.renameSync(staging, dir);
+    } catch (error) {
+      this.fs.rmSync(staging, { recursive: true, force: true });
+      throw error;
     }
 
-    const manifest: BackupManifest = {
-      version: 1,
-      reason,
-      ...(meta?.name !== undefined && meta.name.length > 0 ? { name: meta.name } : {}),
-      ...(meta?.preset !== undefined ? { preset: meta.preset } : {}),
-      createdAt: at.toISOString(),
-      fileCount,
-      machine: this.hostname,
-    };
-    this.fs.writeFileSync(path.join(dir, MANIFEST_FILE), JSON.stringify(manifest, null, 2));
-
+    const manifest = this.readEntry(dirName)?.manifest;
+    if (!manifest) {
+      throw new Error("BACKUP_PUBLISH_FAILED");
+    }
     const entry: BackupEntry = { dirName, dir, manifest };
     this.prune(reason);
     return entry;
+  }
+
+  private sweepStaging(): void {    if (!this.fs.existsSync(this.backupsDir)) {
+      return;
+    }
+    for (const ent of this.fs.readdirSync(this.backupsDir, { withFileTypes: true })) {
+      if (ent.isDirectory() && ent.name.startsWith(".tmp-")) {
+        this.fs.rmSync(path.join(this.backupsDir, ent.name), { recursive: true, force: true });
+      }
+    }
   }
 
   list(): BackupEntry[] {
     if (!this.fs.existsSync(this.backupsDir)) return [];
     const entries: BackupEntry[] = [];
     for (const ent of this.fs.readdirSync(this.backupsDir, { withFileTypes: true })) {
-      if (!ent.isDirectory()) continue;
+      if (!ent.isDirectory() || ent.name.startsWith(".tmp-")) continue;
       const entry = this.readEntry(ent.name);
       if (entry) entries.push(entry);
     }
     return entries.sort((a, b) => (a.dirName < b.dirName ? 1 : a.dirName > b.dirName ? -1 : 0));
   }
 
+  private assertDirName(dirName: string): void {
+    // Commands can be invoked programmatically with arbitrary strings — never let a
+    // dirName escape backupsDir (path traversal → rmSync outside the sandbox).
+    assertContainedFileName(dirName, "INVALID_BACKUP_NAME");
+  }
+
   remove(dirName: string): void {
+    this.assertDirName(dirName);
     this.fs.rmSync(path.join(this.backupsDir, dirName), { recursive: true, force: true });
   }
 
   rename(dirName: string, name: string): BackupEntry {
+    this.assertDirName(dirName);
     const entry = this.list().find((e) => e.dirName === dirName);
     if (!entry) {
       throw new Error("BACKUP_NOT_FOUND");
     }
     const manifest: BackupManifest = { ...entry.manifest, name };
-    this.fs.writeFileSync(path.join(entry.dir, MANIFEST_FILE), JSON.stringify(manifest, null, 2));
+    writeFileAtomic(path.join(entry.dir, MANIFEST_FILE), JSON.stringify(manifest, null, 2), this.fs);
     return { ...entry, manifest };
   }
 
   restore(dirName: string): void {
+    this.assertDirName(dirName);
     const srcDir = path.join(this.backupsDir, dirName);
+    // Managed config files are restored through the atomic writer: a mid-copy failure
+    // (ENOSPC/EPERM) must never truncate the live opencode.json / omo.jsonc.
     for (const { label, src } of this.managedFiles) {
       const backup = path.join(srcDir, label);
       if (this.fs.existsSync(backup)) {
         this.fs.mkdirSync(path.dirname(src), { recursive: true });
-        this.fs.copyFileSync(backup, src);
+        writeFileAtomic(src, this.fs.readFileSync(backup, "utf8"), this.fs);
       }
     }
     for (const name of MANAGED_DIRS) {
       const src = path.join(srcDir, name);
       if (this.fs.existsSync(src)) {
-        this.fs.cpSync(src, path.join(this.configDir, name), { recursive: true });
+        this.fs.cpSync(src, path.join(this.configDir, name), { recursive: true, dereference: true });
       }
     }
     for (const { label, src } of this.extraDirs) {
       const backup = path.join(srcDir, label);
       if (this.fs.existsSync(backup)) {
         this.fs.mkdirSync(path.dirname(src), { recursive: true });
-        this.fs.cpSync(backup, src, { recursive: true });
+        this.fs.cpSync(backup, src, { recursive: true, dereference: true });
       }
     }
   }
@@ -182,8 +223,14 @@ export class BackupService {
       if (typeof keep !== "number") continue;
       const excess = all.filter((e) => e.manifest.reason === r).slice(keep);
       for (const entry of excess) {
-        this.remove(entry.dirName);
-        removed.push(entry);
+        // A foreign/unremovable dir (odd name, locked on Windows) must not poison
+        // every future create() of this reason — skip it and keep pruning the rest.
+        try {
+          this.remove(entry.dirName);
+          removed.push(entry);
+        } catch {
+          // skipped
+        }
       }
     }
     return removed;
