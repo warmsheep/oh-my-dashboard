@@ -13,11 +13,12 @@ VSCode 扩展：管理 [opencode](https://opencode.ai) 与 [oh-my-opencode](http
 - **插件**：列出 opencode.json `plugin` 数组声明的插件（npm 包名可带 `@版本`，或 `~/` `./` `/` `file://` 本地路径）；npm 插件优先在运行时缓存 `~/.cache/opencode/node_modules/` 解析，回退 `<配置目录>/node_modules/`；展示安装版本 / 未安装 / 本地路径 / 缺失状态；点击标题打开配置文件，展开浏览插件目录文件（自动排除嵌套 `node_modules` 与 `.git`），单击文件即可预览编辑
 - **备份**：手动「立即备份」会要求输入备份名称（名称仅用于展示，时间戳自动附带且不入名称）；历史备份可右键「重命名备份」；manifest 记录原因；与当前配置 diff 对比；恢复时明确警告覆盖（应用/恢复不再自动产生备份）
 - **状态栏**：显示当前预设，点击快速切换（`Ctrl+Alt+P`）
-- **Coding Plan 额度**（状态栏右侧）：实时显示 Kimi / GLM / MiMo 剩余额度（5 小时窗口、周额度；MiMo 为月度额度+余额）
-  - Kimi / GLM 自动读取 opencode 凭据（`~/.local/share/opencode/auth.json`），无需额外配置
+- **Coding Plan 额度**（状态栏右侧）：实时显示 Kimi / GLM / MiMo / DeepSeek 剩余额度（5 小时窗口、周额度；MiMo 为月度额度+余额；DeepSeek 为按量计费余额）
+  - Kimi / GLM / DeepSeek 自动读取 opencode 凭据（`~/.local/share/opencode/auth.json`），无需额外配置
+  - DeepSeek 官方仅提供余额接口（按量计费、无额度窗口）：状态栏显示 `DeepSeek ¥余额`，点击查看币种明细
   - MiMo 官方仅提供 Dashboard API：执行「Coding Plan 额度：配置 MiMo Cookie…」粘贴 `platform.xiaomimimo.com` 的浏览器 Cookie（存入 `quota.json`）
   - 点击查看各窗口详情与重置时间；`opencodeConfigManager.quota.refreshSeconds` 控制自动刷新间隔（默认 30 秒，0 关闭）
-  - 各窗口按剩余量独立着色：≥60% 绿色、20%–60% 黄色、<20% 红色（跟随 VSCode 主题）
+  - 各窗口按剩余量独立着色：≥60% 绿色、20%–60% 黄色、<20% 红色（跟随 VSCode 主题）；DeepSeek 余额按绝对值着色：>100 绿色、20–100 黄色、<20 红色
 
 ## 安装
 
