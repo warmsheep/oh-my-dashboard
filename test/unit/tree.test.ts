@@ -494,10 +494,14 @@ describe("buildConfigTree — id uniqueness", () => {
 // ---------------------------------------------------------------------------
 
 describe("ConfigTreeDataProvider", () => {
-  it("returns section-filtered top-level nodes for each of the three sections", async () => {
+  it("root returns the four section roots in fixed order", async () => {
     const snap = makeSnapshot();
+    const provider = new ConfigTreeDataProvider(() => snap);
 
-    const configKids = await new ConfigTreeDataProvider("config", () => snap).getChildren();
+    const roots = await provider.getChildren();
+    expect(roots.map((r) => r.kind)).toEqual(["configRoot", "presetRoot", "backupRoot", "modelRoot"]);
+
+    const configKids = await provider.getChildren(roots[0]);
     expect(configKids.map((k) => k.kind)).toEqual([
       "configFile",
       "configFile",
@@ -506,27 +510,26 @@ describe("ConfigTreeDataProvider", () => {
       "dirSummary",
       "dirSummary",
     ]);
-
-    const presetKids = await new ConfigTreeDataProvider("presets", () => snap).getChildren();
+    const presetKids = await provider.getChildren(roots[1]);
     expect(presetKids.map((k) => k.kind)).toEqual(["captureAction", "preset", "preset"]);
-
-    const backupKids = await new ConfigTreeDataProvider("backups", () => snap).getChildren();
+    const backupKids = await provider.getChildren(roots[2]);
     expect(backupKids.map((k) => k.kind)).toEqual(["backup", "backup"]);
   });
 
   it("getChildren(childNode) returns the node's children", async () => {
     const snap = makeSnapshot();
-    const provider = new ConfigTreeDataProvider("config", () => snap);
-    const top = (await provider.getChildren())!;
-    const ohMy = find(top, "config:agentConfig");
+    const provider = new ConfigTreeDataProvider(() => snap);
+    const roots = (await provider.getChildren())!;
+    const configKids = await provider.getChildren(roots[0]);
+    const ohMy = find(configKids, "config:agentConfig");
     const kids = await provider.getChildren(ohMy);
     expect(kids.map((k) => k.contextValue)).toEqual(["agent", "agent", "agent", "category", "category"]);
-    expect(await provider.getChildren(top[0])).toEqual([]); // leaf → []
+    expect(await provider.getChildren(configKids[0])).toEqual([]); // leaf → []
   });
 
   it("getTreeItem maps a preset node: collapsibleState None, edit command, pin icon for current", () => {
     const snap = makeSnapshot();
-    const provider = new ConfigTreeDataProvider("presets", () => snap);
+    const provider = new ConfigTreeDataProvider(() => snap);
     const deep = find(buildConfigTree(snap.discovered, snap.presets, snap.currentPreset, snap.backups, snap.parseErrors, snap.assignments)[1].children!, "preset:deep-work");
 
     const item = provider.getTreeItem(deep);
@@ -540,20 +543,24 @@ describe("ConfigTreeDataProvider", () => {
 
   it("getTreeItem maps a configFile node: command wiring + file icon", async () => {
     const snap = makeSnapshot();
-    const provider = new ConfigTreeDataProvider("config", () => snap);
-    const node = find((await provider.getChildren())!, "config:opencode.json");
+    const provider = new ConfigTreeDataProvider(() => snap);
+    const roots = (await provider.getChildren())!;
+    const node = find(await provider.getChildren(roots[0]), "config:opencode.json");
 
     const item = provider.getTreeItem(node);
     expect(item.collapsibleState).toBe(0);
     expect(item.command?.command).toBe("opencode.openConfigFile");
     expect(item.command?.title).toBe("opencode.json");
-    expect(item.command?.arguments).toEqual([node]);
+    // Slim RPC payload: only the scalar fields commands consume, never the children subtree.
+    expect(item.command?.arguments).toEqual([
+      { kind: "configFile", id: "config:opencode.json", label: "opencode.json", filePath: "/cfg/opencode.json" },
+    ]);
     expect((item.iconPath as unknown as { id: string }).id).toBe("file");
   });
 
   it("maps collapsibleState strings to None/Collapsed/Expanded and guide gets info icon", () => {
     const snap = makeSnapshot({ backups: [] });
-    const provider = new ConfigTreeDataProvider("backups", () => snap);
+    const provider = new ConfigTreeDataProvider(() => snap);
     const guide = buildConfigTree(snap.discovered, snap.presets, snap.currentPreset, [], snap.parseErrors)[2].children![0];
     const item = provider.getTreeItem(guide);
     expect(item.collapsibleState).toBe(0);
@@ -568,27 +575,29 @@ describe("ConfigTreeDataProvider", () => {
   it("refresh() clears the snapshot cache so new data is reloaded", async () => {
     const snap = makeSnapshot({ backups: [] });
     let calls = 0;
-    const provider = new ConfigTreeDataProvider("backups", () => {
+    const provider = new ConfigTreeDataProvider(() => {
       calls++;
       return snap;
     });
 
-    expect((await provider.getChildren())[0].label).toBe("暂无备份");
+    const root = (await provider.getChildren())![2];
+    expect((await provider.getChildren(root))[0].label).toBe("暂无备份");
     expect(calls).toBe(1);
 
     snap.backups = BACKUPS;
-    await provider.getChildren();
+    await provider.getChildren(root);
     expect(calls).toBe(1); // cached — loadData not called again
 
-    provider.refresh();
-    const after = await provider.getChildren();
+    await provider.refresh();
+    const after = await provider.getChildren((await provider.getChildren())![2]);
     expect(calls).toBe(2); // cache cleared → fresh loadData
     expect(after[0].kind).toBe("backup");
   });
 
   it("supports async loadData", async () => {
-    const provider = new ConfigTreeDataProvider("presets", async () => makeSnapshot());
-    const kids = await provider.getChildren();
+    const provider = new ConfigTreeDataProvider(async () => makeSnapshot());
+    const roots = await provider.getChildren();
+    const kids = await provider.getChildren(roots[1]);
     expect(kids[0].kind).toBe("captureAction");
   });
 });

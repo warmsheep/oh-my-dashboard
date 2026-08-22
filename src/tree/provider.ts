@@ -20,6 +20,16 @@ const COLLAPSIBLE: Record<BaseNode["collapsibleState"], vscode.TreeItemCollapsib
   expanded: vscode.TreeItemCollapsibleState.Expanded,
 };
 
+const iconCache = new Map<string, vscode.ThemeIcon>();
+function iconFor(id: string): vscode.ThemeIcon {
+  let icon = iconCache.get(id);
+  if (!icon) {
+    icon = new vscode.ThemeIcon(id);
+    iconCache.set(id, icon);
+  }
+  return icon;
+}
+
 function iconId(node: BaseNode): string {
   switch (node.kind) {
     case "configFile":
@@ -65,17 +75,56 @@ function iconId(node: BaseNode): string {
 
 export class ConfigTreeDataProvider implements vscode.TreeDataProvider<BaseNode> {
   private cache: TreeDataSnapshot | null = null;
+  private reloading: Promise<TreeDataSnapshot> | null = null;
   private readonly _onDidChangeTreeData = new vscode.EventEmitter<BaseNode | undefined | void>();
   readonly onDidChangeTreeData = this._onDidChangeTreeData.event;
 
-  constructor(
-    private readonly section: TreeSection,
-    private readonly loadData: () => TreeDataSnapshot | Promise<TreeDataSnapshot>,
-  ) {}
+  constructor(private readonly loadData: () => TreeDataSnapshot | Promise<TreeDataSnapshot>) {}
 
-  refresh(): void {
-    this.cache = null;
-    this._onDidChangeTreeData.fire();
+  /**
+   * Stale-while-revalidate: getChildren always serves the last snapshot once loaded, so a
+   * refresh can never stall rendering (the reload happens in the background and re-renders
+   * only after the new snapshot lands).
+   */
+  refresh(): Promise<TreeDataSnapshot> {
+    if (this.reloading) {
+      return this.reloading;
+    }
+    this.reloading = Promise.resolve(this.loadData())
+      .then((snapshot) => {
+        this.cache = snapshot;
+        this.reloading = null;
+        this._onDidChangeTreeData.fire();
+        return snapshot;
+      })
+      .catch((error) => {
+        this.reloading = null;
+        throw error;
+      });
+    return this.reloading;
+  }
+
+  /**
+   * Populate the snapshot cache WITHOUT firing onDidChangeTreeData. Views that were never
+   * rendered yet must not receive change events — the pending refresh would re-run on first
+   * reveal and add an extra render pass to the interactive expand path. If a view already
+   * rendered (race with a very fast sidebar click), its own getChildren owns the cache.
+   */
+  warmup(): Promise<void> {
+    if (this.reloading) {
+      return this.reloading.then(() => undefined);
+    }
+    if (this.cache !== null) {
+      return Promise.resolve();
+    }
+    return Promise.resolve(this.loadData()).then(
+      (snapshot) => {
+        if (this.cache === null) {
+          this.cache = snapshot;
+        }
+      },
+      () => undefined,
+    );
   }
 
   getTreeItem(element: BaseNode): vscode.TreeItem {
@@ -84,9 +133,22 @@ export class ConfigTreeDataProvider implements vscode.TreeDataProvider<BaseNode>
     item.description = element.description;
     item.tooltip = element.tooltip;
     item.contextValue = element.contextValue;
-    item.iconPath = new vscode.ThemeIcon(iconId(element));
+    item.iconPath = iconFor(iconId(element));
     if (element.command) {
-      item.command = { command: element.command, title: element.label, arguments: [element] };
+      // Slim RPC payload: the full element (with recursive children subtrees) used to ride
+      // along in every visible TreeItem; commands only consume these five scalar fields.
+      item.command = {
+        command: element.command,
+        title: element.label,
+        arguments: [
+          {
+            kind: element.kind,
+            id: element.id,
+            label: element.label,
+            filePath: element.filePath,
+          },
+        ],
+      };
     }
     return item;
   }
@@ -104,8 +166,6 @@ export class ConfigTreeDataProvider implements vscode.TreeDataProvider<BaseNode>
       this.cache.assignments,
       this.cache.models,
     );
-    const sectionIndex = { config: 0, presets: 1, backups: 2, models: 3 } as const;
-    const root = roots[sectionIndex[this.section]];
-    return root?.children ?? [];
+    return roots;
   }
 }
