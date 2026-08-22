@@ -2,7 +2,7 @@ import * as defaultFs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-export type QuotaProviderId = "kimi" | "glm" | "mimo";
+export type QuotaProviderId = "kimi" | "glm" | "mimo" | "deepseek";
 export type QuotaWindowKind = "5h" | "weekly" | "monthly";
 
 export interface QuotaWindow {
@@ -44,6 +44,7 @@ export interface QuotaServiceOptions {
 const KIMI_USAGE_URL = "https://api.kimi.com/coding/v1/usages";
 const GLM_QUOTA_URL = "https://open.bigmodel.cn/api/monitor/usage/quota/limit";
 const MIMO_API_BASE = "https://platform.xiaomimimo.com/api/v1";
+const DEEPSEEK_BALANCE_URL = "https://api.deepseek.com/user/balance";
 
 const KIMI_PLAN_LEVELS: Record<string, string> = {
   LEVEL_BASIC: "Moderato",
@@ -219,10 +220,28 @@ export function remainingColor(remaining: number): QuotaSegmentColor {
   return remaining >= 20 ? "yellow" : "red";
 }
 
+/** Color band for balance-only segments (absolute amount): >100 green, 20–100 yellow, <20 red. */
+export function balanceColor(total: number): QuotaSegmentColor {
+  if (total > 100) {
+    return "green";
+  }
+  return total >= 20 ? "yellow" : "red";
+}
+
+/** Balance-only providers (pay-as-you-go, e.g. DeepSeek) render one neutral currency segment. */
+const CURRENCY_SYMBOLS: Record<string, string> = { CNY: "¥", USD: "$" };
+
+function balanceSegmentText(label: string, total: number, currency: string): string {
+  const symbol = CURRENCY_SYMBOLS[currency] ?? `${currency} `;
+  const trimmed = Math.round(total * 100) / 100;
+  return `${label} ${symbol}${trimmed}`;
+}
+
 /**
  * Pure status-bar builder: one segment per (provider, window) so each window gets its own
  * color — "Kimi 100%/5h", "72%/7d", "GLM 91%/5h" in 5h → 7d → 30d order (remaining percent,
- * provider name only on its first segment). Errored providers collapse to a neutral "?" segment.
+ * provider name only on its first segment). Errored providers collapse to a neutral "?" segment;
+ * windowless providers with a balance render a neutral "DeepSeek ¥110" currency segment.
  */
 export function formatQuotaBar(snapshot: QuotaSnapshot): QuotaBar {
   const segments: QuotaBarSegment[] = [];
@@ -246,6 +265,12 @@ export function formatQuotaBar(snapshot: QuotaSnapshot): QuotaBar {
         color: remainingColor(remaining),
       });
       first = false;
+    }
+    if (first && provider.balances?.total != null && provider.balances.currency) {
+      segments.push({
+        text: balanceSegmentText(provider.label, provider.balances.total, provider.balances.currency),
+        color: balanceColor(provider.balances.total),
+      });
     }
   }
   return { segments };
@@ -275,8 +300,41 @@ export class QuotaService {
       this.fetchKimi(bearerKey(entries["kimi-for-coding"])),
       this.fetchGlm(bearerKey(entries["zhipuai-coding-plan"])),
       this.fetchMimo(this.quotaConfigPath ? readMimoCookie(this.quotaConfigPath, this.fsMod) : null),
+      this.fetchDeepSeek(bearerKey(entries["deepseek"])),
     ]);
     return { providers, fetchedAt: this.now().toISOString() };
+  }
+
+  /**
+   * DeepSeek is pay-as-you-go: the only programmatic source is GET /user/balance
+   * (no quota windows / usage endpoints exist). balance_infos carries one entry per
+   * currency; CNY wins when present, otherwise the first entry.
+   */
+  async fetchDeepSeek(apiKey: string | null): Promise<ProviderQuota> {
+    const base = emptyProvider("deepseek", "DeepSeek");
+    if (!apiKey) {
+      return base;
+    }
+    try {
+      const res = await this.fetchFn(DEEPSEEK_BALANCE_URL, {
+        headers: { Authorization: `Bearer ${apiKey}`, Accept: "application/json" },
+        signal: AbortSignal.timeout(this.timeoutMs),
+      });
+      if (!res.ok) {
+        return errorProvider({ ...base, configured: true }, `HTTP ${res.status}`);
+      }
+      const data = (await res.json()) as { is_available?: unknown; balance_infos?: unknown };
+      const infos = Array.isArray(data.balance_infos) ? (data.balance_infos as Record<string, unknown>[]) : [];
+      const pick = infos.find((info) => info.currency === "CNY") ?? infos[0];
+      const total = toFiniteNumber(pick?.total_balance);
+      const currency = typeof pick?.currency === "string" ? pick.currency : null;
+      if (total === null || currency === null) {
+        return errorProvider({ ...base, configured: true }, "接口未返回可解析的余额数据");
+      }
+      return { ...base, configured: true, balances: { total, currency } };
+    } catch (error) {
+      return errorProvider({ ...base, configured: true }, error instanceof Error ? error.message : String(error));
+    }
   }
 
   async fetchKimi(apiKey: string | null): Promise<ProviderQuota> {

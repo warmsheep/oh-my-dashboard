@@ -203,6 +203,169 @@ describe("QuotaService.fetchAll — MiMo", () => {
   });
 });
 
+describe("QuotaService.fetchAll — DeepSeek", () => {
+  const DEEPSEEK_BALANCE = {
+    is_available: true,
+    balance_infos: [
+      { currency: "CNY", total_balance: "110.00", granted_balance: "10.00", topped_up_balance: "100.00" },
+    ],
+  };
+
+  function deepseekEnv(key: string | undefined): { svc: QuotaService; calls: () => { url: string; headers: Record<string, string> }[] } {
+    const dir = tmpDir();
+    const auth: Record<string, { type: string; key?: string }> = {};
+    if (key !== undefined) {
+      auth["deepseek"] = { type: "api", key };
+    }
+    fs.writeFileSync(path.join(dir, "auth.json"), JSON.stringify(auth));
+    const calls: { url: string; headers: Record<string, string> }[] = [];
+    const fetchFn = async (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      calls.push({ url: String(url), headers: init?.headers as Record<string, string> });
+      return jsonRes(DEEPSEEK_BALANCE);
+    };
+    return { svc: new QuotaService({ authFilePath: path.join(dir, "auth.json"), quotaConfigPath: path.join(dir, "quota.json"), fetchFn }), calls: () => calls };
+  }
+
+  it("queries /user/balance with Bearer key and maps CNY balance, no windows (pay-as-you-go)", async () => {
+    const { svc, calls } = deepseekEnv("sk-ds");
+
+    const snap = await svc.fetchAll();
+    const ds = snap.providers.find((p) => p.providerId === "deepseek")!;
+
+    expect(calls()).toHaveLength(1);
+    expect(calls()[0].url).toBe("https://api.deepseek.com/user/balance");
+    expect(calls()[0].headers.Authorization).toBe("Bearer sk-ds");
+    expect(ds.configured).toBe(true);
+    expect(ds.error).toBeNull();
+    expect(ds.balances).toEqual({ total: 110, currency: "CNY" });
+    expect(ds.windows).toEqual([]);
+  });
+
+  it("prefers the CNY entry when the account holds multiple currencies", async () => {
+    const dir = tmpDir();
+    fs.writeFileSync(path.join(dir, "auth.json"), JSON.stringify({ deepseek: { type: "api", key: "sk-ds" } }));
+    const svc = new QuotaService({
+      authFilePath: path.join(dir, "auth.json"),
+      quotaConfigPath: path.join(dir, "quota.json"),
+      fetchFn: async () =>
+        jsonRes({
+          is_available: true,
+          balance_infos: [
+            { currency: "USD", total_balance: "5.50", granted_balance: "0.00", topped_up_balance: "5.50" },
+            { currency: "CNY", total_balance: "39.20", granted_balance: "0.00", topped_up_balance: "39.20" },
+          ],
+        }),
+    });
+
+    const snap = await svc.fetchAll();
+    const ds = snap.providers.find((p) => p.providerId === "deepseek")!;
+    expect(ds.balances).toEqual({ total: 39.2, currency: "CNY" });
+  });
+
+  it("falls back to the first currency entry when no CNY exists", async () => {
+    const dir = tmpDir();
+    fs.writeFileSync(path.join(dir, "auth.json"), JSON.stringify({ deepseek: { type: "api", key: "sk-ds" } }));
+    const svc = new QuotaService({
+      authFilePath: path.join(dir, "auth.json"),
+      quotaConfigPath: path.join(dir, "quota.json"),
+      fetchFn: async () =>
+        jsonRes({
+          is_available: true,
+          balance_infos: [
+            { currency: "USD", total_balance: "5.50", granted_balance: "0.00", topped_up_balance: "5.50" },
+          ],
+        }),
+    });
+
+    const snap = await svc.fetchAll();
+    const ds = snap.providers.find((p) => p.providerId === "deepseek")!;
+    expect(ds.balances).toEqual({ total: 5.5, currency: "USD" });
+  });
+
+  it("reports unparseable balance payloads as an error, not a crash", async () => {
+    const dir = tmpDir();
+    fs.writeFileSync(path.join(dir, "auth.json"), JSON.stringify({ deepseek: { type: "api", key: "sk-ds" } }));
+    const svc = new QuotaService({
+      authFilePath: path.join(dir, "auth.json"),
+      quotaConfigPath: path.join(dir, "quota.json"),
+      fetchFn: async () => jsonRes({ is_available: true, balance_infos: [] }),
+    });
+
+    const snap = await svc.fetchAll();
+    const ds = snap.providers.find((p) => p.providerId === "deepseek")!;
+    expect(ds.configured).toBe(true);
+    expect(ds.error).toContain("余额");
+  });
+
+  it("surfaces HTTP errors (401 invalid key)", async () => {
+    const dir = tmpDir();
+    fs.writeFileSync(path.join(dir, "auth.json"), JSON.stringify({ deepseek: { type: "api", key: "bad" } }));
+    const svc = new QuotaService({
+      authFilePath: path.join(dir, "auth.json"),
+      quotaConfigPath: path.join(dir, "quota.json"),
+      fetchFn: async () => jsonRes({ message: "Authentication Fails" }, 401),
+    });
+
+    const snap = await svc.fetchAll();
+    const ds = snap.providers.find((p) => p.providerId === "deepseek")!;
+    expect(ds.configured).toBe(true);
+    expect(ds.error).toBe("HTTP 401");
+  });
+
+  it("is not configured when auth.json has no deepseek key (no request sent)", async () => {
+    const { svc, calls } = deepseekEnv(undefined);
+
+    const snap = await svc.fetchAll();
+    const ds = snap.providers.find((p) => p.providerId === "deepseek")!;
+    expect(ds.configured).toBe(false);
+    expect(calls()).toEqual([]);
+  });
+});
+
+describe("formatQuotaBar — balance-only providers", () => {
+  it("colors balance segments by absolute amount: >100 green", () => {
+    const bar = formatQuotaBar({
+      fetchedAt: "2026-08-22T12:00:00.000Z",
+      providers: [
+        { providerId: "deepseek", label: "DeepSeek", plan: null, windows: [], balances: { total: 257.06, currency: "CNY" }, configured: true, error: null },
+      ],
+    });
+    expect(bar.segments).toEqual([{ text: "DeepSeek ¥257.06", color: "green" }]);
+  });
+
+  it("colors balance segments: 20–100 yellow (boundaries inclusive)", () => {
+    for (const total of [20, 42, 100]) {
+      const bar = formatQuotaBar({
+        fetchedAt: "2026-08-22T12:00:00.000Z",
+        providers: [
+          { providerId: "deepseek", label: "DeepSeek", plan: null, windows: [], balances: { total, currency: "CNY" }, configured: true, error: null },
+        ],
+      });
+      expect(bar.segments).toEqual([{ text: `DeepSeek ¥${total}`, color: "yellow" }]);
+    }
+  });
+
+  it("colors balance segments: <20 red, uses $ for USD and trims trailing zeros", () => {
+    const bar = formatQuotaBar({
+      fetchedAt: "2026-08-22T12:00:00.000Z",
+      providers: [
+        { providerId: "deepseek", label: "DeepSeek", plan: null, windows: [], balances: { total: 5.5, currency: "USD" }, configured: true, error: null },
+      ],
+    });
+    expect(bar.segments).toEqual([{ text: "DeepSeek $5.5", color: "red" }]);
+  });
+
+  it("skips providers with neither windows nor a parseable balance", () => {
+    const bar = formatQuotaBar({
+      fetchedAt: "2026-08-22T12:00:00.000Z",
+      providers: [
+        { providerId: "deepseek", label: "DeepSeek", plan: null, windows: [], balances: null, configured: true, error: null },
+      ],
+    });
+    expect(bar.segments).toEqual([]);
+  });
+});
+
 describe("QuotaService.fetchAll — snapshot", () => {
   it("merges providers and stamps fetchedAt", async () => {
     const dir = tmpDir();
@@ -213,7 +376,7 @@ describe("QuotaService.fetchAll — snapshot", () => {
     const svc = new QuotaService({ authFilePath: path.join(dir, "auth.json"), quotaConfigPath: path.join(dir, "quota.json"), fetchFn: async (url: string | URL | Request) => jsonRes(String(url).includes("kimi.com") ? KIMI_PAYLOAD : GLM_PAYLOAD) });
 
     const snap = await svc.fetchAll();
-    expect(snap.providers.map((p) => p.providerId)).toEqual(["kimi", "glm", "mimo"]);
+    expect(snap.providers.map((p) => p.providerId)).toEqual(["kimi", "glm", "mimo", "deepseek"]);
     expect(snap.fetchedAt).toBeTruthy();
   });
 });
