@@ -71,6 +71,13 @@ function snapshotToItems(snap: QuotaSnapshot): vscode.QuickPickItem[] {
         ].filter(Boolean).join(" ｜ "),
       });
     }
+    if (provider.windows.length === 0 && provider.balances?.total != null && provider.balances.currency) {
+      items.push({
+        label: `$(credit-card) ${provider.label}`,
+        description: `余额: ${provider.balances.total} ${provider.balances.currency}`,
+        detail: "按量计费，无额度窗口",
+      });
+    }
   }
   return items;
 }
@@ -84,10 +91,10 @@ function tooltipMarkdown(snap: QuotaSnapshot): vscode.MarkdownString {
       continue;
     }
     const windows = provider.windows.map((w) => `${WINDOW_LABELS[w.kind]} ${describeWindow(w)}`).join("；");
-    const meta = [provider.plan, provider.balances?.total != null && provider.balances.currency ? `余额 ${provider.balances.total} ${provider.balances.currency}` : null]
-      .filter(Boolean)
-      .join(" · ");
-    md.appendMarkdown(`- **${provider.label}**${meta ? `（${meta}）` : ""}：${windows || "暂无额度数据"}\n`);
+    const balance = provider.balances?.total != null && provider.balances.currency ? `余额 ${provider.balances.total} ${provider.balances.currency}` : null;
+    const meta = [provider.plan, balance].filter(Boolean).join(" · ");
+    const body = windows || (balance ? "按量计费" : "暂无额度数据");
+    md.appendMarkdown(`- **${provider.label}**${meta ? `（${meta}）` : ""}：${body}\n`);
   }
   md.appendMarkdown(`\n更新于 ${new Date(snap.fetchedAt).toLocaleString("zh-CN", { hour12: false })} · 点击查看详情`);
   return md;
