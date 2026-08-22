@@ -53,7 +53,7 @@ export class BackupService {
       : MANAGED_FILES.map((name) => ({ label: name, src: path.join(opts.configDir, name) }));
   }
 
-  create(reason: BackupReason, meta?: { preset?: string }): BackupEntry {
+  create(reason: BackupReason, meta?: { preset?: string; name?: string }): BackupEntry {
     const at = this.now();
     const dirName = `${isoFs(at)}-${reason}`;
     const dir = path.join(this.backupsDir, dirName);
@@ -81,6 +81,7 @@ export class BackupService {
     const manifest: BackupManifest = {
       version: 1,
       reason,
+      ...(meta?.name !== undefined && meta.name.length > 0 ? { name: meta.name } : {}),
       ...(meta?.preset !== undefined ? { preset: meta.preset } : {}),
       createdAt: at.toISOString(),
       fileCount,
@@ -106,6 +107,16 @@ export class BackupService {
 
   remove(dirName: string): void {
     this.fs.rmSync(path.join(this.backupsDir, dirName), { recursive: true, force: true });
+  }
+
+  rename(dirName: string, name: string): BackupEntry {
+    const entry = this.list().find((e) => e.dirName === dirName);
+    if (!entry) {
+      throw new Error("BACKUP_NOT_FOUND");
+    }
+    const manifest: BackupManifest = { ...entry.manifest, name };
+    this.fs.writeFileSync(path.join(entry.dir, MANIFEST_FILE), JSON.stringify(manifest, null, 2));
+    return { ...entry, manifest };
   }
 
   restore(dirName: string): void {

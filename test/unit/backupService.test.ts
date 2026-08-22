@@ -136,6 +136,40 @@ describe("BackupService.create", () => {
   });
 });
 
+describe("BackupService named backups", () => {
+  it("create() persists the user-supplied name into the manifest", () => {
+    seedFullTree();
+    const svc = new BackupService({ configDir, hostname: "h", now: () => new Date("2026-08-22T10:00:00.000Z") });
+
+    const entry = svc.create("manual", { name: "升级前" });
+
+    expect(entry.manifest.name).toBe("升级前");
+    const onDisk = JSON.parse(fs.readFileSync(path.join(entry.dir, "manifest.json"), "utf8"));
+    expect(onDisk.name).toBe("升级前");
+  });
+
+  it("rename() updates the manifest name and leaves every other field untouched", () => {
+    seedFullTree();
+    const svc = new BackupService({ configDir, hostname: "h", now: () => new Date("2026-08-22T10:00:00.000Z") });
+    const entry = svc.create("manual", { name: "旧名字" });
+
+    const renamed = svc.rename(entry.dirName, "新名字");
+
+    expect(renamed.manifest.name).toBe("新名字");
+    const onDisk = JSON.parse(fs.readFileSync(path.join(entry.dir, "manifest.json"), "utf8"));
+    expect(onDisk.name).toBe("新名字");
+    expect(onDisk.reason).toBe("manual");
+    expect(onDisk.createdAt).toBe("2026-08-22T10:00:00.000Z");
+    expect(onDisk.machine).toBe("h");
+    expect(onDisk.fileCount).toBe(entry.manifest.fileCount);
+  });
+
+  it("rename() throws for an unknown dir", () => {
+    const svc = new BackupService({ configDir, hostname: "h" });
+    expect(() => svc.rename("nope", "x")).toThrow("BACKUP_NOT_FOUND");
+  });
+});
+
 describe("BackupService.list / remove", () => {
   it("lists sorted by dirName DESC (newest first) and remove() deletes the dir", () => {
     seedFullTree();

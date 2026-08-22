@@ -28,6 +28,8 @@ export type BackupReason = "manual" | "pre-apply" | "pre-save" | "pre-restore";
 export interface BackupManifest {
   version: 1;
   reason: BackupReason;
+  /** User-facing display name; purely presentational — the dir keeps its timestamp id. */
+  name?: string;
   preset?: string;
   createdAt: string;
   fileCount: number;
