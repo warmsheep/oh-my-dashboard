@@ -7,8 +7,10 @@ VSCode 扩展：管理 [opencode](https://opencode.ai) 与 [oh-my-opencode](http
 - **配置面板**（活动栏侧边栏）：配置文件 / 预设 / 备份三区树形视图
   - 自动识别本机生效的 agent 配置：新版 oh-my-openagent 的统一配置 `~/.omo/omo.jsonc`（`[opencode]` 块），或旧版 `oh-my-opencode.json[c]` / `oh-my-openagent.json[c]`（与运行时同序：`oh-my-opencode` 优先，`.jsonc` 优先于 `.json`）
   - `opencode.json`（JSONC，保留注释与尾逗号；`opencode.jsonc` 亦可识别）、`AGENTS.md`（全局+项目级）、`command/`、`skills/`
+  - skills 兼容主流 agent 目录约定，`~` 下的家目录一律显示为「全局」：全局按序扫描 `~/.agents/skills`（跨工具标准）、`~/.claude/skills`、`<配置目录>/skills`（opencode）、`~/.config/agents/skills` 与 `~/.config/amp/skills`（Amp，尊重 `XDG_CONFIG_HOME`）、`~/.copilot/skills`、`~/.gemini/skills`、`~/.cursor/skills`、`~/.codeium/windsurf/skills`、`~/.codex/skills`（Codex 旧版）；项目级扫描 `.agents/`、`.claude/`、`.opencode/`、`.github/`、`.gemini/`、`.cursor/`、`.windsurf/` 下的 `skills/`。技能目录判定跟随符号链接且需含 `SKILL.md`（如 `~/.claude/skills` 链接到 `~/.agents/skills` 的条目可正常识别）；仅显示实际存在的目录
   - agent/category 节点点击 → QuickPick 选模型与 variant，程序化写回（omo 目标写 `reasoning` 键，同时清理冲突的 `variant`/`models` 链）
 - **模板**（原「预设」）：从当前配置捕获；Webview 矩阵编辑器（批量设模型、逐行 variant）；应用采用合并语义（预设未列出的键不动）
+- **插件**：列出 opencode.json `plugin` 数组声明的插件（npm 包名可带 `@版本`，或 `~/` `./` `/` `file://` 本地路径）；npm 插件优先在运行时缓存 `~/.cache/opencode/node_modules/` 解析，回退 `<配置目录>/node_modules/`；展示安装版本 / 未安装 / 本地路径 / 缺失状态；点击标题打开配置文件，展开浏览插件目录文件（自动排除嵌套 `node_modules` 与 `.git`），单击文件即可预览编辑
 - **备份**：手动「立即备份」会要求输入备份名称（名称仅用于展示，时间戳自动附带且不入名称）；历史备份可右键「重命名备份」；manifest 记录原因；与当前配置 diff 对比；恢复时明确警告覆盖（应用/恢复不再自动产生备份）
 - **状态栏**：显示当前预设，点击快速切换（`Ctrl+Alt+P`）
 - **Coding Plan 额度**（状态栏右侧）：实时显示 Kimi / GLM / MiMo 剩余额度（5 小时窗口、周额度；MiMo 为月度额度+余额）
@@ -63,7 +65,7 @@ webview-ui/    React 矩阵表单（Vite 单 bundle，VSCode CSS 变量主题）
 ## 测试
 
 ```bash
-npm test                 # vitest：单元 + 集成（85 tests）
+npm test                 # vitest：单元 + 集成（163 tests）
 ./scripts/e2e.sh         # @vscode/test-electron 冒烟（xvfb 隔离环境）
 ```
 
