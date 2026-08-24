@@ -1,16 +1,33 @@
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
+
 import * as vscode from "vscode";
-import { addLocalModel, removeLocalModel, LOCAL_MODELS_FILE } from "../core/builtinModels";
-import { applyEdits, validate } from "../core/jsoncEditor";
-import type { JsoncEdit } from "../core/jsoncEditor";
-import type { BackupEntry, Variant } from "../core/types";
-import { KNOWN_AGENTS, KNOWN_CATEGORIES, VARIANTS } from "../core/types";
-import type { BackupService } from "../core/backupService";
-import type { ConfigStore } from "../core/configStore";
-import type { PresetService } from "../core/presetService";
+
 import { CMD, FILE_TEMPLATES, MODEL_ID_PATTERN, presetNameError } from "../constants";
+import type { BackupService } from "../core/backupService";
+import { addLocalModel, LOCAL_MODELS_FILE, removeLocalModel } from "../core/builtinModels";
+import type { ConfigStore } from "../core/configStore";
+import { errorMessage } from "../core/errors";
+import type { PresetService } from "../core/presetService";
+import type { BackupEntry, Variant } from "../core/types";
+import { BACKUP_REASON_LABELS, KNOWN_AGENTS, KNOWN_CATEGORIES, VARIANTS } from "../core/types";
+import { CURRENT_PRESET_BADGE } from "../tree/nodes";
 import { openPresetEditor } from "../webview/presetEditorHost";
+import {
+  agentModelRequestFromArg,
+  agentTargetFromArg,
+  backupEntryFromArg,
+  exportBackupRequestFromArg,
+  exportPresetRequestFromArg,
+  idSuffix,
+  isAllowedExportTarget,
+  presetNameFromArg,
+  renameBackupRequestFromArg,
+  renamePresetRequestFromArg,
+  toNode,
+} from "./commandArgs";
+import type { AgentTarget } from "./commandArgs";
 
 export interface ExtensionDeps {
   configStore: ConfigStore;
@@ -20,35 +37,36 @@ export interface ExtensionDeps {
   log(message: string): void;
 }
 
-interface NodeLike {
-  kind?: string;
-  id?: string;
-  label?: string;
-  description?: string;
-  filePath?: string;
+/** Programmatic export targets must stay inside these roots (09/R2-P2-1 guard). */
+function exportTargetRoots(deps: ExtensionDeps): string[] {
+  return [os.homedir(), os.tmpdir(), ...workspaceFolders(), deps.configStore.configDir];
 }
 
-interface AgentTarget {
-  section: "agents" | "categories";
-  name: string;
+/**
+ * Roots the raw-string / node.filePath branch of openConfigFile may open from
+ * (R1/P2-5): export roots plus the agent config dir (~/.omo or legacy — it can live
+ * outside every other root).
+ */
+function openTargetRoots(deps: ExtensionDeps): string[] {
+  return [...exportTargetRoots(deps), path.dirname(deps.configStore.resolveAgentConfig().path)];
 }
+
+const EXPORT_TARGET_DENIED = "仅允许导出到用户目录、临时目录或工作区内";
+const OPEN_TARGET_DENIED = "仅允许打开用户目录、临时目录、工作区或配置目录内的文件";
 
 const MANUAL_MODEL = "__manual__";
 
-const BACKUP_REASON_LABELS: Record<string, string> = {
-  manual: "手动",
-  "pre-apply": "应用前",
-  "pre-save": "保存前",
-  "pre-restore": "恢复前",
-};
-
+/**
+ * Register every `opencode.*` command from CMD on the extension host; each handler is wrapped
+ * in run() so failures surface as Chinese notifications. All disposables land in ctx.subscriptions.
+ */
 export function registerCommands(ctx: vscode.ExtensionContext, deps: ExtensionDeps): void {
   const disposables = [
     vscode.commands.registerCommand(CMD.openConfigFile, (arg?: unknown) =>
       run(deps, "打开配置失败", () => openConfigFile(deps, arg)),
     ),
-    vscode.commands.registerCommand(CMD.createConfig, () =>
-      run(deps, "创建配置失败", () => createConfig(deps)),
+    vscode.commands.registerCommand(CMD.createConfig, (arg?: unknown) =>
+      run(deps, "创建配置失败", () => createConfig(deps, arg)),
     ),
     vscode.commands.registerCommand(CMD.setAgentModel, (arg?: unknown) =>
       run(deps, "设置模型失败", () => setAgentModel(deps, arg)),
@@ -115,11 +133,7 @@ export function registerCommands(ctx: vscode.ExtensionContext, deps: ExtensionDe
   ctx.subscriptions.push(...disposables);
 }
 
-async function run(
-  deps: ExtensionDeps,
-  errorPrefix: string,
-  body: () => Promise<void> | void,
-): Promise<void> {
+async function run(deps: ExtensionDeps, errorPrefix: string, body: () => Promise<void> | void): Promise<void> {
   try {
     await body();
   } catch (error) {
@@ -131,87 +145,6 @@ async function run(
 
 function workspaceFolders(): string[] {
   return vscode.workspace.workspaceFolders?.map((folder) => folder.uri.fsPath) ?? [];
-}
-
-function toNode(arg: unknown): NodeLike | undefined {
-  if (typeof arg !== "object" || arg === null || Array.isArray(arg)) {
-    return undefined;
-  }
-  const n = arg as Record<string, unknown>;
-  return {
-    kind: typeof n.kind === "string" ? n.kind : undefined,
-    id: typeof n.id === "string" ? n.id : undefined,
-    label: typeof n.label === "string" ? n.label : undefined,
-    description: typeof n.description === "string" ? n.description : undefined,
-    filePath: typeof n.filePath === "string" ? n.filePath : undefined,
-  };
-}
-
-function idSuffix(id: string | undefined): string | undefined {
-  if (!id) {
-    return undefined;
-  }
-  const idx = id.indexOf(":");
-  return idx >= 0 ? id.slice(idx + 1) : undefined;
-}
-
-function presetNameFromArg(arg: unknown): string | undefined {
-  if (typeof arg === "string" && arg.length > 0) {
-    return arg;
-  }
-  const node = toNode(arg);
-  if (!node || (node.kind !== undefined && node.kind !== "preset")) {
-    return undefined;
-  }
-  return node.label ?? idSuffix(node.id);
-}
-
-function agentTargetFromArg(arg: unknown): AgentTarget | undefined {
-  const node = toNode(arg);
-  if (!node) {
-    return undefined;
-  }
-  const isAgent = node.kind === "agent" || node.id?.startsWith("agent:");
-  const isCategory = node.kind === "category" || node.id?.startsWith("category:");
-  if (!isAgent && !isCategory) {
-    return undefined;
-  }
-  const name = idSuffix(node.id) ?? node.label;
-  if (!name) {
-    return undefined;
-  }
-  return { section: isAgent ? "agents" : "categories", name };
-}
-
-function backupFromArg(deps: ExtensionDeps, arg: unknown): BackupEntry | undefined {
-  const entries = deps.backupService.list();
-  if (typeof arg === "string" && arg.length > 0) {
-    return entries.find((entry) => entry.dirName === arg);
-  }
-  const node = toNode(arg);
-  if (!node) {
-    return undefined;
-  }
-  const candidate = idSuffix(node.id);
-  if (candidate) {
-    const hit = entries.find((entry) => entry.dirName === candidate);
-    if (hit) {
-      return hit;
-    }
-  }
-  if (node.filePath) {
-    const hit = entries.find(
-      (entry) => entry.dir === node.filePath || entry.dirName === path.basename(node.filePath ?? ""),
-    );
-    if (hit) {
-      return hit;
-    }
-  }
-  return undefined;
-}
-
-function validatePresetName(value: string): string | undefined {
-  return presetNameError(value);
 }
 
 interface PresetPickItem extends vscode.QuickPickItem {
@@ -241,7 +174,7 @@ async function pickPreset(
   });
   const items: PresetPickItem[] = sorted.map((preset) => ({
     label: preset.name,
-    description: preset.name === current ? "（当前）" : undefined,
+    description: preset.name === current ? CURRENT_PRESET_BADGE : undefined,
     detail: preset.description,
     presetName: preset.name,
   }));
@@ -300,8 +233,21 @@ async function pickAgentTarget(deps: ExtensionDeps): Promise<AgentTarget | undef
 }
 
 async function openConfigFile(deps: ExtensionDeps, arg: unknown): Promise<void> {
+  // Programmatic raw-string args and node.filePath come from the command bus (tree
+  // clicks pass managed paths, but any extension can executeCommand with a forged
+  // arg) — both must stay inside the allowed roots (R1/P2-5).
+  const openRoots = openTargetRoots(deps);
+  const guardOpen = async (target: string): Promise<boolean> => {
+    if (isAllowedExportTarget(target, openRoots)) {
+      return true;
+    }
+    void vscode.window.showErrorMessage(`打开配置失败: ${OPEN_TARGET_DENIED}（${target}）`);
+    return false;
+  };
   if (typeof arg === "string" && arg.length > 0) {
-    await openPathOrDirectory(arg);
+    if (await guardOpen(arg)) {
+      await openPathOrDirectory(arg);
+    }
     return;
   }
   const node = toNode(arg);
@@ -320,51 +266,44 @@ async function openConfigFile(deps: ExtensionDeps, arg: unknown): Promise<void> 
       return;
     }
     if (node.filePath) {
-      await openPathOrDirectory(node.filePath);
-      return;
-    }
-    if (node.label) {
-      const discovered = deps.configStore.discover(workspaceFolders());
-      const byLabel: Record<string, string> = {
-        [path.basename(discovered.opencodeJson)]: discovered.opencodeJson,
-        [path.basename(discovered.agentConfig.path)]: discovered.agentConfig.path,
-      };
-      const target = byLabel[node.label];
-      if (target) {
-        await openPathOrDirectory(target);
-        return;
+      if (await guardOpen(node.filePath)) {
+        await openPathOrDirectory(node.filePath);
       }
+      return;
     }
   }
 
+  // Shared discovery for both the tree-label shortcut and the interactive fallback —
+  // discover() scans every managed directory, so one invocation must pay for it once.
   const discovered = deps.configStore.discover(workspaceFolders());
+  if (node?.label) {
+    const byLabel: Record<string, string> = {
+      [path.basename(discovered.opencodeJson)]: discovered.opencodeJson,
+      [path.basename(discovered.agentConfig.path)]: discovered.agentConfig.path,
+    };
+    const target = byLabel[node.label];
+    if (target) {
+      await openPathOrDirectory(target);
+      return;
+    }
+  }
   const items: (vscode.QuickPickItem & { path: string })[] = [];
   const addFile = (label: string, filePath: string, exists: boolean): void => {
     if (exists) {
       items.push({ label, description: filePath, path: filePath });
     }
   };
-  addFile(
-    path.basename(discovered.opencodeJson),
-    discovered.opencodeJson,
-    fs.existsSync(discovered.opencodeJson),
-  );
+  addFile(path.basename(discovered.opencodeJson), discovered.opencodeJson, fs.existsSync(discovered.opencodeJson));
   addFile(
     path.basename(discovered.agentConfig.path),
     discovered.agentConfig.path,
     fs.existsSync(discovered.agentConfig.path),
   );
   for (const agentsMd of discovered.agentsMd) {
-    addFile(
-      `AGENTS.md（${agentsMd.scope === "global" ? "全局" : "项目"}）`,
-      agentsMd.path,
-      agentsMd.exists,
-    );
+    addFile(`AGENTS.md（${agentsMd.scope === "global" ? "全局" : "项目"}）`, agentsMd.path, agentsMd.exists);
   }
   if (items.length === 0) {
-    void vscode.window.showInformationMessage(
-      "未发现任何配置，可先执行「OpenCode: 创建缺失的配置」创建",
-    );
+    void vscode.window.showInformationMessage("未发现任何配置，可先执行「OpenCode: 创建缺失的配置」创建");
     return;
   }
   const picked = await vscode.window.showQuickPick(items, { placeHolder: "打开配置" });
@@ -397,7 +336,7 @@ async function pickFileInDirectory(dir: string): Promise<void> {
   }
 }
 
-async function createConfig(deps: ExtensionDeps): Promise<void> {
+async function createConfig(deps: ExtensionDeps, arg: unknown): Promise<void> {
   const discovered = deps.configStore.discover(workspaceFolders());
   const agentsMdPath = path.join(discovered.configDir, "AGENTS.md");
   const agentConfigKey = discovered.agentConfig.kind === "omo" ? "omo.jsonc" : "oh-my-opencode.json";
@@ -414,9 +353,31 @@ async function createConfig(deps: ExtensionDeps): Promise<void> {
     },
     { key: "AGENTS.md", label: "AGENTS.md（全局）", filePath: agentsMdPath },
   ];
+  const matchesRequest = (target: (typeof allTargets)[number], request: string): boolean =>
+    target.key === request || target.label === request || path.basename(target.filePath) === request;
   const targets = allTargets.filter((target) => !fs.existsSync(target.filePath));
   if (targets.length === 0) {
     void vscode.window.showInformationMessage("所有配置均已存在");
+    return;
+  }
+  // Programmatic form (e2e / scripts): the template key or target basename as a plain
+  // string skips the QuickPick. Present-but-unknown names error out instead of falling
+  // back to the picker.
+  if (typeof arg === "string" && arg.trim().length > 0) {
+    const request = arg.trim();
+    const target = targets.find((candidate) => matchesRequest(candidate, request));
+    if (!target) {
+      const existing = allTargets.find((candidate) => matchesRequest(candidate, request));
+      void vscode.window.showErrorMessage(
+        existing ? `配置 ${existing.label} 已存在，无需创建` : `无法识别的配置文件名: ${request}`,
+      );
+      return;
+    }
+    fs.mkdirSync(path.dirname(target.filePath), { recursive: true });
+    deps.configStore.writeAtomic(target.filePath, FILE_TEMPLATES[target.key]);
+    deps.refreshAll();
+    void vscode.window.showInformationMessage(`已创建 ${target.label}`);
+    await vscode.window.showTextDocument(vscode.Uri.file(target.filePath));
     return;
   }
   const picked = await vscode.window.showQuickPick(
@@ -438,95 +399,84 @@ async function createConfig(deps: ExtensionDeps): Promise<void> {
 }
 
 async function setAgentModel(deps: ExtensionDeps, arg: unknown): Promise<void> {
-  const target = agentTargetFromArg(arg) ?? (await pickAgentTarget(deps));
+  const request = agentModelRequestFromArg(arg);
+  if (request && "error" in request) {
+    void vscode.window.showErrorMessage(`设置模型失败: ${request.error}`);
+    return;
+  }
+  const target: AgentTarget | undefined = request ?? agentTargetFromArg(arg) ?? (await pickAgentTarget(deps));
   if (!target) {
     return;
   }
-  const assignments = deps.configStore.ohMyAssignments();
-  const current = assignments[target.section][target.name];
 
-  const models = deps.configStore.listModels();
-  const modelItems: (vscode.QuickPickItem & { model: string })[] = models.map((model) => ({
-    label: `${model.label} (${model.id})`,
-    description: model.provider,
-    model: model.id,
-  }));
-  modelItems.push({ label: "（手动输入…）", description: "自定义 provider/model", model: MANUAL_MODEL });
-  const currentHint = current
-    ? `（当前: ${current.model}${current.variant ? `/${current.variant}` : ""}）`
-    : "";
-  const modelPick = await vscode.window.showQuickPick(modelItems, {
-    placeHolder: `选择 ${target.name} 的模型${currentHint}`,
-    matchOnDescription: true,
-  });
-  if (!modelPick) {
-    return;
-  }
-  let modelId = modelPick.model;
-  if (modelId === MANUAL_MODEL) {
-    const input = await vscode.window.showInputBox({
-      prompt: "输入模型 ID（provider/model）",
-      placeHolder: "anthropic/claude-sonnet-4",
-      validateInput: (value) =>
-        MODEL_ID_PATTERN.test(value) ? undefined : "格式须为 provider/model，例如 anthropic/claude-sonnet-4",
+  let modelId: string;
+  let variant: string | null;
+  if (request) {
+    modelId = request.model;
+    variant = request.variant;
+  } else {
+    const assignments = deps.configStore.ohMyAssignments();
+    const current = assignments[target.section][target.name];
+
+    const models = deps.configStore.listModels();
+    const modelItems: (vscode.QuickPickItem & { model: string })[] = models.map((model) => ({
+      label: `${model.label} (${model.id})`,
+      description: model.provider,
+      model: model.id,
+    }));
+    modelItems.push({ label: "（手动输入…）", description: "自定义 provider/model", model: MANUAL_MODEL });
+    const currentHint = current ? `（当前: ${current.model}${current.variant ? `/${current.variant}` : ""}）` : "";
+    const modelPick = await vscode.window.showQuickPick(modelItems, {
+      placeHolder: `选择 ${target.name} 的模型${currentHint}`,
+      matchOnDescription: true,
     });
-    if (!input) {
+    if (!modelPick) {
       return;
     }
-    modelId = input;
-  }
+    modelId = modelPick.model;
+    if (modelId === MANUAL_MODEL) {
+      const input = await vscode.window.showInputBox({
+        prompt: "输入模型 ID（provider/model）",
+        placeHolder: "anthropic/claude-sonnet-4",
+        validateInput: (value) =>
+          MODEL_ID_PATTERN.test(value) ? undefined : "格式须为 provider/model，例如 anthropic/claude-sonnet-4",
+      });
+      if (!input) {
+        return;
+      }
+      modelId = input;
+    }
 
-  const variantItems: (vscode.QuickPickItem & { variant: Variant | null })[] = [
-    { label: "—", description: "不设置 variant", variant: null },
-    ...VARIANTS.map((variant) => ({ label: variant, variant })),
-  ];
-  const variantPick = await vscode.window.showQuickPick(variantItems, {
-    placeHolder: "选择 variant（可省略）",
-  });
-  if (!variantPick) {
-    return;
-  }
-
-  const discovered = deps.configStore.discover(workspaceFolders());
-  const agentConfig = discovered.agentConfig;
-  const agentFileName = path.basename(agentConfig.path);
-  const raw = deps.configStore.readTextForEdit(agentConfig.path);
-  if (raw.length > 0) {
-    const errors = validate(raw);
-    if (errors.length > 0) {
-      void vscode.window.showErrorMessage(
-        `${agentFileName} 存在 JSONC 语法错误，已取消修改，请先修复后再试`,
-      );
+    const variantItems: (vscode.QuickPickItem & { variant: Variant | null })[] = [
+      { label: "—", description: "不设置 variant", variant: null },
+      ...VARIANTS.map((candidate) => ({ label: candidate, variant: candidate })),
+    ];
+    const variantPick = await vscode.window.showQuickPick(variantItems, {
+      placeHolder: "选择 variant（可省略）",
+    });
+    if (!variantPick) {
       return;
     }
+    variant = variantPick.variant;
   }
-  const base = [...agentConfig.sectionPath, target.section, target.name];
-  const otherReasoningKey = agentConfig.reasoningKey === "reasoning" ? "variant" : "reasoning";
-  const edits: JsoncEdit[] = [
-    { path: [...base, "model"], value: modelId },
-    variantPick.variant === null
-      ? { path: [...base, agentConfig.reasoningKey], value: undefined, op: "remove" }
-      : { path: [...base, agentConfig.reasoningKey], value: variantPick.variant },
-    { path: [...base, otherReasoningKey], value: undefined, op: "remove" },
-    { path: [...base, "models"], value: undefined, op: "remove" },
-  ];
-  const next = applyEdits(raw.length > 0 ? raw : "{}", edits);
-  fs.mkdirSync(path.dirname(agentConfig.path), { recursive: true });
-  deps.configStore.writeAtomic(agentConfig.path, next);
+
+  // Core owns the write path: readTextForEdit contract, JSONC syntax abort, conflict-key
+  // cleanup, mkdir, atomic write. JsoncSyntaxError / CONFIG_UNREADABLE surface as Chinese
+  // via errorMessage() in run().
+  deps.configStore.setAgentModel(target.section, target.name, modelId, variant);
   deps.refreshAll();
   void vscode.window.showInformationMessage(
-    `已更新 ${target.name} → ${modelId}${variantPick.variant ? `（variant: ${variantPick.variant}）` : ""}`,
+    `已更新 ${target.name} → ${modelId}${variant ? `（variant: ${variant}）` : ""}`,
   );
 }
 
 async function capturePreset(deps: ExtensionDeps, arg: unknown): Promise<void> {
-  let name: string | undefined =
-    typeof arg === "string" && arg.length > 0 ? arg : presetNameFromArg(arg);
+  let name: string | undefined = typeof arg === "string" && arg.length > 0 ? arg : presetNameFromArg(arg);
   if (!name) {
     const input = await vscode.window.showInputBox({
       prompt: "模板名称",
       placeHolder: "重度创作",
-      validateInput: validatePresetName,
+      validateInput: presetNameError,
     });
     name = input;
   }
@@ -538,11 +488,7 @@ async function capturePreset(deps: ExtensionDeps, arg: unknown): Promise<void> {
   void vscode.window.showInformationMessage(`已捕获模板 ${preset.name}`);
 }
 
-async function applyPresetCommand(
-  deps: ExtensionDeps,
-  arg: unknown,
-  includeCapture = false,
-): Promise<void> {
+async function applyPresetCommand(deps: ExtensionDeps, arg: unknown, includeCapture = false): Promise<void> {
   let name = presetNameFromArg(arg);
   if (!name) {
     const picked = await pickPreset(deps, includeCapture, "切换模板（当前项在最前）");
@@ -561,6 +507,18 @@ async function applyPresetCommand(
 }
 
 async function renamePreset(deps: ExtensionDeps, arg: unknown): Promise<void> {
+  // Programmatic form (e2e / scripts): { from, to } — skips the picker and InputBox.
+  const request = renamePresetRequestFromArg(arg);
+  if (request && "error" in request) {
+    void vscode.window.showErrorMessage(`重命名模板失败: ${request.error}`);
+    return;
+  }
+  if (request) {
+    deps.presetService.rename(request.from, request.to);
+    deps.refreshAll();
+    void vscode.window.showInformationMessage(`已重命名 ${request.from} → ${request.to}`);
+    return;
+  }
   const oldName = presetNameFromArg(arg) ?? (await pickPreset(deps, false, "选择要重命名的模板"));
   if (!oldName) {
     return;
@@ -569,7 +527,7 @@ async function renamePreset(deps: ExtensionDeps, arg: unknown): Promise<void> {
     prompt: "新的模板名称",
     value: oldName,
     validateInput: (value) => {
-      const base = validatePresetName(value);
+      const base = presetNameError(value);
       if (base) {
         return base;
       }
@@ -592,10 +550,14 @@ async function deletePreset(deps: ExtensionDeps, arg: unknown): Promise<void> {
   if (!name) {
     return;
   }
-  const confirm = await vscode.window.showWarningMessage(`删除模板 ${name}？`, {
-    modal: true,
-    detail: "删除后无法恢复",
-  }, "删除");
+  const confirm = await vscode.window.showWarningMessage(
+    `删除模板 ${name}？`,
+    {
+      modal: true,
+      detail: "删除后无法恢复",
+    },
+    "删除",
+  );
   if (confirm !== "删除") {
     return;
   }
@@ -605,6 +567,21 @@ async function deletePreset(deps: ExtensionDeps, arg: unknown): Promise<void> {
 }
 
 async function exportPreset(deps: ExtensionDeps, arg: unknown): Promise<void> {
+  // Programmatic form (e2e / scripts): { name, target } — skips the picker and save dialog.
+  const request = exportPresetRequestFromArg(arg);
+  if (request && "error" in request) {
+    void vscode.window.showErrorMessage(`导出模板失败: ${request.error}`);
+    return;
+  }
+  if (request) {
+    if (!isAllowedExportTarget(request.target, exportTargetRoots(deps))) {
+      void vscode.window.showErrorMessage(`导出模板失败: ${EXPORT_TARGET_DENIED}（${request.target}）`);
+      return;
+    }
+    deps.presetService.exportTo(request.name, request.target);
+    deps.log(`已导出模板 ${request.name} → ${request.target}`);
+    return;
+  }
   const name = presetNameFromArg(arg) ?? (await pickPreset(deps, false, "选择要导出的模板"));
   if (!name) {
     return;
@@ -642,7 +619,19 @@ async function backupNow(deps: ExtensionDeps, arg: unknown): Promise<void> {
 }
 
 async function renameBackup(deps: ExtensionDeps, arg: unknown): Promise<void> {
-  const entry = backupFromArg(deps, arg) ?? (await pickBackup(deps, "选择要重命名的备份"));
+  // Programmatic form (e2e / scripts): { dirName, name } — skips the picker and InputBox.
+  const request = renameBackupRequestFromArg(arg);
+  if (request && "error" in request) {
+    void vscode.window.showErrorMessage(`重命名备份失败: ${request.error}`);
+    return;
+  }
+  if (request) {
+    deps.backupService.rename(request.dirName, request.name);
+    deps.refreshAll();
+    void vscode.window.showInformationMessage(`备份已重命名为「${request.name}」`);
+    return;
+  }
+  const entry = backupEntryFromArg(arg, deps.backupService.list()) ?? (await pickBackup(deps, "选择要重命名的备份"));
   if (!entry) {
     return;
   }
@@ -666,7 +655,7 @@ async function renameBackup(deps: ExtensionDeps, arg: unknown): Promise<void> {
 }
 
 async function restoreBackup(deps: ExtensionDeps, arg: unknown): Promise<void> {
-  const entry = backupFromArg(deps, arg) ?? (await pickBackup(deps, "选择要恢复的备份"));
+  const entry = backupEntryFromArg(arg, deps.backupService.list()) ?? (await pickBackup(deps, "选择要恢复的备份"));
   if (!entry) {
     return;
   }
@@ -684,7 +673,7 @@ async function restoreBackup(deps: ExtensionDeps, arg: unknown): Promise<void> {
 }
 
 async function diffBackup(deps: ExtensionDeps, arg: unknown): Promise<void> {
-  const entry = backupFromArg(deps, arg) ?? (await pickBackup(deps, "选择要对比的备份"));
+  const entry = backupEntryFromArg(arg, deps.backupService.list()) ?? (await pickBackup(deps, "选择要对比的备份"));
   if (!entry) {
     return;
   }
@@ -710,14 +699,18 @@ async function diffBackup(deps: ExtensionDeps, arg: unknown): Promise<void> {
 }
 
 async function deleteBackup(deps: ExtensionDeps, arg: unknown): Promise<void> {
-  const entry = backupFromArg(deps, arg) ?? (await pickBackup(deps, "选择要删除的备份"));
+  const entry = backupEntryFromArg(arg, deps.backupService.list()) ?? (await pickBackup(deps, "选择要删除的备份"));
   if (!entry) {
     return;
   }
-  const confirm = await vscode.window.showWarningMessage(`删除备份 ${entry.dirName}？`, {
-    modal: true,
-    detail: "删除后无法恢复",
-  }, "删除");
+  const confirm = await vscode.window.showWarningMessage(
+    `删除备份 ${entry.dirName}？`,
+    {
+      modal: true,
+      detail: "删除后无法恢复",
+    },
+    "删除",
+  );
   if (confirm !== "删除") {
     return;
   }
@@ -726,29 +719,26 @@ async function deleteBackup(deps: ExtensionDeps, arg: unknown): Promise<void> {
   void vscode.window.showInformationMessage(`已删除备份 ${entry.dirName}`);
 }
 
-const FRIENDLY_ERRORS: Record<string, string> = {
-  INVALID_PRESET_NAME: "模板名称不合法",
-  PRESET_NOT_FOUND: "模板不存在",
-  PRESET_INVALID: "模板文件已损坏（JSON 解析失败）",
-  INVALID_BACKUP_NAME: "备份名称不合法",
-  BACKUP_NOT_FOUND: "备份不存在",
-  BACKUP_PUBLISH_FAILED: "备份发布失败（manifest 缺失）",
-  BACKUP_IMPORT_INVALID: "备份压缩包无效或已损坏",
-  CONFIG_UNREADABLE: "配置文件存在但无法读取（权限或被占用），已中止以防覆盖",
-};
-
 async function exportBackup(deps: ExtensionDeps, arg: unknown): Promise<void> {
   // Programmatic form (e2e / scripts): { dirName, target } — distinct keys so a tree
-  // node ({kind,id,label,filePath}) can never be mistaken for it.
-  if (typeof arg === "object" && arg !== null && !Array.isArray(arg)) {
-    const o = arg as Record<string, unknown>;
-    if (typeof o.dirName === "string" && typeof o.target === "string") {
-      deps.backupService.exportZip(o.dirName, o.target);
-      deps.log(`已导出备份 ${o.dirName} → ${o.target}`);
+  // node ({kind,id,label,filePath}) can never be mistaken for it. Either key alone
+  // already marks intent (aligned with the other programmatic commands): a partial
+  // shape errors out instead of silently reaching the save dialog (headless hang).
+  const request = exportBackupRequestFromArg(arg);
+  if (request && "error" in request) {
+    void vscode.window.showErrorMessage(`导出备份失败: ${request.error}`);
+    return;
+  }
+  if (request) {
+    if (!isAllowedExportTarget(request.target, exportTargetRoots(deps))) {
+      void vscode.window.showErrorMessage(`导出备份失败: ${EXPORT_TARGET_DENIED}（${request.target}）`);
       return;
     }
+    deps.backupService.exportZip(request.dirName, request.target);
+    deps.log(`已导出备份 ${request.dirName} → ${request.target}`);
+    return;
   }
-  const entry = backupFromArg(deps, arg) ?? (await pickBackup(deps, "选择要导出的备份"));
+  const entry = backupEntryFromArg(arg, deps.backupService.list()) ?? (await pickBackup(deps, "选择要导出的备份"));
   if (!entry) {
     return;
   }
@@ -779,14 +769,7 @@ async function importBackup(deps: ExtensionDeps, arg: unknown): Promise<void> {
   }
   const entry = deps.backupService.importZip(zipPath);
   deps.refreshAll();
-  void vscode.window.showInformationMessage(
-    `已导入备份 ${entry.dirName}（${entry.manifest.fileCount} 个文件）`,
-  );
-}
-
-function errorMessage(error: unknown): string {
-  const raw = error instanceof Error ? error.message : String(error);
-  return FRIENDLY_ERRORS[raw] ?? raw;
+  void vscode.window.showInformationMessage(`已导入备份 ${entry.dirName}（${entry.manifest.fileCount} 个文件）`);
 }
 
 function modelIdFromArg(arg: unknown): string | undefined {
@@ -846,11 +829,7 @@ async function deleteModel(deps: ExtensionDeps, arg: unknown): Promise<void> {
     void vscode.window.showErrorMessage(`${id} 来自 opencode.json，请直接编辑该文件移除`);
     return;
   }
-  const confirm = await vscode.window.showWarningMessage(
-    `从模型清单删除 ${id}？`,
-    { modal: true },
-    "删除",
-  );
+  const confirm = await vscode.window.showWarningMessage(`从模型清单删除 ${id}？`, { modal: true }, "删除");
   if (confirm !== "删除") {
     return;
   }

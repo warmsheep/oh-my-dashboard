@@ -1,14 +1,18 @@
-import * as fs from "node:fs";
-import * as path from "node:path";
 import * as vscode from "vscode";
-import { formatQuotaBar, normalizeMimoCookie, type QuotaSegmentColor, type QuotaService, type QuotaSnapshot, type QuotaWindow } from "../core/quotaService";
-import { writeFileAtomic } from "../core/configStore";
-import { applyEdits, parseSafe } from "../core/jsoncEditor";
-import { CMD, CONFIG_KEY, CONFIG_SECTION } from "../constants";
+
+import { CMD, CONFIG_KEY, CONFIG_LEAF, CONFIG_SECTION } from "../constants";
+import { errorMessage } from "../core/errors";
+import {
+  deriveRemainingPercent,
+  formatQuotaBar,
+  normalizeMimoCookie,
+  quotaCycleFailed,
+  quotaRetryDelayMs,
+} from "../core/quotaService";
+import type { QuotaSegmentColor, QuotaService, QuotaSnapshot, QuotaWindow } from "../core/quotaService";
 
 export interface QuotaStatusBarDeps {
   quotaService: QuotaService;
-  configDir: string;
   log(message: string): void;
 }
 
@@ -22,10 +26,6 @@ const WINDOW_LABELS: Record<QuotaWindow["kind"], string> = {
   monthly: "月度额度",
 };
 
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
 function formatReset(iso: string | null): string {
   if (!iso) {
     return "重置时间未知";
@@ -35,7 +35,7 @@ function formatReset(iso: string | null): string {
 }
 
 function describeWindow(window: QuotaWindow): string {
-  const remaining = window.remainingPercent ?? (window.usedPercent !== null ? Math.round((100 - window.usedPercent) * 10) / 10 : null);
+  const remaining = deriveRemainingPercent(window);
   const used = window.usedPercent !== null ? `已用 ${window.usedPercent}%` : "";
   const rest = remaining !== null ? `剩余 ${remaining}%` : "额度未知";
   return [rest, used].filter(Boolean).join(" · ");
@@ -69,7 +69,9 @@ function snapshotToItems(snap: QuotaSnapshot): vscode.QuickPickItem[] {
           provider.balances?.total != null && provider.balances.currency
             ? `余额: ${provider.balances.total} ${provider.balances.currency}`
             : "",
-        ].filter(Boolean).join(" ｜ "),
+        ]
+          .filter(Boolean)
+          .join(" ｜ "),
       });
     }
     if (provider.windows.length === 0 && provider.balances?.total != null && provider.balances.currency) {
@@ -83,19 +85,40 @@ function snapshotToItems(snap: QuotaSnapshot): vscode.QuickPickItem[] {
   return items;
 }
 
-
 function tooltipMarkdown(snap: QuotaSnapshot): vscode.MarkdownString {
   const md = new vscode.MarkdownString();
   for (const provider of snap.providers) {
     if (provider.error !== null) {
-      md.appendMarkdown(`- **${provider.label}**：${provider.error}\n`);
+      // Error text is remote-controlled (API messages) — appendText escapes markdown so
+      // links/images can never be injected into the hover.
+      md.appendMarkdown(`- **${provider.label}**：`);
+      md.appendText(provider.error);
+      md.appendMarkdown(`\n`);
       continue;
     }
     const windows = provider.windows.map((w) => `${WINDOW_LABELS[w.kind]} ${describeWindow(w)}`).join("；");
-    const balance = provider.balances?.total != null && provider.balances.currency ? `余额 ${provider.balances.total} ${provider.balances.currency}` : null;
-    const meta = [provider.plan, balance].filter(Boolean).join(" · ");
+    const balance =
+      provider.balances?.total != null && provider.balances.currency
+        ? `余额 ${provider.balances.total} ${provider.balances.currency}`
+        : null;
     const body = windows || (balance ? "按量计费" : "暂无额度数据");
-    md.appendMarkdown(`- **${provider.label}**${meta ? `（${meta}）` : ""}：${body}\n`);
+    md.appendMarkdown(`- **${provider.label}**`);
+    if (provider.plan !== null || balance !== null) {
+      md.appendMarkdown(`（`);
+      // The plan name is remote-controlled (Kimi/GLM/MiMo subscription levels) —
+      // appendText escapes markdown, same defense as the error line above.
+      if (provider.plan !== null) {
+        md.appendText(provider.plan);
+      }
+      if (provider.plan !== null && balance !== null) {
+        md.appendMarkdown(` · `);
+      }
+      if (balance !== null) {
+        md.appendMarkdown(balance);
+      }
+      md.appendMarkdown(`）`);
+    }
+    md.appendMarkdown(`：${body}\n`);
   }
   md.appendMarkdown(`\n更新于 ${new Date(snap.fetchedAt).toLocaleString("zh-CN", { hour12: false })} · 点击查看详情`);
   return md;
@@ -125,10 +148,13 @@ function segmentColors(): Record<QuotaSegmentColor, string | undefined> {
     : DARK_SEGMENT_COLORS;
 }
 
+/** Create the Coding-Plan quota status-bar segments + self-scheduling refresh timer (backoff on network failures); registers its own commands and listeners, all disposed together. */
 export function createQuotaStatusBar(deps: QuotaStatusBarDeps): QuotaStatusBar {
   let items: vscode.StatusBarItem[] = [];
   let snapshot: QuotaSnapshot | null = null;
-  let refreshing = false;
+  let refreshPromise: Promise<void> | null = null;
+  let failureStreak = 0;
+  let disposed = false;
 
   // One status-bar item per (provider, window) segment — VSCode items are single-colored, so
   // per-window colors require separate items. Higher priority sits further left (right-aligned).
@@ -137,10 +163,12 @@ export function createQuotaStatusBar(deps: QuotaStatusBarDeps): QuotaStatusBar {
   // Recreating every item on each 30s refresh caused constant create/dispose RPC + status-bar
   // relayout churn in the renderer.
   const render = (): void => {
+    if (disposed) {
+      return;
+    }
     const segments = snapshot ? formatQuotaBar(snapshot).segments : [];
     const palette = segmentColors();
-    const rows =
-      segments.length > 0 ? segments : [{ text: "Coding Plan", color: "neutral" as const }];
+    const rows = segments.length > 0 ? segments : [{ text: "Coding Plan", color: "neutral" as const }];
     const tooltip =
       segments.length === 0 && !snapshot
         ? "点击查询 Coding Plan 剩余额度"
@@ -168,46 +196,54 @@ export function createQuotaStatusBar(deps: QuotaStatusBarDeps): QuotaStatusBar {
     });
   };
 
-  const refresh = async (): Promise<void> => {
-    if (refreshing) {
-      return;
+  // Single-flight via a shared promise: concurrent triggers (timer tick, status-bar click,
+  // QuickPick refresh) all await the SAME in-flight cycle instead of silently returning early.
+  const refresh = (): Promise<void> => {
+    if (!refreshPromise) {
+      refreshPromise = (async () => {
+        try {
+          snapshot = await deps.quotaService.fetchAll();
+          failureStreak = quotaCycleFailed(snapshot) ? failureStreak + 1 : 0;
+          render();
+        } catch (error) {
+          failureStreak += 1;
+          deps.log(`quota: 刷新失败: ${errorMessage(error)}`);
+        } finally {
+          refreshPromise = null;
+          scheduleNext();
+        }
+      })();
     }
-    refreshing = true;
-    try {
-      snapshot = await deps.quotaService.fetchAll();
-      render();
-    } catch (error) {
-      deps.log(`quota: 刷新失败: ${errorMessage(error)}`);
-      render();
-      if (items[0]) {
-        items[0].text = "$(bolt) 额度 ?";
-        items[0].tooltip = `查询失败: ${errorMessage(error)}`;
-      }
-    } finally {
-      refreshing = false;
-    }
+    return refreshPromise;
   };
 
   const refreshSeconds = (): number => {
-    const value = vscode.workspace.getConfiguration(CONFIG_SECTION).get<number>(CONFIG_KEY.quotaRefreshSeconds.replace(`${CONFIG_SECTION}.`, ""));
+    const value = vscode.workspace.getConfiguration(CONFIG_SECTION).get<number>(CONFIG_LEAF.quotaRefreshSeconds);
     return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 30;
   };
 
+  // Self-scheduling setTimeout chain (NOT setInterval): each next tick is armed only after the
+  // current cycle settles, with exponential backoff on network failures. Offline, undici's DNS
+  // lookups keep occupying libuv threadpool threads even after AbortSignal fires; retrying every
+  // 30s starves the shared pool and freezes async fs for every other extension in the host.
   let timer: NodeJS.Timeout | undefined;
-  const armTimer = (): void => {
+  const scheduleNext = (): void => {
+    if (disposed) {
+      return;
+    }
     if (timer !== undefined) {
-      clearInterval(timer);
+      clearTimeout(timer);
       timer = undefined;
     }
-    const seconds = refreshSeconds();
-    if (seconds > 0) {
-      timer = setInterval(() => void refresh(), seconds * 1_000);
+    const delayMs = quotaRetryDelayMs(refreshSeconds(), failureStreak);
+    if (delayMs > 0) {
+      timer = setTimeout(() => void refresh(), delayMs);
     }
   };
 
   const configListener = vscode.workspace.onDidChangeConfiguration((event) => {
     if (event.affectsConfiguration(CONFIG_KEY.quotaRefreshSeconds)) {
-      armTimer();
+      failureStreak = 0;
       void refresh();
     }
   });
@@ -253,7 +289,7 @@ export function createQuotaStatusBar(deps: QuotaStatusBarDeps): QuotaStatusBar {
     vscode.commands.registerCommand(CMD.quotaRefresh, () => void showQuotaDetail()),
     vscode.commands.registerCommand(CMD.quotaConfigureMimo, async () => {
       try {
-        const saved = await configureMimoCookie({ configDir: deps.configDir, log: deps.log });
+        const saved = await configureMimoCookie({ quotaService: deps.quotaService, log: deps.log });
         if (saved) {
           void refresh();
         }
@@ -264,58 +300,49 @@ export function createQuotaStatusBar(deps: QuotaStatusBarDeps): QuotaStatusBar {
     }),
   ];
 
-  armTimer();
   render();
   void refresh();
 
   return {
     refresh,
     dispose(): void {
+      disposed = true;
       if (timer !== undefined) {
-        clearInterval(timer);
+        clearTimeout(timer);
+      }
+      for (const item of items.splice(0)) {
+        item.dispose();
       }
       configListener.dispose();
       themeListener.dispose();
       for (const disposable of commandDisposables) {
         disposable.dispose();
       }
-      for (const item of items) {
-        item.dispose();
-      }
     },
   };
 }
 
-export async function configureMimoCookie(deps: { configDir: string; log(message: string): void }): Promise<boolean> {
+/** Prompt for a MiMo dashboard cookie and persist it via quotaService.saveMimoCookie (quota.json); returns false when the input box is cancelled. */
+export async function configureMimoCookie(deps: {
+  quotaService: QuotaService;
+  log(message: string): void;
+}): Promise<boolean> {
   const input = await vscode.window.showInputBox({
     title: "配置 MiMo Dashboard Cookie",
     prompt: "登录 platform.xiaomimimo.com → F12 → Network → 任选 /api/v1/balance 请求 → 复制请求头里的 Cookie 值",
     placeHolder: "api-platform_serviceToken=...; userId=...",
     password: true,
     ignoreFocusOut: true,
-    validateInput: (value) => (normalizeMimoCookie(value) === null ? "必须同时包含 api-platform_serviceToken 与 userId" : undefined),
+    validateInput: (value) =>
+      normalizeMimoCookie(value) === null ? "必须同时包含 api-platform_serviceToken 与 userId" : undefined,
   });
   if (!input) {
     return false;
   }
-  const cookie = normalizeMimoCookie(input);
-  if (cookie === null) {
-    return false;
-  }
-  const file = path.join(deps.configDir, "quota.json");
-  const current = fs.existsSync(file) ? fs.readFileSync(file, "utf8") : "";
-  const parsed = parseSafe<Record<string, unknown>>(current);
-  const next = applyEdits(current.length > 0 && parsed.errors.length === 0 ? current : "{}", [
-    { path: ["mimo", "cookie"], value: cookie, op: "set" },
-  ]);
-  fs.mkdirSync(deps.configDir, { recursive: true });
-  writeFileAtomic(file, next);
-  // The cookie is a credential: restrict to owner-read on POSIX (no-op on Windows).
-  try {
-    fs.chmodSync(file, 0o600);
-  } catch {
-    deps.log("quota: 无法设置 quota.json 权限为 600（平台不支持）");
-  }
+  // Core owns persistence: merge into quota.json (heal-on-corrupt), mkdir, atomic write and
+  // chmod 0600. Invalid cookies raise MIMO_COOKIE_INVALID, unreadable quota.json raises
+  // CONFIG_UNREADABLE — both mapped to Chinese by errorMessage() at the caller.
+  deps.quotaService.saveMimoCookie(input);
   deps.log("quota: 已写入 MiMo Cookie（quota.json）");
   void vscode.window.showInformationMessage("MiMo Cookie 已保存，正在刷新额度");
   return true;

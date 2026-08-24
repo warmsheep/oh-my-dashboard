@@ -35,11 +35,28 @@ export const VIEW = {
   explorer: "opencodeExplorer",
 } as const;
 
+/** Test-bridge command IDs — registered only under ExtensionMode.Test, never in package.json contributes. */
+export const TEST_BRIDGE = {
+  presetEditorPostMessage: "opencode._test.presetEditorPostMessage",
+  statusBarText: "opencode._test.statusBarText",
+} as const;
+
 export const CONFIG_SECTION = "opencodeConfigManager";
 
+/** Fully-qualified setting keys — for `event.affectsConfiguration()` and workspace-level get(). */
 export const CONFIG_KEY = {
   configDirOverride: "opencodeConfigManager.configDirOverride",
   quotaRefreshSeconds: "opencodeConfigManager.quota.refreshSeconds",
+} as const;
+
+/**
+ * Section-relative (leaf) setting keys for section-scoped reads:
+ * `getConfiguration(CONFIG_SECTION).get(CONFIG_LEAF.x)`. Passing a fully-qualified key
+ * there silently returns undefined — keep the two forms on separate constants.
+ */
+export const CONFIG_LEAF = {
+  configDirOverride: "configDirOverride",
+  quotaRefreshSeconds: "quota.refreshSeconds",
 } as const;
 
 export const PRESET_EDITOR_VIEW_TYPE = "opencode.presetEditor";
@@ -56,8 +73,7 @@ export const MODEL_ID_PATTERN = /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/;
 export const OUTPUT_CHANNEL_NAME = "OpenCode Config Manager";
 
 export const FILE_TEMPLATES: Record<"opencode.json" | "oh-my-opencode.json" | "omo.jsonc" | "AGENTS.md", string> = {
-  "opencode.json":
-    '{\n  "$schema": "https://opencode.ai/config.json",\n  "provider": {}\n}\n',
+  "opencode.json": '{\n  "$schema": "https://opencode.ai/config.json",\n  "provider": {}\n}\n',
   "oh-my-opencode.json":
     '{\n  "$schema": "https://raw.githubusercontent.com/code-yeongyu/oh-my-opencode/dev/assets/oh-my-opencode.schema.json",\n  "agents": {},\n  "categories": {}\n}\n',
   "omo.jsonc":

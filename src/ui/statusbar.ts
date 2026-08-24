@@ -1,6 +1,15 @@
 import * as vscode from "vscode";
-import type { PresetService } from "../core/presetService";
+
 import { CMD } from "../constants";
+import { errorMessage } from "../core/errors";
+import type { PresetService } from "../core/presetService";
+import type { Preset } from "../core/types";
+
+/** Preset identity data the bar renders; refreshAll passes it straight from the tree snapshot. */
+export interface PresetBarState {
+  presets: Preset[];
+  currentPreset: string | null;
+}
 
 export interface StatusBarDeps {
   presetService: PresetService;
@@ -8,29 +17,33 @@ export interface StatusBarDeps {
 }
 
 export interface StatusBar extends vscode.Disposable {
-  update(): void;
+  /** Refresh from the given snapshot; without one, derives once from presetService (activation). */
+  update(state?: PresetBarState): void;
+  /** Current bar text — read surface for the e2e test-bridge command. */
+  text(): string;
 }
 
+/** Create the preset status-bar item (left-aligned); first render derives from presetService, later updates come from tree snapshots. */
 export function createStatusBar(deps: StatusBarDeps): StatusBar {
   const item = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
   item.name = "OpenCode 模板";
   item.command = CMD.showPresetQuickPick;
 
-  const update = (): void => {
-    let name: string | null = null;
-    let appliedAt: string | null = null;
-    try {
-      name = deps.presetService.currentPresetName();
-    } catch (error) {
-      deps.log(`statusbar: currentPresetName 失败: ${errorMessage(error)}`);
-    }
-    if (name) {
+  const update = (state?: PresetBarState): void => {
+    let resolved: PresetBarState;
+    if (state !== undefined) {
+      resolved = state;
+    } else {
       try {
-        appliedAt = deps.presetService.load(name).appliedAt ?? null;
+        const presets = deps.presetService.list();
+        resolved = { presets, currentPreset: deps.presetService.currentPresetName(presets) };
       } catch (error) {
-        deps.log(`statusbar: 读取模板 ${name} 失败: ${errorMessage(error)}`);
+        deps.log(`statusbar: 读取模板状态失败: ${errorMessage(error)}`);
+        resolved = { presets: [], currentPreset: null };
       }
     }
+    const name = resolved.currentPreset;
+    const appliedAt = resolved.presets.find((preset) => preset.name === name)?.appliedAt ?? null;
     item.text = `$(bookmark) 模板: ${name ?? "无"}`;
     item.tooltip = name
       ? `当前模板: ${name}${appliedAt ? `\n应用时间: ${appliedAt}` : "\n尚未在本机应用"}`
@@ -41,12 +54,9 @@ export function createStatusBar(deps: StatusBarDeps): StatusBar {
   update();
   return {
     update,
+    text: (): string => item.text,
     dispose(): void {
       item.dispose();
     },
   };
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }

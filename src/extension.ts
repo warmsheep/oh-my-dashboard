@@ -1,33 +1,28 @@
-import * as fs from "node:fs";
 import * as path from "node:path";
+
 import * as vscode from "vscode";
+
+import { CONFIG_LEAF, CONFIG_SECTION, OUTPUT_CHANNEL_NAME, TEST_BRIDGE, VIEW } from "./constants";
 import { BackupService } from "./core/backupService";
 import { ConfigStore } from "./core/configStore";
-import { QuotaService } from "./core/quotaService";
+import { errorMessage } from "./core/errors";
 import { validate } from "./core/jsoncEditor";
 import { PresetService } from "./core/presetService";
-import type { BackupEntry, DiscoveredConfig, JsoncError, ModelEntry, ModelSetting, PluginEntry, Preset } from "./core/types";
-import { CONFIG_KEY, CONFIG_SECTION, OUTPUT_CHANNEL_NAME, VIEW } from "./constants";
+import { QuotaService } from "./core/quotaService";
+import type { DiscoveredConfig, JsoncError } from "./core/types";
+import { WatchManager } from "./core/watchManager";
+import type { WatchTarget } from "./core/watchManager";
 import { ConfigTreeDataProvider } from "./tree/provider";
+import type { TreeDataSnapshot } from "./tree/provider";
 import { registerCommands } from "./ui/commands";
-import { createStatusBar } from "./ui/statusbar";
 import { createQuotaStatusBar } from "./ui/quotaStatusBar";
-import { notifyPresetEditorsModelsChanged } from "./webview/presetEditorHost";
-
-interface TreeDataSnapshot {
-  discovered: DiscoveredConfig;
-  presets: Preset[];
-  currentPreset: string | null;
-  backups: BackupEntry[];
-  parseErrors: Map<string, JsoncError[]>;
-  assignments: { agents: Record<string, ModelSetting>; categories: Record<string, ModelSetting> };
-  models: ModelEntry[];
-  plugins: PluginEntry[];
-}
+import { createStatusBar } from "./ui/statusbar";
+import { notifyPresetEditorsModelsChanged, postMessageToPresetEditor } from "./webview/presetEditorHost";
 
 export function activate(ctx: vscode.ExtensionContext): void {
   const cfg = vscode.workspace.getConfiguration(CONFIG_SECTION);
-  const override = cfg.get<string>(CONFIG_KEY.configDirOverride)?.trim();
+  // Section-scoped get() requires the LEAF key; the fully-qualified form silently yields undefined.
+  const override = cfg.get<string>(CONFIG_LEAF.configDirOverride)?.trim();
   const configStore = new ConfigStore(override ? { configDirOverride: override } : {});
 
   const channel = vscode.window.createOutputChannel(OUTPUT_CHANNEL_NAME);
@@ -36,8 +31,7 @@ export function activate(ctx: vscode.ExtensionContext): void {
     channel.appendLine(`[${new Date().toISOString()}] ${message}`);
   };
 
-  const workspaceFolders = (): string[] =>
-    vscode.workspace.workspaceFolders?.map((folder) => folder.uri.fsPath) ?? [];
+  const workspaceFolders = (): string[] => vscode.workspace.workspaceFolders?.map((folder) => folder.uri.fsPath) ?? [];
 
   const collectStatic = (): {
     discovered: DiscoveredConfig;
@@ -57,29 +51,29 @@ export function activate(ctx: vscode.ExtensionContext): void {
     return { discovered, parseErrors };
   };
 
-  const discovered = configStore.discover(workspaceFolders());
+  // Activation wiring needs path-level fields only (managedFiles, watcher targets, service
+  // dirs); discoverPaths() answers those without building skills/command trees. The one
+  // FULL discover per activation happens inside the provider's first loadData below.
+  const paths = configStore.discoverPaths(workspaceFolders());
   const backupService = new BackupService({
-    configDir: discovered.configDir,
-    managedFiles: [
-      discovered.opencodeJson,
-      discovered.agentConfig.path,
-      path.join(discovered.configDir, "AGENTS.md"),
-    ],
+    configDir: paths.configDir,
+    managedFiles: [paths.opencodeJson, paths.agentConfig.path, path.join(paths.configDir, "AGENTS.md")],
     // User-level skills live outside configDir; project skills are excluded (they live in the user's repo).
     extraDirs: [{ label: "skills-user", src: configStore.userSkillsDir }],
   });
   const presetService = new PresetService({
-    presetsDir: discovered.presetsDir,
+    presetsDir: paths.presetsDir,
     configStore,
   });
 
   const dataLoader = (): TreeDataSnapshot => {
     const { discovered, parseErrors } = collectStatic();
+    const presets = presetService.list();
     return {
       discovered,
       parseErrors,
-      presets: presetService.list(),
-      currentPreset: presetService.currentPresetName(),
+      presets,
+      currentPreset: presetService.currentPresetName(presets),
       backups: backupService.list(),
       assignments: configStore.ohMyAssignments(),
       models: configStore.listModelEntries(),
@@ -98,28 +92,32 @@ export function activate(ctx: vscode.ExtensionContext): void {
   ctx.subscriptions.push(statusbar);
 
   const quotaService = new QuotaService({
-    quotaConfigPath: path.join(discovered.configDir, "quota.json"),
+    quotaConfigPath: path.join(paths.configDir, "quota.json"),
   });
-  ctx.subscriptions.push(createQuotaStatusBar({ quotaService, configDir: discovered.configDir, log }));
+  ctx.subscriptions.push(createQuotaStatusBar({ quotaService, log }));
 
-  const refreshAll = (): void => {
+  // Watcher-driven refresh (debounced + content-deduped inside WatchManager). Kept separate
+  // from `refreshAll` below so the watcher path does not re-open the explicit-refresh
+  // cooldown after every watcher-triggered reload.
+  const refreshViews = (): void => {
     // Called from the fs.watch debounce timer too — a throwing loader must degrade
     // to a log line there, never an uncaught exception in a timer callback.
     // refresh() can throw synchronously (sync loadData) or reject asynchronously.
     try {
-      void provider.refresh().then(undefined, (error: unknown) => {
-        log(`refresh 失败: ${error instanceof Error ? error.message : String(error)}`);
-      });
-      statusbar.update();
-      notifyPresetEditorsModelsChanged(configStore.listModels());
+      void provider.refresh().then(
+        (snapshot) => {
+          statusbar.update({ presets: snapshot.presets, currentPreset: snapshot.currentPreset });
+        },
+        (error: unknown) => {
+          log(`refresh 失败: ${errorMessage(error)}`);
+        },
+      );
+      // Lazy provider: listModels() only runs when at least one editor panel is open.
+      notifyPresetEditorsModelsChanged(() => configStore.listModels());
     } catch (error) {
-      log(`refreshAll 失败: ${error instanceof Error ? error.message : String(error)}`);
+      log(`refreshAll 失败: ${errorMessage(error)}`);
     }
   };
-
-  registerCommands(ctx, { configStore, backupService, presetService, refreshAll, log });
-
-  void provider.warmup();
 
   const MANAGED_SUBDIRS = ["presets", "backups", "command", "skills"] as const;
   const MANAGED_BASENAMES = new Set([
@@ -138,139 +136,77 @@ export function activate(ctx: vscode.ExtensionContext): void {
     "bun.lock",
   ]);
   const OMO_BASENAMES = new Set(["omo.jsonc", "omo.json"]);
-
-  let watchTimer: NodeJS.Timeout | undefined;
-  const lastFileContents = new Map<string, string>();
-  const pendingTriggers = new Set<string>();
-  // Recursive subdir watchers carry no file identity — they force the next refresh so a
-  // real subdir change can't be swallowed by an unchanged file event in the same window.
-  let forceNextRefresh = false;
-  const scheduleRefresh = (file?: string): void => {
-    armSubdirWatchers();
-    if (file === undefined) {
-      forceNextRefresh = true;
-    } else {
-      pendingTriggers.add(file);
-    }
-    if (watchTimer !== undefined) {
-      clearTimeout(watchTimer);
-    }
-    watchTimer = setTimeout(() => {
-      watchTimer = undefined;
-      const forced = forceNextRefresh;
-      forceNextRefresh = false;
-      // Skip the re-render entirely when every triggering file's bytes are unchanged —
-      // e.g. another window rewrote models.json with identical content.
-      const changed = [...pendingTriggers].filter((p) => {
-        try {
-          const current = fs.readFileSync(p, "utf8");
-          if (lastFileContents.get(p) === current) {
-            return false;
-          }
-          lastFileContents.set(p, current);
-        } catch {
-          // vanished files count as changed
-        }
-        return true;
-      });
-      pendingTriggers.clear();
-      if (forced || changed.length > 0) {
-        refreshAll();
-      }
-    }, 300);
-  };
-
-  // Flat watchers must filter by filename: configDir and ~/.omo both host unrelated churn
-  // (node_modules, omo runtime/codegraph/lsp state files) that would otherwise trigger a
-  // full refresh storm on every write.
-  const makeFlatHandler = (dir: string, allowed: Set<string>) => {
-    return (_event: string, filename: string | Buffer | null): void => {
-      const base = filename === null ? "" : path.basename(filename.toString());
-      if (allowed.has(base)) {
-        scheduleRefresh(path.join(dir, base));
-      }
-    };
-  };
-
-  const watchers = new Set<fs.FSWatcher>();
-  const watchedDirs = new Set<string>();
-  const addWatch = (target: string, opts: fs.WatchOptions, handler: (event: string, filename: string | Buffer | null) => void): void => {
-    if (watchedDirs.has(target)) {
-      return;
-    }
-    try {
-      watchers.add(fs.watch(target, opts, handler));
-      watchedDirs.add(target);
-    } catch (error) {
-      log(`fs.watch(${target}) 失败: ${error instanceof Error ? error.message : String(error)}`);
-    }
-  };
-  const subdirHandler = (): void => {
-    scheduleRefresh();
-  };
-
-  // configDir must stay flat: it hosts node_modules (~20k files) that are irrelevant to the
-  // extension — a recursive watch there costs seconds of inotify setup and blocks activation.
-  // Only the managed subdirs are watched recursively (a few dozen files).
-  // Runs on every scheduleRefresh so dirs created after activation (presets/, and the
-  // plugin cache's packages/ once opencode first installs a plugin) get armed too.
-  const armSubdirWatchers = (): void => {
-    for (const name of MANAGED_SUBDIRS) {
-      const dir = path.join(configStore.configDir, name);
-      if (fs.existsSync(dir)) {
-        addWatch(dir, { recursive: true }, subdirHandler);
-      }
-    }
+  const PLUGIN_LOCK_BASENAMES = new Set(["package.json", "bun.lock", "bun.lockb"]);
+  const agentConfigDir = path.dirname(paths.agentConfig.path);
+  const pluginCacheDir = configStore.pluginCacheDir;
+  // configDir must stay flat (filtered): it hosts node_modules (~20k files) that are
+  // irrelevant to the extension — a recursive watch there costs seconds of inotify
+  // setup and blocks activation. Only the managed subdirs are watched recursively (a
+  // few dozen files). Missing dirs are skipped by WatchManager and retried on every
+  // event burst, so dirs created after activation (presets/, <cache>/packages/ once
+  // opencode first installs a plugin) get armed too.
+  //
+  // The table is FROZEN at activation: global skills locations that only appear later
+  // are not added (WatchManager re-arms the listed dirs, it never re-resolves them) —
+  // an accepted trade-off, recorded so nobody reads the const below as "recomputed".
+  const watchTargets: WatchTarget[] = [
+    { dir: configStore.configDir, recursive: false, allowedBasenames: MANAGED_BASENAMES },
+    // The omo config lives outside the opencode config dir — watch it too (flat, filtered).
+    ...(agentConfigDir !== configStore.configDir
+      ? [{ dir: agentConfigDir, recursive: false, allowedBasenames: OMO_BASENAMES }]
+      : []),
+    // The opencode runtime installs npm plugins into its cache; lockfile writes there signal
+    // plugin installs/uninstalls (the node_modules tree itself must stay unwatched).
+    ...(pluginCacheDir !== configStore.configDir
+      ? [{ dir: pluginCacheDir, recursive: false, allowedBasenames: PLUGIN_LOCK_BASENAMES }]
+      : []),
     // opencode installs npm plugins isolated under <cache>/packages/<spec>/ (arborist);
     // a flat watch there catches per-plugin dir creation/removal. Root lockfile writes
-    // (bun-era layout) are covered by the pluginCacheDir watch below.
-    const packagesDir = path.join(configStore.pluginCacheDir, "packages");
-    if (configStore.pluginCacheDir !== configStore.configDir && fs.existsSync(packagesDir)) {
-      addWatch(packagesDir, { recursive: false }, subdirHandler);
-    }
-  };
-  armSubdirWatchers();
-  addWatch(configStore.configDir, { recursive: false }, makeFlatHandler(configStore.configDir, MANAGED_BASENAMES));
-  // The omo config lives outside the opencode config dir — watch it too (flat, filtered).
-  const agentConfigDir = path.dirname(discovered.agentConfig.path);
-  if (agentConfigDir !== configStore.configDir) {
-    addWatch(agentConfigDir, { recursive: false }, makeFlatHandler(agentConfigDir, OMO_BASENAMES));
-  }
-  // The opencode runtime installs npm plugins into its cache; lockfile writes there signal
-  // plugin installs/uninstalls (the node_modules tree itself must stay unwatched).
-  const pluginCacheDir = configStore.pluginCacheDir;
-  if (pluginCacheDir !== configStore.configDir) {
-    addWatch(
-      pluginCacheDir,
-      { recursive: false },
-      makeFlatHandler(pluginCacheDir, new Set(["package.json", "bun.lock", "bun.lockb"])),
-    );
-  }
-  // Home-level skills dirs (~/.agents, ~/.claude, …) live outside configDir; watch each
-  // discovered one recursively (a few dozen files each) so skill edits refresh the tree.
-  for (const location of discovered.skillLocations) {
-    if (location.scope === "global" && location.dir !== path.join(configStore.configDir, "skills")) {
-      addWatch(location.dir, { recursive: true }, subdirHandler);
-    }
-  }
+    // (bun-era layout) are covered by the pluginCacheDir watch above.
+    ...(pluginCacheDir !== configStore.configDir
+      ? [{ dir: path.join(pluginCacheDir, "packages"), recursive: false }]
+      : []),
+    ...MANAGED_SUBDIRS.map((name): WatchTarget => ({ dir: path.join(configStore.configDir, name), recursive: true })),
+    // Home-level skills dirs (~/.agents, ~/.claude, …) live outside configDir; watch each
+    // discovered one recursively (a few dozen files each) so skill edits refresh the tree.
+    ...paths.skillLocations
+      .filter((location) => location.scope === "global" && location.dir !== path.join(configStore.configDir, "skills"))
+      .map((location): WatchTarget => ({ dir: location.dir, recursive: true })),
+  ];
 
-  if (watchers.size === 0) {
+  const watchManager = new WatchManager({ targets: watchTargets, onRefresh: refreshViews, log });
+  watchManager.arm();
+  if (watchManager.watcherCount() === 0) {
     const message = "所有文件监视器创建失败";
     log(`fs.watch 失败，将依赖手动刷新: ${message}`);
-    void vscode.window.showWarningMessage(
-      `无法监视配置目录变更（${message}），请使用「OpenCode: 刷新」手动刷新`,
+    void vscode.window.showWarningMessage(`无法监视配置目录变更（${message}），请使用「OpenCode: 刷新」手动刷新`);
+  }
+  ctx.subscriptions.push(watchManager);
+
+  const refreshAll = (): void => {
+    refreshViews();
+    // Our own writes echo back through fs.watch ~300ms later; mark the post-command disk
+    // state as seen so the echo dedupes instead of paying a second full refresh.
+    watchManager.noteExternalRefresh();
+  };
+
+  registerCommands(ctx, { configStore, backupService, presetService, refreshAll, log });
+
+  void provider.warmup();
+
+  // Hidden test-bridge commands for the e2e suite ONLY (IDs owned by TEST_BRIDGE in
+  // constants.ts). Deliberately NOT in package.json contributes (never user-visible
+  // in the command palette) and registered only under ExtensionMode.Test:
+  // (a) round-trip postMessage into the open preset editor panel,
+  // (b) read the preset status-bar text. See test/e2e/suite.
+  if (ctx.extensionMode === vscode.ExtensionMode.Test) {
+    ctx.subscriptions.push(
+      vscode.commands.registerCommand(TEST_BRIDGE.presetEditorPostMessage, (name: string, message: unknown): boolean =>
+        postMessageToPresetEditor(name, message),
+      ),
+      vscode.commands.registerCommand(TEST_BRIDGE.statusBarText, (): string => statusbar.text()),
     );
   }
-  ctx.subscriptions.push({
-    dispose: () => {
-      if (watchTimer !== undefined) {
-        clearTimeout(watchTimer);
-      }
-      for (const watcher of watchers) {
-        watcher.close();
-      }
-    },
-  });
 }
 
 export function deactivate(): void {}
