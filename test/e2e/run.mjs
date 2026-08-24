@@ -14,12 +14,12 @@
  * - As a belt-and-braces guard we fingerprint the real ~/.config/opencode and
  *   ~/.omo before/after the run and fail if either changed.
  */
-
 import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
+
 import { runTests } from "@vscode/test-electron";
 
 const repoRoot = path.resolve(fileURLToPath(new URL(".", import.meta.url)), "..", "..");
@@ -100,16 +100,16 @@ function seedConfigHome() {
 }
 
 /** Recursive fingerprint (relpath/mtime/size) to detect any accidental write
- *  to the real user config dir. */
+ *  to the real user config dir. Returns "<missing>" for absent paths. */
 function fingerprint(dir) {
   if (!fs.existsSync(dir)) {
     return "<missing>";
   }
   const lines = [];
   const walk = (current, rel) => {
-    const entries = fs.readdirSync(current, { withFileTypes: true }).sort((a, b) =>
-      a.name < b.name ? -1 : a.name > b.name ? 1 : 0,
-    );
+    const entries = fs
+      .readdirSync(current, { withFileTypes: true })
+      .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
     for (const entry of entries) {
       const relPath = rel ? `${rel}/${entry.name}` : entry.name;
       if (entry.isDirectory()) {
@@ -123,15 +123,6 @@ function fingerprint(dir) {
   };
   walk(dir, "");
   return lines.join("\n");
-}
-
-/** Content+mtime stamp of one file ("<missing>" when absent) for the safety guard. */
-function fileStamp(file) {
-  if (!fs.existsSync(file)) {
-    return "<missing>";
-  }
-  const stat = fs.statSync(file);
-  return `${stat.mtimeMs} ${stat.size}`;
 }
 
 /** Portable synchronous sleep — `sleep` does not exist on Windows. */
@@ -185,9 +176,11 @@ async function main() {
   const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), "ocm-e2e-home-"));
 
   const guardDirs = realConfigDirCandidates();
-  const realOmoFiles = ["omo.jsonc", "omo.json"].map((name) => path.join(os.homedir(), ".omo", name));
+  // Fingerprint the WHOLE ~/.omo dir (not just the two known filenames) — the omo
+  // runtime may add other files, and future config names deserve the same guard.
+  const realOmoDir = path.join(os.homedir(), ".omo");
   const beforeConfig = guardDirs.map(fingerprint);
-  const beforeOmo = realOmoFiles.map(fileStamp);
+  const beforeOmo = fingerprint(realOmoDir);
 
   let failed = false;
   try {
@@ -219,12 +212,12 @@ async function main() {
   } else {
     console.log(`[e2e:runner] real config dirs untouched ✔ (${guardDirs.join(", ")})`);
   }
-  const afterOmo = realOmoFiles.map(fileStamp);
-  if (beforeOmo.join("|") !== afterOmo.join("|")) {
-    console.error("[e2e:runner] SAFETY VIOLATION: real ~/.omo/omo.json[c] changed during the run!");
+  const afterOmo = fingerprint(realOmoDir);
+  if (beforeOmo !== afterOmo) {
+    console.error("[e2e:runner] SAFETY VIOLATION: real ~/.omo dir changed during the run!");
     failed = true;
   } else {
-    console.log("[e2e:runner] real ~/.omo/omo.json[c] untouched ✔");
+    console.log("[e2e:runner] real ~/.omo dir untouched ✔");
   }
 
   if (failed) {
