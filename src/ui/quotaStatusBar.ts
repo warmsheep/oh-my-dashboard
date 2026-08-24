@@ -21,9 +21,9 @@ export interface QuotaStatusBar extends vscode.Disposable {
 }
 
 const WINDOW_LABELS: Record<QuotaWindow["kind"], string> = {
-  "5h": "5小时窗口",
+  "5h": "5小时额度",
   weekly: "周额度",
-  monthly: "月度额度",
+  monthly: "月额度",
 };
 
 function formatReset(iso: string | null): string {

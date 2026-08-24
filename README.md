@@ -14,7 +14,7 @@ VSCode 扩展：管理 [opencode](https://opencode.ai) 与 [oh-my-opencode](http
 - **备份**：手动「立即备份」会要求输入备份名称（名称仅用于展示，时间戳自动附带且不入名称）；历史备份可右键「重命名备份」；manifest 记录原因；与当前配置 diff 对比；恢复时明确警告覆盖（应用/恢复不再自动产生备份）
   - **导入/导出**：备份可导出为 zip（跨平台纯 JS 实现，macOS/Linux/Windows 通用，条目名按 zip 规范用 `/`，含中文名时置 UTF-8 标志位）；导入时校验 manifest、防目录遍历/zip 炸弹（解压前按头部声明尺寸限流），同名已存在时自动加 `-import-N` 后缀
 - **状态栏**：显示当前预设，点击快速切换（`Ctrl+Alt+P`）
-- **Coding Plan 额度**（状态栏右侧）：实时显示 Kimi / GLM / MiMo / DeepSeek 剩余额度（5 小时窗口、周额度；MiMo 为月度额度+余额；DeepSeek 为按量计费余额）
+- **Coding Plan 额度**（状态栏右侧）：实时显示 Kimi / GLM / MiMo / DeepSeek 剩余额度（5 小时额度、周额度；MiMo 为月额度+余额；DeepSeek 为按量计费余额）
   - Kimi / GLM / DeepSeek 自动读取 opencode 凭据（`~/.local/share/opencode/auth.json`），无需额外配置
   - DeepSeek 官方仅提供余额接口（按量计费、无额度窗口）：状态栏显示 `DeepSeek ¥余额`，点击查看币种明细
   - MiMo 官方仅提供 Dashboard API：执行「Coding Plan 额度：配置 MiMo Cookie…」粘贴 `platform.xiaomimimo.com` 的浏览器 Cookie（存入 `quota.json`）
