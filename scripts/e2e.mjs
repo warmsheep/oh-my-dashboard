@@ -6,7 +6,6 @@
  * - Headless Linux (no DISPLAY): wrap in xvfb-run, which provides the virtual display
  *   VSCode's Electron needs. Install it via `apt install xvfb` when missing.
  */
-
 import { spawnSync } from "node:child_process";
 
 const isWin = process.platform === "win32";

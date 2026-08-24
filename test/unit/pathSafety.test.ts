@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+
 import { assertContainedFileName, PRESET_NAME_PATTERN, presetNameError } from "../../src/core/pathSafety";
 
 describe("assertContainedFileName (traversal guard)", () => {
@@ -7,12 +8,9 @@ describe("assertContainedFileName (traversal guard)", () => {
     expect(() => assertContainedFileName("我的 模板.json", "ERR")).not.toThrow();
   });
 
-  it.each(["", ".", "..", "../evil", "a/b", "a\0b", "/abs/path"])(
-    "rejects %j",
-    (name) => {
-      expect(() => assertContainedFileName(name, "ERR")).toThrow("ERR");
-    },
-  );
+  it.each(["", ".", "..", "../evil", "a/b", "a\0b", "/abs/path"])("rejects %j", (name) => {
+    expect(() => assertContainedFileName(name, "ERR")).toThrow("ERR");
+  });
 
   it("rejects backslash and win32-absolute forms only on win32 (legal POSIX filenames stay manageable)", () => {
     expect(() => assertContainedFileName("a\\b", "ERR", "win32")).toThrow("ERR");

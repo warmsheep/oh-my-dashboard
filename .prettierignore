@@ -1,0 +1,14 @@
+node_modules
+dist
+dist-webview
+build
+webview-ui/build
+.vscode-test
+*.vsix
+package-lock.json
+.omo
+.sisyphus
+docs/
+media/
+.git
+test/fixtures

@@ -1,4 +1,5 @@
 import type { PresetRow, WebviewToExt } from "@shared/protocol";
+
 import type { FormState } from "./helpers";
 
 declare function acquireVsCodeApi(): {
@@ -31,8 +32,7 @@ export function getVSCodeApi(): VSCodeApi {
   } else {
     const store: { value: unknown } = { value: undefined };
     cached = {
-      postMessage: (message) =>
-        window.postMessage(message, window.location.origin),
+      postMessage: (message) => window.postMessage(message, window.location.origin),
       getState: <T>() => store.value as T | undefined,
       setState: <T>(state: T) => {
         store.value = state;
@@ -54,12 +54,7 @@ export interface DraftState {
 export function loadDraft(): DraftState | undefined {
   try {
     const d = getVSCodeApi().getState<DraftState>();
-    return d &&
-      typeof d === "object" &&
-      typeof d.origName === "string" &&
-      Array.isArray(d.form?.rows)
-      ? d
-      : undefined;
+    return d && typeof d === "object" && typeof d.origName === "string" && Array.isArray(d.form?.rows) ? d : undefined;
   } catch {
     return undefined;
   }

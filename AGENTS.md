@@ -6,7 +6,8 @@ VSCode 扩展「OpenCode Config Manager」：管理 opencode / oh-my-openagent �
 
 ```bash
 npm install && npm --prefix webview-ui install   # 两个独立 npm 项目，都要装
-npx vitest run                                    # 单元+集成（纯 Node，无 VSCode）
+npm test                                          # 全部测试 = 根 vitest（单元+集成，纯 Node）+ webview-ui vitest 两个套件链式运行
+npx vitest run                                    # 仅根套件：单元+集成（纯 Node，无 VSCode）
 npx tsc --noEmit                                  # 类型检查（vitest 不做类型检查，必跑）
 npm run package                                   # 编译+webview构建+同步dist-webview+vsce → build/packages/
 ./scripts/e2e.sh                                  # e2e 入口（跨平台：内部转调 scripts/e2e.mjs；Win/macOS 直接跑，Linux 无 DISPLAY 时自动套 xvfb-run）
@@ -23,11 +24,21 @@ npm run package                                   # 编译+webview构建+同步d
 - **`src/core/` 禁止 import 'vscode'**（纯逻辑层，vitest 直接测）；VSCode 依赖只允许在 `src/extension.ts`、`src/tree/provider.ts`、`src/ui/`、`src/webview/`。
 - **`src/shared/protocol.ts` 同时被扩展宿主和 webview-ui 打包**（webview 经 `@shared` alias 引用）— 禁止 import 'vscode'，改动会同时影响两侧。
 - **JSONC 编辑只走 `src/core/jsoncEditor.ts`**（jsonc-parser `modify()` 链式 + `applyEdits`），禁止 `JSON.parse → 修改 → stringify`（会毁掉注释/尾逗号/tab 缩进；用户真实配置是 JSONC）。jsonc-parser 语义：`undefined`=删除键，`null` 会写入 JSON null。
-- **文件写入只走 `src/core/atomicFile.ts` 的 `writeFileAtomic`**（tmp+fsync+rename，Windows EPERM/EACCES/EBUSY 退避重试；configStore.writeAtomic 是其薄封装）。备份拷贝/恢复目录用 `cpSync(..., { dereference: true })`（Windows 重建符号链接需特权）。
+- **文件写入只走 `src/core/atomicFile.ts` 的 `writeFileAtomic`**（tmp+fsync+rename，Windows EPERM/EACCES/EBUSY 退避重试；configStore.writeAtomic 是其薄封装）。备份目录拷贝走 backupService 自研递归拷贝（逐条目 `lstat`，符号链接一律跳过不跟随——防第三方 skills 目录植入链接越界读取/秘密外泄/全盘拷贝；受 256MB/2 万条目/16 层深度上限约束，超限抛 `BACKUP_CREATE_TOO_LARGE`/`BACKUP_EXPORT_TOO_LARGE` 纯错误码，经 errors.ts 映射中文）。恢复目录前先递归清理目标路径上"挡道"的符号链接（防恢复经 `skills/x → ~/.bashrc` 类植入链接穿隧写穿目标），实际拷贝仍用 `cpSync(..., { dereference: true })`（备份树内无链接，Windows 重建符号链接需特权的问题不复存在）。
 - **读配置分两级**：展示路径用 `readTextOrEmpty`（不可读降级为空）；写回路径（apply/setAgentModel 等）必须用 `readTextForEdit`（文件存在但不可读时抛 `CONFIG_UNREADABLE` 中止，绝不当空文件覆盖）。
 - **名称安全收口在 `src/core/pathSafety.ts`**：`assertContainedFileName` 防目录遍历（所有以名称取文件的入口；`\` 仅在 win32 视为分隔符），`presetNameError` 是创建时严格校验（Windows 非法字符/保留名/末尾点空格）。存量非法名文件可读可删可应用，仅新建/重命名受限。
 - **`package.json` 的 contributes 与 `src/constants.ts`（CMD/VIEW）必须手工保持同步**，新增命令/视图两处都要改。
-- UI 文案全部中文；核心层错误码（`INVALID_PRESET_NAME`/`PRESET_NOT_FOUND` 等）在 `commands.ts` 的 `FRIENDLY_ERRORS` 映射为中文提示。
+- UI 文案全部中文；核心层错误码（`INVALID_PRESET_NAME`/`PRESET_NOT_FOUND` 等）在 `src/core/errors.ts` 的 `FRIENDLY_ERRORS`/`errorMessage()` 映射为中文提示（`JsoncSyntaxError` 与文件系统 errno 同在此映射）；额度模块直接产出中文友好消息。
+
+## 代码风格
+
+- **Prettier 统一格式**：根 `.prettierrc`（printWidth 120、双引号、trailingComma all），`@ianvs/prettier-plugin-sort-imports` 排 import（组序：`node:` 内置 → 外部包 → 相对路径，组间空行；specifier 排序、`import type` 保持独立语句紧邻同模块值导入）。提交前对 src/test/webview-ui 等源码跑 `npx prettier --check`；`test/fixtures/**` 与 *.md 不格式化。
+- **fs 依赖注入命名**（core 可注入 fs 的模块）：真实模块导入别名一律 `import * as defaultFs from "node:fs"`，注入参数/类属性一律 `fsMod`；对外 OPTIONS 键名保持 `fs`（测试注入 `{fs: fake}`）。
+- **注释一律英文**（引用 UI 文案原文可内嵌中文）；**用户可见字符串一律中文**。
+- **core 层导出符号至少一行 JSDoc**；UI 工厂函数说明返回对象的 dispose 生命周期。
+- **日志只走注入的 log 回调**（前缀 `模块名: `），禁止 `console.*`。
+- **if/for 单语句体也必须花括号**；递增用 `+= 1`（不用 `++`）。
+- **常量禁止跨文件复制**：能 import 就 import（如 `BACKUP_REASON_LABELS`/`KNOWN_AGENTS` 收口在 core/types.ts 与 shared/protocol.ts）；确需复制必须附"为何不能 import"注释。
 
 ## 测试约定
 
@@ -47,7 +58,7 @@ npm run package                                   # 编译+webview构建+同步d
 - skills 发现：`SkillLocation.scope` 只有 `global|project`（家目录约定一律 global）。全局候选序：`~/.agents/skills` → `~/.claude/skills` → `<configDir>/skills` → `$XDG_CONFIG_HOME/agents|amp/skills` → `~/.copilot|​.gemini|.cursor|.codeium/windsurf|.codex/skills`；项目候选序：`.agents/` → `.claude/` → `.opencode/` → `.github/` → `.gemini/` → `.cursor/` → `.windsurf/` 下 `skills/`。仅报存在的目录（configDir 与家目录重合时去重）；技能=含 `SKILL.md` 的子目录，符号链接跟随判定（`~/.claude/skills` 常为指向 `~/.agents/skills` 的链接）。树行 label=显示路径（`~/…` 或工作区相对），description=`全局|项目 N`。备份 extraDirs 只带 `~/.agents/skills`（其余目录归各自工具管理）。
 - Coding Plan 额度：`src/core/quotaService.ts` 从 `~/.local/share/opencode/auth.json` 读 Kimi/GLM/DeepSeek 凭据查官方接口（Kimi `api.kimi.com/coding/v1/usages`，GLM `open.bigmodel.cn/api/monitor/usage/quota/limit`，GLM unit 枚举 1=天/3=时/6=周，DeepSeek `api.deepseek.com/user/balance` 按量计费只有余额无窗口、多币种取 CNY 优先）；MiMo 走 `platform.xiaomimimo.com` Dashboard Cookie（存 `<configDir>/quota.json`，只有月度窗口，无 5h/周）。e2e 通过 `XDG_DATA_HOME` 隔离避免真实网络请求。
 - 备份保留：手动备份永不清理；`DEFAULT_RETENTION` 里的 pre-* 规则仅为兼容旧版本残留备份。备份创建走暂存目录（`backups/.tmp-*` → rename 发布，失败自动清理，下次创建时 sweep）；恢复时受管文件经 `writeFileAtomic` 写回（ENOSPC/占用不会截断活配置）。Windows 下深层 skills 备份可能触 MAX_PATH（需用户开 LongPathsEnabled）。
-- 备份导入/导出用 zip（`fflate`，纯 JS 无原生依赖）：导出含空目录显式 `name/` 条目；导入先 stat 限制压缩包大小，再用 `unzipSync` 的 `filter`（解压前拿到头部声明的 originalSize）限流防 zip 炸弹，条目名经 `assertZipEntryName` 防遍历，`manifest.json` 必须 v1，未知 reason 降级 manual（用 `Object.hasOwn` 判定，勿用 `in` —— 会命中原型链），目录名冲突加 `-import-N`。写入期 EEXIST/ENOTDIR/EISDIR 映射为 `BACKUP_IMPORT_INVALID`。
+- 备份导入/导出用 zip（`fflate`，纯 JS 无原生依赖）：导出含空目录显式 `name/` 条目；导入先 stat 限制压缩包大小，再用 `unzipSync` 的 `filter`（解压前拿到头部声明的 originalSize）限流防 zip 炸弹，条目名经 `assertZipEntryName` 防遍历，`manifest.json` 必须 v1，未知 reason 降级 manual（用 `Object.hasOwn` 判定，勿用 `in` —— 会命中原型链），目录名冲突加 `-import-N`。写入期 EEXIST/ENOTDIR/EISDIR/ENAMETOOLONG/EINVAL/ERR_INVALID_FILE_NAME 映射为 `BACKUP_IMPORT_INVALID`。
 
 ## Git 约定
 
