@@ -2,6 +2,8 @@ import * as defaultFs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
+import { writeFileAtomic } from "./atomicFile";
+
 export type QuotaProviderId = "kimi" | "glm" | "mimo" | "deepseek";
 export type QuotaWindowKind = "5h" | "weekly" | "monthly";
 
@@ -53,7 +55,7 @@ const KIMI_PLAN_LEVELS: Record<string, string> = {
   LEVEL_STANDARD: "Vivace",
 };
 
-/** GLM limit `unit` enum: 1=天 3=小时 5=分钟 6=周（0=未知），来自 open.bigmodel.cn 配额接口。 */
+/** GLM limit `unit` enum: 1=day 3=hour 5=minute 6=week (0=unknown), per open.bigmodel.cn's quota API. */
 const GLM_UNIT_DAYS = 1;
 const GLM_UNIT_HOURS = 3;
 const GLM_UNIT_WEEKS = 6;
@@ -83,17 +85,17 @@ function kimiWindowKind(timeUnit: unknown, duration: number | null): QuotaWindow
   return null;
 }
 
-function glmWindowKind(unit: number | null, number: number | null): QuotaWindowKind | null {
-  if (unit === GLM_UNIT_HOURS && number === 5) {
+function glmWindowKind(unit: number | null, count: number | null): QuotaWindowKind | null {
+  if (unit === GLM_UNIT_HOURS && count === 5) {
     return "5h";
   }
   if (unit === GLM_UNIT_WEEKS) {
     return "weekly";
   }
-  if (unit === GLM_UNIT_DAYS && number === 7) {
+  if (unit === GLM_UNIT_DAYS && count === 7) {
     return "weekly";
   }
-  if (unit === GLM_UNIT_DAYS && number !== null && number >= 28 && number <= 31) {
+  if (unit === GLM_UNIT_DAYS && count !== null && count >= 28 && count <= 31) {
     return "monthly";
   }
   return null;
@@ -111,7 +113,7 @@ function toFiniteNumber(value: unknown): number | null {
 }
 
 function percent(part: number | null, whole: number | null): number | null {
-  if (part === null || whole === null || whole <= 0) {
+  if (part === null || whole === null || !Number.isFinite(part) || !Number.isFinite(whole) || whole <= 0) {
     return null;
   }
   return Math.round((part / whole) * 1000) / 10;
@@ -121,30 +123,49 @@ function clampPercent(value: number): number {
   return Math.max(0, Math.min(100, Math.round(value * 10) / 10));
 }
 
+// Engines since ES2015 serialize years outside 0-9999 as extended-year ISO ("+100205-…")
+// instead of throwing RangeError; only NaN times still throw. Both paths must yield null:
+// an out-of-range timestamp is garbage data and must not reach the status-bar tooltip.
+function isoOrNull(date: Date): string | null {
+  if (Number.isNaN(date.getTime())) {
+    return null;
+  }
+  try {
+    const iso = date.toISOString();
+    return iso.startsWith("+") || iso.startsWith("-") ? null : iso;
+  } catch {
+    return null;
+  }
+}
+
 function toIsoOrNull(value: unknown): string | null {
   const num = toFiniteNumber(value);
   if (num !== null && num > 1_000_000_000) {
     const ms = num > 1e12 ? num : num * 1000;
-    const date = new Date(ms);
-    return Number.isNaN(date.getTime()) ? null : date.toISOString();
+    return isoOrNull(new Date(ms));
   }
   if (typeof value === "string") {
-    const date = new Date(value);
-    return Number.isNaN(date.getTime()) ? null : date.toISOString();
+    return isoOrNull(new Date(value));
   }
   return null;
 }
 
-function readAuthEntries(authFilePath: string, fsMod: typeof defaultFs): Record<string, { type?: string; key?: string; access?: string; refresh?: string }> {
+/** Shape of auth.json entries as they exist on disk; fields stay unknown until narrowed. */
+interface AuthEntry {
+  type?: unknown;
+  key?: unknown;
+}
+
+function readAuthEntries(authFilePath: string, fsMod: typeof defaultFs): Record<string, AuthEntry> {
   try {
-    const parsed = JSON.parse(fsMod.readFileSync(authFilePath, "utf8"));
-    return parsed && typeof parsed === "object" ? (parsed as Record<string, { type?: string; key?: string }>) : {};
+    const parsed: unknown = JSON.parse(fsMod.readFileSync(authFilePath, "utf8"));
+    return parsed && typeof parsed === "object" ? (parsed as Record<string, AuthEntry>) : {};
   } catch {
     return {};
   }
 }
 
-function bearerKey(entry: { type?: string; key?: string } | undefined): string | null {
+function bearerKey(entry: AuthEntry | undefined): string | null {
   const key = entry?.key;
   return typeof key === "string" && key.length > 0 ? key : null;
 }
@@ -185,17 +206,90 @@ function errorProvider(base: ProviderQuota, message: string): ProviderQuota {
   return { ...base, windows: [], error: message };
 }
 
-/** The tightest remaining percentage across a provider's windows (null when nothing reports). */
-export function worstRemaining(quota: ProviderQuota): number | null {
-  let worst: number | null = null;
-  for (const window of quota.windows) {
-    const remaining = window.remainingPercent ?? (window.usedPercent !== null ? 100 - window.usedPercent : null);
-    if (remaining === null) {
-      continue;
-    }
-    worst = worst === null ? remaining : Math.min(worst, remaining);
+/**
+ * Read a JSON response body defensively: undici's `res.json()` throws a raw
+ * "Unexpected end of JSON input" SyntaxError on empty/truncated bodies (half-broken
+ * connections, gateways answering 200 with no payload). Those must surface as
+ * friendly, actionable messages instead of leaking into status-bar tooltips.
+ */
+async function readJsonBody(res: Response): Promise<unknown> {
+  const text = await res.text();
+  if (text.trim() === "") {
+    throw new Error("接口返回了空响应");
   }
-  return worst;
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error("接口返回了无法解析的内容");
+  }
+}
+
+/** Friendly message for timeout/abort-class transport failures (also the backoff marker). */
+export const NETWORK_TIMEOUT_MESSAGE = "网络请求超时，请检查网络连接";
+/** Friendly message for unreachable-network transport failures (also the backoff marker). */
+export const NETWORK_UNAVAILABLE_MESSAGE = "网络不可用，请检查网络连接";
+
+/**
+ * Map transport-level failures (timeout/abort, DNS, refused/reset connections) to friendly
+ * Chinese messages. AbortSignal.timeout aborts the fetch promise but cannot cancel a
+ * getaddrinfo already parked on the libuv threadpool, so offline DNS hangs surface here.
+ * API-level messages (HTTP codes, envelope errors, readJsonBody messages) pass through.
+ */
+function friendlyRequestError(error: unknown): string {
+  if (!(error instanceof Error)) {
+    return String(error);
+  }
+  const text = `${error.message} ${error.cause instanceof Error ? error.cause.message : ""}`;
+  if (error.name === "TimeoutError" || error.name === "AbortError" || /timeout/i.test(text)) {
+    return NETWORK_TIMEOUT_MESSAGE;
+  }
+  if (
+    /fetch failed|ENOTFOUND|EAI_AGAIN|ECONNREFUSED|ECONNRESET|EHOSTUNREACH|ENETUNREACH|EPIPE|EPROTO|UND_ERR|terminated/i.test(
+      text,
+    )
+  ) {
+    return NETWORK_UNAVAILABLE_MESSAGE;
+  }
+  return error.message;
+}
+
+/** Backoff only helps when errors actually park threadpool threads (DNS/connect hangs). */
+function isTransportError(message: string): boolean {
+  return message === NETWORK_TIMEOUT_MESSAGE || message === NETWORK_UNAVAILABLE_MESSAGE;
+}
+
+/**
+ * True when a refresh cycle should count as failed (for backoff): every configured
+ * provider errored AND at least one is a transport-class error. Pure HTTP/API failures
+ * return fast without occupying the libuv threadpool, so they keep the normal interval.
+ * A null snapshot (fetchAll threw) always counts as failed.
+ */
+export function quotaCycleFailed(snapshot: QuotaSnapshot | null): boolean {
+  if (!snapshot) {
+    return true;
+  }
+  const configured = snapshot.providers.filter((provider) => provider.configured);
+  return (
+    configured.length > 0 &&
+    configured.every((provider) => provider.error !== null) &&
+    configured.some((provider) => isTransportError(provider.error!))
+  );
+}
+
+/** Failure backoff cap for auto-refresh: never wait longer than 2 minutes before retrying. */
+const QUOTA_RETRY_CAP_MS = 120_000;
+
+/**
+ * Auto-refresh delay after `streak` consecutive failed cycles: doubles per failure,
+ * capped at 120s, never below the configured base (a bigger configured interval is
+ * never shortened by backoff). `baseSeconds` of 0 keeps auto-refresh disabled.
+ */
+export function quotaRetryDelayMs(baseSeconds: number, streak: number): number {
+  if (!(baseSeconds > 0)) {
+    return 0;
+  }
+  const base = baseSeconds * 1_000;
+  return Math.round(Math.max(base, Math.min(base * 2 ** streak, QUOTA_RETRY_CAP_MS)));
 }
 
 const WINDOW_SHORT_LABELS: Record<QuotaWindowKind, string> = { "5h": "5h", weekly: "7d", monthly: "30d" };
@@ -238,6 +332,16 @@ function balanceSegmentText(label: string, total: number, currency: string): str
 }
 
 /**
+ * Remaining percent for display: prefer the API-provided value, else derive 100 − usedPercent
+ * (one decimal); null when both are unknown (no data — never a fabricated number).
+ */
+export function deriveRemainingPercent(window: QuotaWindow): number | null {
+  return (
+    window.remainingPercent ?? (window.usedPercent !== null ? Math.round((100 - window.usedPercent) * 10) / 10 : null)
+  );
+}
+
+/**
  * Pure status-bar builder: one segment per (provider, window) so each window gets its own
  * color — "Kimi 100%/5h", "72%/7d", "GLM 91%/5h" in 5h → 7d → 30d order (remaining percent,
  * provider name only on its first segment). Errored providers collapse to a neutral "?" segment;
@@ -256,7 +360,7 @@ export function formatQuotaBar(snapshot: QuotaSnapshot): QuotaBar {
       if (!window) {
         continue;
       }
-      const remaining = window.remainingPercent ?? (window.usedPercent !== null ? Math.round((100 - window.usedPercent) * 10) / 10 : null);
+      const remaining = deriveRemainingPercent(window);
       if (remaining === null) {
         continue;
       }
@@ -321,9 +425,9 @@ export class QuotaService {
         signal: AbortSignal.timeout(this.timeoutMs),
       });
       if (!res.ok) {
-        return errorProvider({ ...base, configured: true }, `HTTP ${res.status}`);
+        return errorProvider({ ...base, configured: true }, `接口返回 HTTP ${res.status}`);
       }
-      const data = (await res.json()) as { is_available?: unknown; balance_infos?: unknown };
+      const data = (await readJsonBody(res)) as { is_available?: unknown; balance_infos?: unknown };
       const infos = Array.isArray(data.balance_infos) ? (data.balance_infos as Record<string, unknown>[]) : [];
       const pick = infos.find((info) => info.currency === "CNY") ?? infos[0];
       const total = toFiniteNumber(pick?.total_balance);
@@ -333,7 +437,7 @@ export class QuotaService {
       }
       return { ...base, configured: true, balances: { total, currency } };
     } catch (error) {
-      return errorProvider({ ...base, configured: true }, error instanceof Error ? error.message : String(error));
+      return errorProvider({ ...base, configured: true }, friendlyRequestError(error));
     }
   }
 
@@ -348,9 +452,9 @@ export class QuotaService {
         signal: AbortSignal.timeout(this.timeoutMs),
       });
       if (!res.ok) {
-        return errorProvider({ ...base, configured: true }, `HTTP ${res.status}`);
+        return errorProvider({ ...base, configured: true }, `接口返回 HTTP ${res.status}`);
       }
-      const data = (await res.json()) as Record<string, unknown>;
+      const data = (await readJsonBody(res)) as Record<string, unknown>;
       const usage = (data.usage ?? {}) as Record<string, unknown>;
       const windows: QuotaWindow[] = [];
       const seenKinds = new Set<QuotaWindowKind>();
@@ -359,11 +463,16 @@ export class QuotaService {
       const weeklyRemaining = toFiniteNumber(usage.remaining);
       const weeklyUsed = toFiniteNumber(usage.used);
       if (weeklyLimit !== null) {
+        // percent() returns null for whole<=0 — deriving from it must stay null then,
+        // never 100 - null (which coerces to a fabricated 100%).
+        const derived = percent(weeklyRemaining, weeklyLimit);
         seenKinds.add("weekly");
         windows.push({
           kind: "weekly",
-          usedPercent: percent(weeklyUsed, weeklyLimit) ?? (weeklyRemaining !== null ? clampPercent(100 - percent(weeklyRemaining, weeklyLimit)!) : null),
-          remainingPercent: percent(weeklyRemaining, weeklyLimit),
+          usedPercent:
+            percent(weeklyUsed, weeklyLimit) ??
+            (weeklyRemaining !== null && derived !== null ? clampPercent(100 - derived) : null),
+          remainingPercent: derived,
           used: weeklyUsed,
           limit: weeklyLimit,
           remaining: weeklyRemaining,
@@ -402,7 +511,8 @@ export class QuotaService {
       const monthlyLimit = toFiniteNumber(totalQuota.limit);
       if (monthlyLimit !== null && monthlyLimit > 0 && !seenKinds.has("monthly")) {
         const monthlyRemaining = toFiniteNumber(totalQuota.remaining);
-        const monthlyUsed = toFiniteNumber(totalQuota.used) ?? (monthlyRemaining !== null ? monthlyLimit - monthlyRemaining : null);
+        const monthlyUsed =
+          toFiniteNumber(totalQuota.used) ?? (monthlyRemaining !== null ? monthlyLimit - monthlyRemaining : null);
         windows.push({
           kind: "monthly",
           usedPercent: percent(monthlyUsed, monthlyLimit),
@@ -414,11 +524,14 @@ export class QuotaService {
         });
       }
 
-      const level = ((data.user as Record<string, unknown> | undefined)?.membership as Record<string, unknown> | undefined)?.level;
-      const plan = typeof level === "string" ? (KIMI_PLAN_LEVELS[level] ?? level.replace(/^LEVEL_/, "").toLowerCase()) : null;
+      const level = (
+        (data.user as Record<string, unknown> | undefined)?.membership as Record<string, unknown> | undefined
+      )?.level;
+      const plan =
+        typeof level === "string" ? (KIMI_PLAN_LEVELS[level] ?? level.replace(/^LEVEL_/, "").toLowerCase()) : null;
       return { ...base, configured: true, plan, windows };
     } catch (error) {
-      return errorProvider({ ...base, configured: true }, error instanceof Error ? error.message : String(error));
+      return errorProvider({ ...base, configured: true }, friendlyRequestError(error));
     }
   }
 
@@ -433,11 +546,22 @@ export class QuotaService {
         signal: AbortSignal.timeout(this.timeoutMs),
       });
       if (!res.ok) {
-        return errorProvider({ ...base, configured: true }, `HTTP ${res.status}`);
+        return errorProvider({ ...base, configured: true }, `接口返回 HTTP ${res.status}`);
       }
-      const payload = (await res.json()) as { code?: unknown; msg?: unknown; success?: unknown; data?: { limits?: unknown[]; level?: unknown } };
+      const payload = (await readJsonBody(res)) as {
+        code?: unknown;
+        msg?: unknown;
+        success?: unknown;
+        data?: { limits?: unknown[]; level?: unknown };
+      };
       if (payload.success === false || (typeof payload.code === "number" && payload.code !== 200)) {
-        return errorProvider({ ...base, configured: true }, typeof payload.msg === "string" ? payload.msg : `code ${String(payload.code)}`);
+        const detail =
+          typeof payload.msg === "string"
+            ? payload.msg.length > 120
+              ? `${payload.msg.slice(0, 120)}…`
+              : payload.msg
+            : `code ${String(payload.code)}`;
+        return errorProvider({ ...base, configured: true }, `接口错误：${detail}`);
       }
       const limits = Array.isArray(payload.data?.limits) ? (payload.data!.limits as Record<string, unknown>[]) : [];
       const windows: QuotaWindow[] = [];
@@ -465,7 +589,7 @@ export class QuotaService {
       const plan = typeof payload.data?.level === "string" ? payload.data.level : null;
       return { ...base, configured: true, plan, windows };
     } catch (error) {
-      return errorProvider({ ...base, configured: true }, error instanceof Error ? error.message : String(error));
+      return errorProvider({ ...base, configured: true }, friendlyRequestError(error));
     }
   }
 
@@ -480,34 +604,32 @@ export class QuotaService {
       "Accept-Language": "en-US,en;q=0.9",
       Origin: "https://platform.xiaomimimo.com",
       Referer: "https://platform.xiaomimimo.com/",
-      "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36",
+      "User-Agent":
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36",
     };
-    const get = async (suffix: string): Promise<Record<string, unknown> | null> => {
-      try {
-        const res = await this.fetchFn(`${MIMO_API_BASE}${suffix}`, {
-          headers,
-          signal: AbortSignal.timeout(this.timeoutMs),
-        });
-        if (!res.ok) {
-          return null;
-        }
-        return (await res.json()) as Record<string, unknown>;
-      } catch {
-        return null;
+    const get = async (suffix: string): Promise<Record<string, unknown>> => {
+      const res = await this.fetchFn(`${MIMO_API_BASE}${suffix}`, {
+        headers,
+        signal: AbortSignal.timeout(this.timeoutMs),
+      });
+      if (!res.ok) {
+        const cookieHint = res.status === 401 || res.status === 403 ? "（Cookie 可能已过期）" : "";
+        throw new Error(`接口返回 HTTP ${res.status}${cookieHint}`);
       }
+      return (await readJsonBody(res)) as Record<string, unknown>;
     };
     try {
-      const [balance, detail, usage] = await Promise.all([
-        get("/balance"),
-        get("/tokenPlan/detail"),
-        get("/tokenPlan/usage"),
-      ]);
-      if (balance === null) {
-        return errorProvider({ ...base, configured: true }, "额度接口请求失败（Cookie 可能已过期）");
-      }
+      // Sequential on purpose: each pending DNS lookup parks a libuv threadpool thread that
+      // AbortSignal cannot cancel, so MiMo must never hold more than one in-flight request.
+      const balance = await get("/balance");
+      const detail = await get("/tokenPlan/detail").catch(() => null);
+      const usage = await get("/tokenPlan/usage").catch(() => null);
+      // A missing `code` field means success (gateways may strip the envelope); only an
+      // explicit non-zero code is a business failure.
       const code = toFiniteNumber(balance.code);
-      if (code !== 0) {
-        return errorProvider({ ...base, configured: true }, `接口返回 code ${code}（Cookie 可能已过期）`);
+      if (code !== null && code !== 0) {
+        const cookieHint = code === 401 || code === 403 ? "（Cookie 可能已过期）" : "";
+        return errorProvider({ ...base, configured: true }, `接口返回 code ${code}${cookieHint}`);
       }
       const balanceData = (balance.data ?? {}) as Record<string, unknown>;
       const total = toFiniteNumber(balanceData.balance);
@@ -522,7 +644,10 @@ export class QuotaService {
       const planCode = typeof detailData.planCode === "string" ? detailData.planCode : null;
       const periodEnd = typeof detailData.currentPeriodEnd === "string" ? detailData.currentPeriodEnd : null;
 
-      const monthUsage = ((usage?.data as Record<string, unknown> | undefined)?.monthUsage ?? null) as Record<string, unknown> | null;
+      const monthUsage = ((usage?.data as Record<string, unknown> | undefined)?.monthUsage ?? null) as Record<
+        string,
+        unknown
+      > | null;
       const items = Array.isArray(monthUsage?.items) ? (monthUsage!.items as Record<string, unknown>[]) : [];
       const item = items[0] ?? {};
       const used = toFiniteNumber(item.used);
@@ -542,7 +667,54 @@ export class QuotaService {
       }
       return { ...provider, plan: planCode, windows };
     } catch (error) {
-      return errorProvider({ ...base, configured: true }, error instanceof Error ? error.message : String(error));
+      return errorProvider({ ...base, configured: true }, friendlyRequestError(error));
+    }
+  }
+
+  /**
+   * Persist the MiMo dashboard cookie into the configured quota.json (<configDir>/quota.json):
+   * normalize (invalid → throws `MIMO_COOKIE_INVALID`), merge into the existing document
+   * (corrupt content heals to a fresh object; unreadable-but-existing file aborts with
+   * `CONFIG_UNREADABLE`), mkdir the parent dir on demand, atomic write, then best-effort
+   * chmod 0600 (credential; no-op where unsupported). Requires quotaConfigPath to be set.
+   */
+  saveMimoCookie(cookie: string): void {
+    const normalized = normalizeMimoCookie(cookie);
+    if (normalized === null) {
+      throw new Error("MIMO_COOKIE_INVALID");
+    }
+    let root: Record<string, unknown> = {};
+    const existing = this.readQuotaConfigTextForEdit();
+    if (existing !== "") {
+      try {
+        const parsed: unknown = JSON.parse(existing);
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+          root = parsed as Record<string, unknown>;
+        }
+      } catch {
+        // Extension-owned file: corrupt content is healed, not preserved.
+      }
+    }
+    const mimo =
+      root.mimo && typeof root.mimo === "object" && !Array.isArray(root.mimo)
+        ? { ...(root.mimo as Record<string, unknown>) }
+        : {};
+    root.mimo = { ...mimo, cookie: normalized };
+    this.fsMod.mkdirSync(path.dirname(this.quotaConfigPath), { recursive: true });
+    writeFileAtomic(this.quotaConfigPath, `${JSON.stringify(root, null, 2)}\n`, this.fsMod);
+    try {
+      this.fsMod.chmodSync(this.quotaConfigPath, 0o600);
+    } catch {
+      // Owner-only permission is best-effort; platforms without POSIX modes ignore it.
+    }
+  }
+
+  /** readTextForEdit contract: "" only when genuinely absent; unreadable → CONFIG_UNREADABLE. */
+  private readQuotaConfigTextForEdit(): string {
+    try {
+      return this.fsMod.existsSync(this.quotaConfigPath) ? this.fsMod.readFileSync(this.quotaConfigPath, "utf8") : "";
+    } catch {
+      throw new Error("CONFIG_UNREADABLE");
     }
   }
 }

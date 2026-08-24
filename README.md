@@ -19,6 +19,8 @@ VSCode 扩展：管理 [opencode](https://opencode.ai) 与 [oh-my-opencode](http
   - DeepSeek 官方仅提供余额接口（按量计费、无额度窗口）：状态栏显示 `DeepSeek ¥余额`，点击查看币种明细
   - MiMo 官方仅提供 Dashboard API：执行「Coding Plan 额度：配置 MiMo Cookie…」粘贴 `platform.xiaomimimo.com` 的浏览器 Cookie（存入 `quota.json`）
   - 点击查看各窗口详情与重置时间；`opencodeConfigManager.quota.refreshSeconds` 控制自动刷新间隔（默认 30 秒，0 关闭）
+  - 网络故障时自动指数退避（30s → 60s → 最长 2 分钟重试一次，避免反复发起挂起的 DNS 查询拖慢扩展宿主），网络恢复后自动回到正常间隔；点击状态栏查看详情，在详情中选择「刷新」可随时立即重试
+  - 请求失败在状态栏/详情中显示友好中文提示（网络不可用 / 网络请求超时 / 接口返回空响应等），不再泄漏原始英文错误
   - 各窗口按剩余量独立着色：≥60% 绿色、20%–60% 黄色、<20% 红色（跟随 VSCode 主题）；DeepSeek 余额按绝对值着色：>100 绿色、20–100 黄色、<20 红色
 
 ## 安装

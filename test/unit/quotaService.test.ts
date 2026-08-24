@@ -1,8 +1,21 @@
-import { afterEach, describe, expect, it } from "vitest";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { QuotaService, formatQuotaBar } from "../../src/core/quotaService";
+
+import { afterEach, describe, expect, it } from "vitest";
+
+import {
+  deriveRemainingPercent,
+  formatQuotaBar,
+  NETWORK_TIMEOUT_MESSAGE,
+  NETWORK_UNAVAILABLE_MESSAGE,
+  normalizeMimoCookie,
+  quotaCycleFailed,
+  quotaRetryDelayMs,
+  QuotaService,
+  type QuotaSnapshot,
+  type QuotaWindow,
+} from "../../src/core/quotaService";
 
 const sandboxes: string[] = [];
 
@@ -39,27 +52,49 @@ const GLM_PAYLOAD = {
   success: true,
   data: {
     limits: [
-      { type: "TIME_LIMIT", unit: 5, number: 1, usage: 3, currentValue: 0, remaining: 997, percentage: 0, nextResetTime: 1789628185998 },
+      {
+        type: "TIME_LIMIT",
+        unit: 5,
+        number: 1,
+        usage: 3,
+        currentValue: 0,
+        remaining: 997,
+        percentage: 0,
+        nextResetTime: 1789628185998,
+      },
       { type: "TOKENS_LIMIT", unit: 3, number: 5, percentage: 2, nextResetTime: 1787400622272 },
     ],
     level: "pro",
   },
 };
 
-const MIMO_BALANCE = { code: 0, data: { balance: "12.34", currency: "CNY", cashBalance: "10.00", giftBalance: "2.34" } };
+const MIMO_BALANCE = {
+  code: 0,
+  data: { balance: "12.34", currency: "CNY", cashBalance: "10.00", giftBalance: "2.34" },
+};
 const MIMO_DETAIL = { code: 0, data: { planCode: "lite", currentPeriodEnd: "2026-09-18 00:00:00", expired: false } };
-const MIMO_USAGE = { code: 0, data: { monthUsage: { percent: 40, items: [{ name: "token", used: 40, limit: 100, percent: 40 }] } } };
+const MIMO_USAGE = {
+  code: 0,
+  data: { monthUsage: { percent: 40, items: [{ name: "token", used: 40, limit: 100, percent: 40 }] } },
+};
 
 describe("QuotaService.fetchAll — Kimi", () => {
   it("maps usage→weekly and limits[300min]→5h, requests with x-api-key", async () => {
     const dir = tmpDir();
-    fs.writeFileSync(path.join(dir, "auth.json"), JSON.stringify({ "kimi-for-coding": { type: "api", key: "sk-kimi" } }));
+    fs.writeFileSync(
+      path.join(dir, "auth.json"),
+      JSON.stringify({ "kimi-for-coding": { type: "api", key: "sk-kimi" } }),
+    );
     const calls: { url: string; headers: Record<string, string> }[] = [];
     const fetchFn = async (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
       calls.push({ url: String(url), headers: init?.headers as Record<string, string> });
       return jsonRes(KIMI_PAYLOAD);
     };
-    const svc = new QuotaService({ authFilePath: path.join(dir, "auth.json"), quotaConfigPath: path.join(dir, "quota.json"), fetchFn });
+    const svc = new QuotaService({
+      authFilePath: path.join(dir, "auth.json"),
+      quotaConfigPath: path.join(dir, "quota.json"),
+      fetchFn,
+    });
 
     const snap = await svc.fetchAll();
     const kimi = snap.providers.find((p) => p.providerId === "kimi")!;
@@ -83,36 +118,148 @@ describe("QuotaService.fetchAll — Kimi", () => {
   it("accepts the 5h window declared as 5 TIME_UNIT_HOUR", async () => {
     const dir = tmpDir();
     fs.writeFileSync(path.join(dir, "auth.json"), JSON.stringify({ "kimi-for-coding": { type: "api", key: "k" } }));
-    const payload = { ...KIMI_PAYLOAD, limits: [{ window: { duration: 5, timeUnit: "TIME_UNIT_HOUR" }, detail: { limit: "50", remaining: "10" } }] };
-    const svc = new QuotaService({ authFilePath: path.join(dir, "auth.json"), quotaConfigPath: path.join(dir, "quota.json"), fetchFn: async () => jsonRes(payload) });
+    const payload = {
+      ...KIMI_PAYLOAD,
+      limits: [{ window: { duration: 5, timeUnit: "TIME_UNIT_HOUR" }, detail: { limit: "50", remaining: "10" } }],
+    };
+    const svc = new QuotaService({
+      authFilePath: path.join(dir, "auth.json"),
+      quotaConfigPath: path.join(dir, "quota.json"),
+      fetchFn: async () => jsonRes(payload),
+    });
 
     const snap = await svc.fetchAll();
-    expect(snap.providers.find((p) => p.providerId === "kimi")!.windows.find((w) => w.kind === "5h")?.remainingPercent).toBe(20);
+    expect(
+      snap.providers.find((p) => p.providerId === "kimi")!.windows.find((w) => w.kind === "5h")?.remainingPercent,
+    ).toBe(20);
   });
 
   it("is not configured when auth.json has no kimi key (no request sent)", async () => {
     const dir = tmpDir();
     fs.writeFileSync(path.join(dir, "auth.json"), JSON.stringify({}));
     let called = false;
-    const svc = new QuotaService({ authFilePath: path.join(dir, "auth.json"), quotaConfigPath: path.join(dir, "quota.json"), fetchFn: async () => { called = true; return jsonRes({}); } });
+    const svc = new QuotaService({
+      authFilePath: path.join(dir, "auth.json"),
+      quotaConfigPath: path.join(dir, "quota.json"),
+      fetchFn: async () => {
+        called = true;
+        return jsonRes({});
+      },
+    });
 
     const snap = await svc.fetchAll();
     const kimi = snap.providers.find((p) => p.providerId === "kimi")!;
     expect(kimi.configured).toBe(false);
     expect(called).toBe(false);
   });
+
+  it("keeps usedPercent null when limit<=0 instead of fabricating 100% via 100-null", async () => {
+    const dir = tmpDir();
+    fs.writeFileSync(path.join(dir, "auth.json"), JSON.stringify({ "kimi-for-coding": { type: "api", key: "k" } }));
+    const svc = new QuotaService({
+      authFilePath: path.join(dir, "auth.json"),
+      quotaConfigPath: path.join(dir, "quota.json"),
+      fetchFn: async () => jsonRes({ usage: { limit: 0, used: null, remaining: 25 }, limits: [] }),
+    });
+
+    const snap = await svc.fetchAll();
+    const kimi = snap.providers.find((p) => p.providerId === "kimi")!;
+    expect(kimi.error).toBeNull();
+    const weekly = kimi.windows.find((w) => w.kind === "weekly")!;
+    expect(weekly.usedPercent).toBeNull();
+    expect(weekly.remainingPercent).toBeNull();
+  });
+
+  it("maps epoch reset times beyond year 9999 to null resetAt, not a RangeError error state", async () => {
+    const dir = tmpDir();
+    fs.writeFileSync(path.join(dir, "auth.json"), JSON.stringify({ "kimi-for-coding": { type: "api", key: "k" } }));
+    // ~3.1e15 ms ≈ year 100000: getTime() is finite but toISOString() throws RangeError.
+    const svc = new QuotaService({
+      authFilePath: path.join(dir, "auth.json"),
+      quotaConfigPath: path.join(dir, "quota.json"),
+      fetchFn: async () =>
+        jsonRes({ usage: { limit: "100", used: "1", remaining: "99", resetTime: 3.1e15 }, limits: [] }),
+    });
+
+    const snap = await svc.fetchAll();
+    const kimi = snap.providers.find((p) => p.providerId === "kimi")!;
+    expect(kimi.error).toBeNull();
+    expect(kimi.windows.find((w) => w.kind === "weekly")!.resetAt).toBeNull();
+  });
+
+  it("multiplies epoch-SECOND reset times (1e9–1e12) by 1000 before mapping to ISO", async () => {
+    const dir = tmpDir();
+    fs.writeFileSync(path.join(dir, "auth.json"), JSON.stringify({ "kimi-for-coding": { type: "api", key: "k" } }));
+    const svc = new QuotaService({
+      authFilePath: path.join(dir, "auth.json"),
+      quotaConfigPath: path.join(dir, "quota.json"),
+      fetchFn: async () =>
+        jsonRes({ usage: { limit: "100", used: "1", remaining: "99", resetTime: 1_789_628_185 }, limits: [] }),
+    });
+
+    const snap = await svc.fetchAll();
+    expect(snap.providers.find((p) => p.providerId === "kimi")!.windows.find((w) => w.kind === "weekly")!.resetAt).toBe(
+      "2026-09-17T06:56:25.000Z",
+    );
+  });
+
+  it("derives weekly usedPercent from remaining when `used` is absent, clamping into 0–100", async () => {
+    const dir = tmpDir();
+    fs.writeFileSync(path.join(dir, "auth.json"), JSON.stringify({ "kimi-for-coding": { type: "api", key: "k" } }));
+    const svc = new QuotaService({
+      authFilePath: path.join(dir, "auth.json"),
+      quotaConfigPath: path.join(dir, "quota.json"),
+      fetchFn: async () => jsonRes({ usage: { limit: "100", remaining: "25" }, limits: [] }),
+    });
+
+    const snap = await svc.fetchAll();
+    const weekly = snap.providers.find((p) => p.providerId === "kimi")!.windows.find((w) => w.kind === "weekly")!;
+    expect(weekly.usedPercent).toBe(75);
+    expect(weekly.remainingPercent).toBe(25);
+
+    const overflow = new QuotaService({
+      authFilePath: path.join(dir, "auth.json"),
+      quotaConfigPath: path.join(dir, "quota.json"),
+      fetchFn: async () => jsonRes({ usage: { limit: "100", remaining: "105" }, limits: [] }),
+    });
+    const clamped = (await overflow.fetchAll()).providers
+      .find((p) => p.providerId === "kimi")!
+      .windows.find((w) => w.kind === "weekly")!;
+    expect(clamped.usedPercent).toBe(0); // 100 − 105% clamped at the floor
+    expect(clamped.remainingPercent).toBe(105); // only the derived used side is clamped
+  });
+
+  it("reports HTTP status with a Chinese frame", async () => {
+    const dir = tmpDir();
+    fs.writeFileSync(path.join(dir, "auth.json"), JSON.stringify({ "kimi-for-coding": { type: "api", key: "bad" } }));
+    const svc = new QuotaService({
+      authFilePath: path.join(dir, "auth.json"),
+      quotaConfigPath: path.join(dir, "quota.json"),
+      fetchFn: async () => jsonRes({}, 401),
+    });
+
+    const snap = await svc.fetchAll();
+    expect(snap.providers.find((p) => p.providerId === "kimi")!.error).toBe("接口返回 HTTP 401");
+  });
 });
 
 describe("QuotaService.fetchAll — GLM", () => {
   it("maps TOKENS_LIMIT unit=3→5h (percentage is used%), ignores TIME_LIMIT, resets from epoch ms", async () => {
     const dir = tmpDir();
-    fs.writeFileSync(path.join(dir, "auth.json"), JSON.stringify({ "zhipuai-coding-plan": { type: "api", key: "glm-key" } }));
+    fs.writeFileSync(
+      path.join(dir, "auth.json"),
+      JSON.stringify({ "zhipuai-coding-plan": { type: "api", key: "glm-key" } }),
+    );
     const calls: { url: string; headers: Record<string, string> }[] = [];
     const fetchFn = async (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
       calls.push({ url: String(url), headers: init?.headers as Record<string, string> });
       return jsonRes(GLM_PAYLOAD);
     };
-    const svc = new QuotaService({ authFilePath: path.join(dir, "auth.json"), quotaConfigPath: path.join(dir, "quota.json"), fetchFn });
+    const svc = new QuotaService({
+      authFilePath: path.join(dir, "auth.json"),
+      quotaConfigPath: path.join(dir, "quota.json"),
+      fetchFn,
+    });
 
     const snap = await svc.fetchAll();
     const glm = snap.providers.find((p) => p.providerId === "glm")!;
@@ -131,11 +278,21 @@ describe("QuotaService.fetchAll — GLM", () => {
   it("also maps a weekly TOKENS_LIMIT (unit=6 weeks)", async () => {
     const dir = tmpDir();
     fs.writeFileSync(path.join(dir, "auth.json"), JSON.stringify({ "zhipuai-coding-plan": { type: "api", key: "k" } }));
-    const payload = { ...GLM_PAYLOAD, data: { ...GLM_PAYLOAD.data, limits: [
-      { type: "TOKENS_LIMIT", unit: 6, number: 1, percentage: 9, nextResetTime: 1787400622272 },
-      { type: "TOKENS_LIMIT", unit: 3, number: 5, percentage: 25, nextResetTime: 1787400622272 },
-    ] } };
-    const svc = new QuotaService({ authFilePath: path.join(dir, "auth.json"), quotaConfigPath: path.join(dir, "quota.json"), fetchFn: async () => jsonRes(payload) });
+    const payload = {
+      ...GLM_PAYLOAD,
+      data: {
+        ...GLM_PAYLOAD.data,
+        limits: [
+          { type: "TOKENS_LIMIT", unit: 6, number: 1, percentage: 9, nextResetTime: 1787400622272 },
+          { type: "TOKENS_LIMIT", unit: 3, number: 5, percentage: 25, nextResetTime: 1787400622272 },
+        ],
+      },
+    };
+    const svc = new QuotaService({
+      authFilePath: path.join(dir, "auth.json"),
+      quotaConfigPath: path.join(dir, "quota.json"),
+      fetchFn: async () => jsonRes(payload),
+    });
 
     const snap = await svc.fetchAll();
     const glm = snap.providers.find((p) => p.providerId === "glm")!;
@@ -146,19 +303,56 @@ describe("QuotaService.fetchAll — GLM", () => {
   it("surfaces API error envelopes", async () => {
     const dir = tmpDir();
     fs.writeFileSync(path.join(dir, "auth.json"), JSON.stringify({ "zhipuai-coding-plan": { type: "api", key: "k" } }));
-    const svc = new QuotaService({ authFilePath: path.join(dir, "auth.json"), quotaConfigPath: path.join(dir, "quota.json"), fetchFn: async () => jsonRes({ code: 401, msg: "Unauthorized", success: false }) });
+    const svc = new QuotaService({
+      authFilePath: path.join(dir, "auth.json"),
+      quotaConfigPath: path.join(dir, "quota.json"),
+      fetchFn: async () => jsonRes({ code: 401, msg: "Unauthorized", success: false }),
+    });
 
     const snap = await svc.fetchAll();
     const glm = snap.providers.find((p) => p.providerId === "glm")!;
-    expect(glm.error).toContain("Unauthorized");
+    expect(glm.error).toBe("接口错误：Unauthorized");
     expect(glm.windows).toEqual([]);
+  });
+
+  it("prefixes and truncates long GLM msg passthroughs", async () => {
+    const dir = tmpDir();
+    fs.writeFileSync(path.join(dir, "auth.json"), JSON.stringify({ "zhipuai-coding-plan": { type: "api", key: "k" } }));
+    const longMsg = "x".repeat(300);
+    const svc = new QuotaService({
+      authFilePath: path.join(dir, "auth.json"),
+      quotaConfigPath: path.join(dir, "quota.json"),
+      fetchFn: async () => jsonRes({ code: 500, msg: longMsg, success: false }),
+    });
+
+    const snap = await svc.fetchAll();
+    const glm = snap.providers.find((p) => p.providerId === "glm")!;
+    expect(glm.error).toMatch(/^接口错误：/);
+    expect(glm.error!.length).toBeLessThanOrEqual("接口错误：".length + 121);
+    expect(glm.error).toContain("x".repeat(100));
+  });
+
+  it("reports HTTP status with a Chinese frame", async () => {
+    const dir = tmpDir();
+    fs.writeFileSync(path.join(dir, "auth.json"), JSON.stringify({ "zhipuai-coding-plan": { type: "api", key: "k" } }));
+    const svc = new QuotaService({
+      authFilePath: path.join(dir, "auth.json"),
+      quotaConfigPath: path.join(dir, "quota.json"),
+      fetchFn: async () => new Response("nope", { status: 500 }),
+    });
+
+    const snap = await svc.fetchAll();
+    expect(snap.providers.find((p) => p.providerId === "glm")!.error).toBe("接口返回 HTTP 500");
   });
 });
 
 describe("QuotaService.fetchAll — MiMo", () => {
   function mimoEnv(cookie: string | undefined): { svc: QuotaService; urls: () => string[] } {
     const dir = tmpDir();
-    fs.writeFileSync(path.join(dir, "auth.json"), JSON.stringify({ "xiaomi-token-plan-cn": { type: "api", key: "tp-xx" } }));
+    fs.writeFileSync(
+      path.join(dir, "auth.json"),
+      JSON.stringify({ "xiaomi-token-plan-cn": { type: "api", key: "tp-xx" } }),
+    );
     if (cookie !== undefined) {
       fs.writeFileSync(path.join(dir, "quota.json"), JSON.stringify({ mimo: { cookie } }));
     }
@@ -171,7 +365,14 @@ describe("QuotaService.fetchAll — MiMo", () => {
       if (u.endsWith("/tokenPlan/usage")) return jsonRes(MIMO_USAGE);
       return jsonRes({}, 404);
     };
-    return { svc: new QuotaService({ authFilePath: path.join(dir, "auth.json"), quotaConfigPath: path.join(dir, "quota.json"), fetchFn }), urls: () => urls };
+    return {
+      svc: new QuotaService({
+        authFilePath: path.join(dir, "auth.json"),
+        quotaConfigPath: path.join(dir, "quota.json"),
+        fetchFn,
+      }),
+      urls: () => urls,
+    };
   }
 
   it("queries the three dashboard endpoints with the cookie and maps monthUsage→monthly", async () => {
@@ -201,6 +402,54 @@ describe("QuotaService.fetchAll — MiMo", () => {
     expect(mimo.configured).toBe(false);
     expect(urls()).toEqual([]);
   });
+
+  it("treats a missing envelope code as success (only explicit non-zero codes error)", async () => {
+    const dir = tmpDir();
+    fs.writeFileSync(path.join(dir, "auth.json"), "{}");
+    fs.writeFileSync(
+      path.join(dir, "quota.json"),
+      JSON.stringify({ mimo: { cookie: "api-platform_serviceToken=svc; userId=123" } }),
+    );
+    const svc = new QuotaService({
+      authFilePath: path.join(dir, "auth.json"),
+      quotaConfigPath: path.join(dir, "quota.json"),
+      fetchFn: async (url: string | URL | Request) => {
+        const u = String(url);
+        if (u.endsWith("/balance")) return jsonRes({ data: { balance: "12.34", currency: "CNY" } });
+        if (u.endsWith("/tokenPlan/detail")) return jsonRes(MIMO_DETAIL);
+        return jsonRes(MIMO_USAGE);
+      },
+    });
+
+    const mimo = (await svc.fetchAll()).providers.find((p) => p.providerId === "mimo")!;
+    expect(mimo.error).toBeNull();
+    expect(mimo.balances).toEqual({ total: 12.34, currency: "CNY" });
+  });
+
+  it("degrades gracefully when detail/usage endpoints fail but balance succeeds (plan null, no error)", async () => {
+    const dir = tmpDir();
+    fs.writeFileSync(path.join(dir, "auth.json"), "{}");
+    fs.writeFileSync(
+      path.join(dir, "quota.json"),
+      JSON.stringify({ mimo: { cookie: "api-platform_serviceToken=svc; userId=123" } }),
+    );
+    const svc = new QuotaService({
+      authFilePath: path.join(dir, "auth.json"),
+      quotaConfigPath: path.join(dir, "quota.json"),
+      fetchFn: async (url: string | URL | Request) => {
+        const u = String(url);
+        if (u.endsWith("/balance")) return jsonRes(MIMO_BALANCE);
+        return jsonRes({}, 500); // detail AND usage both failing
+      },
+    });
+
+    const mimo = (await svc.fetchAll()).providers.find((p) => p.providerId === "mimo")!;
+    expect(mimo.error).toBeNull();
+    expect(mimo.configured).toBe(true);
+    expect(mimo.plan).toBeNull();
+    expect(mimo.windows).toEqual([]);
+    expect(mimo.balances).toEqual({ total: 12.34, currency: "CNY" });
+  });
 });
 
 describe("QuotaService.fetchAll — DeepSeek", () => {
@@ -211,7 +460,10 @@ describe("QuotaService.fetchAll — DeepSeek", () => {
     ],
   };
 
-  function deepseekEnv(key: string | undefined): { svc: QuotaService; calls: () => { url: string; headers: Record<string, string> }[] } {
+  function deepseekEnv(key: string | undefined): {
+    svc: QuotaService;
+    calls: () => { url: string; headers: Record<string, string> }[];
+  } {
     const dir = tmpDir();
     const auth: Record<string, { type: string; key?: string }> = {};
     if (key !== undefined) {
@@ -223,7 +475,14 @@ describe("QuotaService.fetchAll — DeepSeek", () => {
       calls.push({ url: String(url), headers: init?.headers as Record<string, string> });
       return jsonRes(DEEPSEEK_BALANCE);
     };
-    return { svc: new QuotaService({ authFilePath: path.join(dir, "auth.json"), quotaConfigPath: path.join(dir, "quota.json"), fetchFn }), calls: () => calls };
+    return {
+      svc: new QuotaService({
+        authFilePath: path.join(dir, "auth.json"),
+        quotaConfigPath: path.join(dir, "quota.json"),
+        fetchFn,
+      }),
+      calls: () => calls,
+    };
   }
 
   it("queries /user/balance with Bearer key and maps CNY balance, no windows (pay-as-you-go)", async () => {
@@ -309,7 +568,7 @@ describe("QuotaService.fetchAll — DeepSeek", () => {
     const snap = await svc.fetchAll();
     const ds = snap.providers.find((p) => p.providerId === "deepseek")!;
     expect(ds.configured).toBe(true);
-    expect(ds.error).toBe("HTTP 401");
+    expect(ds.error).toBe("接口返回 HTTP 401");
   });
 
   it("is not configured when auth.json has no deepseek key (no request sent)", async () => {
@@ -327,7 +586,15 @@ describe("formatQuotaBar — balance-only providers", () => {
     const bar = formatQuotaBar({
       fetchedAt: "2026-08-22T12:00:00.000Z",
       providers: [
-        { providerId: "deepseek", label: "DeepSeek", plan: null, windows: [], balances: { total: 257.06, currency: "CNY" }, configured: true, error: null },
+        {
+          providerId: "deepseek",
+          label: "DeepSeek",
+          plan: null,
+          windows: [],
+          balances: { total: 257.06, currency: "CNY" },
+          configured: true,
+          error: null,
+        },
       ],
     });
     expect(bar.segments).toEqual([{ text: "DeepSeek ¥257.06", color: "green" }]);
@@ -338,7 +605,15 @@ describe("formatQuotaBar — balance-only providers", () => {
       const bar = formatQuotaBar({
         fetchedAt: "2026-08-22T12:00:00.000Z",
         providers: [
-          { providerId: "deepseek", label: "DeepSeek", plan: null, windows: [], balances: { total, currency: "CNY" }, configured: true, error: null },
+          {
+            providerId: "deepseek",
+            label: "DeepSeek",
+            plan: null,
+            windows: [],
+            balances: { total, currency: "CNY" },
+            configured: true,
+            error: null,
+          },
         ],
       });
       expect(bar.segments).toEqual([{ text: `DeepSeek ¥${total}`, color: "yellow" }]);
@@ -349,7 +624,15 @@ describe("formatQuotaBar — balance-only providers", () => {
     const bar = formatQuotaBar({
       fetchedAt: "2026-08-22T12:00:00.000Z",
       providers: [
-        { providerId: "deepseek", label: "DeepSeek", plan: null, windows: [], balances: { total: 5.5, currency: "USD" }, configured: true, error: null },
+        {
+          providerId: "deepseek",
+          label: "DeepSeek",
+          plan: null,
+          windows: [],
+          balances: { total: 5.5, currency: "USD" },
+          configured: true,
+          error: null,
+        },
       ],
     });
     expect(bar.segments).toEqual([{ text: "DeepSeek $5.5", color: "red" }]);
@@ -359,7 +642,15 @@ describe("formatQuotaBar — balance-only providers", () => {
     const bar = formatQuotaBar({
       fetchedAt: "2026-08-22T12:00:00.000Z",
       providers: [
-        { providerId: "deepseek", label: "DeepSeek", plan: null, windows: [], balances: null, configured: true, error: null },
+        {
+          providerId: "deepseek",
+          label: "DeepSeek",
+          plan: null,
+          windows: [],
+          balances: null,
+          configured: true,
+          error: null,
+        },
       ],
     });
     expect(bar.segments).toEqual([]);
@@ -367,17 +658,71 @@ describe("formatQuotaBar — balance-only providers", () => {
 });
 
 describe("QuotaService.fetchAll — snapshot", () => {
-  it("merges providers and stamps fetchedAt", async () => {
+  it("merges providers and stamps fetchedAt from the injected clock", async () => {
     const dir = tmpDir();
-    fs.writeFileSync(path.join(dir, "auth.json"), JSON.stringify({
-      "kimi-for-coding": { type: "api", key: "k" },
-      "zhipuai-coding-plan": { type: "api", key: "g" },
-    }));
-    const svc = new QuotaService({ authFilePath: path.join(dir, "auth.json"), quotaConfigPath: path.join(dir, "quota.json"), fetchFn: async (url: string | URL | Request) => jsonRes(String(url).includes("kimi.com") ? KIMI_PAYLOAD : GLM_PAYLOAD) });
+    fs.writeFileSync(
+      path.join(dir, "auth.json"),
+      JSON.stringify({
+        "kimi-for-coding": { type: "api", key: "k" },
+        "zhipuai-coding-plan": { type: "api", key: "g" },
+      }),
+    );
+    const svc = new QuotaService({
+      authFilePath: path.join(dir, "auth.json"),
+      quotaConfigPath: path.join(dir, "quota.json"),
+      now: () => new Date("2026-08-22T12:00:00.000Z"),
+      fetchFn: async (url: string | URL | Request) =>
+        jsonRes(String(url).includes("kimi.com") ? KIMI_PAYLOAD : GLM_PAYLOAD),
+    });
 
     const snap = await svc.fetchAll();
     expect(snap.providers.map((p) => p.providerId)).toEqual(["kimi", "glm", "mimo", "deepseek"]);
-    expect(snap.fetchedAt).toBeTruthy();
+    expect(snap.fetchedAt).toBe("2026-08-22T12:00:00.000Z");
+  });
+});
+
+describe("QuotaService.fetchAll — auth.json 容错", () => {
+  it("auth.json 缺失或损坏时四个 provider 全部未配置，且零网络请求", async () => {
+    for (const seed of [undefined, "{ not valid json"]) {
+      const dir = tmpDir();
+      if (seed !== undefined) {
+        fs.writeFileSync(path.join(dir, "auth.json"), seed);
+      }
+      let calls = 0;
+      const svc = new QuotaService({
+        authFilePath: path.join(dir, "auth.json"),
+        quotaConfigPath: path.join(dir, "quota.json"),
+        fetchFn: async () => {
+          calls += 1;
+          return jsonRes({});
+        },
+      });
+
+      const snap = await svc.fetchAll();
+      expect(snap.providers.map((p) => p.configured)).toEqual([false, false, false, false]);
+      expect(snap.providers.every((p) => p.error === null)).toBe(true);
+      expect(calls).toBe(0);
+    }
+  });
+});
+
+describe("normalizeMimoCookie", () => {
+  it("剥 'Cookie:' 前缀、白名单外键丢弃、保留合法键的顺序与原值", () => {
+    expect(
+      normalizeMimoCookie(
+        "Cookie: api-platform_serviceToken=abc; junk=1; userId=42; api-platform_ph=p; api-platform_slh=s",
+      ),
+    ).toBe("api-platform_serviceToken=abc; userId=42; api-platform_ph=p; api-platform_slh=s");
+    expect(normalizeMimoCookie("api-platform_serviceToken=abc;; userId=42")).toBe(
+      "api-platform_serviceToken=abc; userId=42",
+    );
+  });
+
+  it("缺 serviceToken 或 userId 任一必需 cookie 时返回 null", () => {
+    expect(normalizeMimoCookie("api-platform_serviceToken=abc")).toBeNull();
+    expect(normalizeMimoCookie("userId=42")).toBeNull();
+    expect(normalizeMimoCookie("")).toBeNull();
+    expect(normalizeMimoCookie(42)).toBeNull();
   });
 });
 
@@ -385,7 +730,11 @@ describe("QuotaService — extra window kinds", () => {
   function kimiSvc(payload: unknown): QuotaService {
     const dir = tmpDir();
     fs.writeFileSync(path.join(dir, "auth.json"), JSON.stringify({ "kimi-for-coding": { type: "api", key: "k" } }));
-    return new QuotaService({ authFilePath: path.join(dir, "auth.json"), quotaConfigPath: path.join(dir, "quota.json"), fetchFn: async () => jsonRes(payload) });
+    return new QuotaService({
+      authFilePath: path.join(dir, "auth.json"),
+      quotaConfigPath: path.join(dir, "quota.json"),
+      fetchFn: async () => jsonRes(payload),
+    });
   }
 
   it("Kimi: maps limits[] 7-day and 30-day windows, and totalQuota→monthly; dedupes kinds", async () => {
@@ -417,17 +766,269 @@ describe("QuotaService — extra window kinds", () => {
   it("GLM: maps 30-day TOKENS_LIMIT to monthly", async () => {
     const dir = tmpDir();
     fs.writeFileSync(path.join(dir, "auth.json"), JSON.stringify({ "zhipuai-coding-plan": { type: "api", key: "k" } }));
-    const svc = new QuotaService({ authFilePath: path.join(dir, "auth.json"), quotaConfigPath: path.join(dir, "quota.json"), fetchFn: async () => jsonRes({
-      code: 200, success: true,
-      data: { limits: [
-        { type: "TOKENS_LIMIT", unit: 3, number: 5, percentage: 10, nextResetTime: 1787400622272 },
-        { type: "TOKENS_LIMIT", unit: 1, number: 30, percentage: 40, nextResetTime: 1787400622272 },
-      ], level: "max" },
-    }) });
+    const svc = new QuotaService({
+      authFilePath: path.join(dir, "auth.json"),
+      quotaConfigPath: path.join(dir, "quota.json"),
+      fetchFn: async () =>
+        jsonRes({
+          code: 200,
+          success: true,
+          data: {
+            limits: [
+              { type: "TOKENS_LIMIT", unit: 3, number: 5, percentage: 10, nextResetTime: 1787400622272 },
+              { type: "TOKENS_LIMIT", unit: 1, number: 30, percentage: 40, nextResetTime: 1787400622272 },
+            ],
+            level: "max",
+          },
+        }),
+    });
     const snap = await svc.fetchAll();
     const glm = snap.providers.find((p) => p.providerId === "glm")!;
     expect(glm.windows.map((w) => w.kind)).toEqual(["5h", "monthly"]);
     expect(glm.windows.find((w) => w.kind === "monthly")!.remainingPercent).toBe(60);
+  });
+});
+
+describe("QuotaService — 离线韧性与错误映射", () => {
+  function glmSvc(fetchImpl: () => Promise<Response>): QuotaService {
+    const dir = tmpDir();
+    fs.writeFileSync(path.join(dir, "auth.json"), JSON.stringify({ "zhipuai-coding-plan": { type: "api", key: "k" } }));
+    return new QuotaService({
+      authFilePath: path.join(dir, "auth.json"),
+      quotaConfigPath: path.join(dir, "quota.json"),
+      fetchFn: fetchImpl,
+    });
+  }
+
+  function glmOf(snap: QuotaSnapshot) {
+    return snap.providers.find((p) => p.providerId === "glm")!;
+  }
+
+  it("空 200 响应映射为友好错误，而非泄漏 'Unexpected end of JSON input'", async () => {
+    const svc = glmSvc(async () => new Response("", { status: 200 }));
+    const glm = glmOf(await svc.fetchAll());
+    expect(glm.error).toContain("空响应");
+    expect(glm.error).not.toContain("Unexpected end of JSON input");
+  });
+
+  it("非 JSON 响应体映射为友好解析错误", async () => {
+    const svc = glmSvc(async () => new Response("<html>gateway error</html>", { status: 200 }));
+    const glm = glmOf(await svc.fetchAll());
+    expect(glm.error).toContain("解析");
+    expect(glm.error).not.toContain("<html>");
+  });
+
+  it("底层网络失败（fetch failed + ENOTFOUND cause）映射为友好网络错误", async () => {
+    const svc = glmSvc(async () => {
+      throw new TypeError("fetch failed", { cause: new Error("getaddrinfo ENOTFOUND open.bigmodel.cn") });
+    });
+    const glm = glmOf(await svc.fetchAll());
+    expect(glm.error).toBe(NETWORK_UNAVAILABLE_MESSAGE);
+    expect(glm.error).not.toContain("fetch failed");
+  });
+
+  it("中断/超时类错误映射为友好超时提示", async () => {
+    const svc = glmSvc(async () => {
+      throw new DOMException("This operation was aborted", "AbortError");
+    });
+    const glm = glmOf(await svc.fetchAll());
+    expect(glm.error).toBe(NETWORK_TIMEOUT_MESSAGE);
+  });
+
+  it("AbortSignal.timeout 实际产出的 TimeoutError 名字也映射为超时", async () => {
+    const svc = glmSvc(async () => {
+      throw new DOMException("The operation was aborted due to timeout", "TimeoutError");
+    });
+    const glm = glmOf(await svc.fetchAll());
+    expect(glm.error).toBe(NETWORK_TIMEOUT_MESSAGE);
+  });
+
+  it("undici 截断响应体的 Terminated TypeError 映射为网络错误", async () => {
+    const svc = glmSvc(async () => {
+      throw new TypeError("Terminated");
+    });
+    const glm = glmOf(await svc.fetchAll());
+    expect(glm.error).toBe(NETWORK_UNAVAILABLE_MESSAGE);
+  });
+
+  it("MiMo 网络故障不再误报为 Cookie 过期", async () => {
+    const dir = tmpDir();
+    fs.writeFileSync(path.join(dir, "auth.json"), "{}");
+    fs.writeFileSync(
+      path.join(dir, "quota.json"),
+      JSON.stringify({ mimo: { cookie: "api-platform_serviceToken=svc; userId=123" } }),
+    );
+    const svc = new QuotaService({
+      authFilePath: path.join(dir, "auth.json"),
+      quotaConfigPath: path.join(dir, "quota.json"),
+      fetchFn: async () => {
+        throw new TypeError("fetch failed", { cause: new Error("connect ECONNREFUSED 1.2.3.4:443") });
+      },
+    });
+    const mimo = (await svc.fetchAll()).providers.find((p) => p.providerId === "mimo")!;
+    expect(mimo.error).toBe(NETWORK_UNAVAILABLE_MESSAGE);
+    expect(mimo.error).not.toContain("Cookie");
+  });
+
+  it("MiMo balance 返回 401 才提示 Cookie 过期", async () => {
+    const dir = tmpDir();
+    fs.writeFileSync(path.join(dir, "auth.json"), "{}");
+    fs.writeFileSync(
+      path.join(dir, "quota.json"),
+      JSON.stringify({ mimo: { cookie: "api-platform_serviceToken=svc; userId=123" } }),
+    );
+    const svc = new QuotaService({
+      authFilePath: path.join(dir, "auth.json"),
+      quotaConfigPath: path.join(dir, "quota.json"),
+      fetchFn: async () => new Response("{}", { status: 401 }),
+    });
+    const mimo = (await svc.fetchAll()).providers.find((p) => p.providerId === "mimo")!;
+    expect(mimo.error).toContain("接口返回 HTTP 401");
+    expect(mimo.error).toContain("Cookie");
+  });
+
+  it("MiMo 网关 502 报 HTTP 状态而非 Cookie 过期", async () => {
+    const dir = tmpDir();
+    fs.writeFileSync(path.join(dir, "auth.json"), "{}");
+    fs.writeFileSync(
+      path.join(dir, "quota.json"),
+      JSON.stringify({ mimo: { cookie: "api-platform_serviceToken=svc; userId=123" } }),
+    );
+    const svc = new QuotaService({
+      authFilePath: path.join(dir, "auth.json"),
+      quotaConfigPath: path.join(dir, "quota.json"),
+      fetchFn: async () => new Response("bad gateway", { status: 502 }),
+    });
+    const mimo = (await svc.fetchAll()).providers.find((p) => p.providerId === "mimo")!;
+    expect(mimo.error).toBe("接口返回 HTTP 502");
+    expect(mimo.error).not.toContain("Cookie");
+  });
+
+  it("MiMo envelope code 401 附 Cookie 提示，非鉴权码不附", async () => {
+    for (const [code, expectHint] of [
+      [401, true],
+      [500, false],
+    ] as const) {
+      const dir = tmpDir();
+      fs.writeFileSync(path.join(dir, "auth.json"), "{}");
+      fs.writeFileSync(
+        path.join(dir, "quota.json"),
+        JSON.stringify({ mimo: { cookie: "api-platform_serviceToken=svc; userId=123" } }),
+      );
+      const svc = new QuotaService({
+        authFilePath: path.join(dir, "auth.json"),
+        quotaConfigPath: path.join(dir, "quota.json"),
+        fetchFn: async (url: string | URL | Request) =>
+          String(url).endsWith("/balance") ? jsonRes({ code, data: {} }) : jsonRes(MIMO_DETAIL),
+      });
+      const mimo = (await svc.fetchAll()).providers.find((p) => p.providerId === "mimo")!;
+      expect(mimo.error).toContain(`接口返回 code ${code}`);
+      if (expectHint) {
+        expect(mimo.error).toContain("Cookie");
+      } else {
+        expect(mimo.error).not.toContain("Cookie");
+      }
+    }
+  });
+
+  it("MiMo 三个接口串行请求（任一时刻至多一个在途，避免钉死线程池）", async () => {
+    const dir = tmpDir();
+    fs.writeFileSync(path.join(dir, "auth.json"), "{}");
+    fs.writeFileSync(
+      path.join(dir, "quota.json"),
+      JSON.stringify({ mimo: { cookie: "api-platform_serviceToken=svc; userId=123" } }),
+    );
+    let inFlight = 0;
+    let peak = 0;
+    const svc = new QuotaService({
+      authFilePath: path.join(dir, "auth.json"),
+      quotaConfigPath: path.join(dir, "quota.json"),
+      fetchFn: async (url: string | URL | Request) => {
+        inFlight += 1;
+        peak = Math.max(peak, inFlight);
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        inFlight -= 1;
+        const u = String(url);
+        if (u.endsWith("/balance")) return jsonRes(MIMO_BALANCE);
+        if (u.endsWith("/tokenPlan/detail")) return jsonRes(MIMO_DETAIL);
+        return jsonRes(MIMO_USAGE);
+      },
+    });
+    const mimo = (await svc.fetchAll()).providers.find((p) => p.providerId === "mimo")!;
+    expect(peak).toBe(1);
+    expect(mimo.error).toBeNull();
+    expect(mimo.plan).toBe("lite");
+  });
+});
+
+describe("quotaCycleFailed / quotaRetryDelayMs — 退避策略", () => {
+  function snap(entries: Array<[configured: boolean, error: string | null]>): QuotaSnapshot {
+    return {
+      fetchedAt: "x",
+      providers: entries.map(([configured, error], index) => ({
+        providerId: "kimi" as const,
+        label: `P${index}`,
+        plan: null,
+        windows: [],
+        balances: null,
+        configured,
+        error,
+      })),
+    };
+  }
+
+  it("仅当所有已配置 provider 都出错且含传输类错误时才退避（纯 HTTP 错误快速失败不占线程池）", () => {
+    expect(quotaCycleFailed(null)).toBe(true);
+    expect(
+      quotaCycleFailed(
+        snap([
+          [true, "HTTP 500"],
+          [true, null],
+        ]),
+      ),
+    ).toBe(false);
+    expect(
+      quotaCycleFailed(
+        snap([
+          [true, NETWORK_UNAVAILABLE_MESSAGE],
+          [true, "HTTP 500"],
+        ]),
+      ),
+    ).toBe(true);
+    expect(
+      quotaCycleFailed(
+        snap([
+          [true, NETWORK_TIMEOUT_MESSAGE],
+          [true, NETWORK_UNAVAILABLE_MESSAGE],
+        ]),
+      ),
+    ).toBe(true);
+    expect(
+      quotaCycleFailed(
+        snap([
+          [true, "HTTP 500"],
+          [true, "HTTP 502"],
+        ]),
+      ),
+    ).toBe(false);
+    expect(
+      quotaCycleFailed(
+        snap([
+          [true, null],
+          [false, null],
+        ]),
+      ),
+    ).toBe(false);
+    expect(quotaCycleFailed(snap([[false, null]]))).toBe(false);
+  });
+
+  it("按失败次数指数退避，封顶 120 秒，且不低于配置基数；0 保持禁用", () => {
+    expect(quotaRetryDelayMs(0, 3)).toBe(0);
+    expect(quotaRetryDelayMs(30, 0)).toBe(30_000);
+    expect(quotaRetryDelayMs(30, 1)).toBe(60_000);
+    expect(quotaRetryDelayMs(30, 2)).toBe(120_000);
+    expect(quotaRetryDelayMs(30, 9)).toBe(120_000);
+    expect(quotaRetryDelayMs(300, 1)).toBe(300_000);
   });
 });
 
@@ -437,16 +1038,60 @@ describe("formatQuotaBar", () => {
       fetchedAt: "2026-08-22T00:00:00.000Z",
       providers: [
         {
-          providerId: "kimi", label: "Kimi", plan: null, configured: true, error: null, balances: null,
+          providerId: "kimi",
+          label: "Kimi",
+          plan: null,
+          configured: true,
+          error: null,
+          balances: null,
           windows: [
-            { kind: "weekly", usedPercent: 28, remainingPercent: 72, used: null, limit: null, remaining: null, resetAt: null },
-            { kind: "5h", usedPercent: 0, remainingPercent: 100, used: null, limit: null, remaining: null, resetAt: null },
-            { kind: "monthly", usedPercent: 40, remainingPercent: 60, used: null, limit: null, remaining: null, resetAt: null },
+            {
+              kind: "weekly",
+              usedPercent: 28,
+              remainingPercent: 72,
+              used: null,
+              limit: null,
+              remaining: null,
+              resetAt: null,
+            },
+            {
+              kind: "5h",
+              usedPercent: 0,
+              remainingPercent: 100,
+              used: null,
+              limit: null,
+              remaining: null,
+              resetAt: null,
+            },
+            {
+              kind: "monthly",
+              usedPercent: 40,
+              remainingPercent: 60,
+              used: null,
+              limit: null,
+              remaining: null,
+              resetAt: null,
+            },
           ],
         },
         {
-          providerId: "glm", label: "GLM", plan: null, configured: true, error: null, balances: null,
-          windows: [{ kind: "5h", usedPercent: 9, remainingPercent: 91, used: null, limit: null, remaining: null, resetAt: null }],
+          providerId: "glm",
+          label: "GLM",
+          plan: null,
+          configured: true,
+          error: null,
+          balances: null,
+          windows: [
+            {
+              kind: "5h",
+              usedPercent: 9,
+              remainingPercent: 91,
+              used: null,
+              limit: null,
+              remaining: null,
+              resetAt: null,
+            },
+          ],
         },
       ],
     });
@@ -461,14 +1106,45 @@ describe("formatQuotaBar", () => {
   it("colors each window by its own remaining percent: ≥60 green, 20–60 yellow, <20 red", () => {
     const bar = formatQuotaBar({
       fetchedAt: "2026-08-22T00:00:00.000Z",
-      providers: [{
-        providerId: "kimi", label: "Kimi", plan: null, configured: true, error: null, balances: null,
-        windows: [
-          { kind: "5h", usedPercent: 45, remainingPercent: 55, used: null, limit: null, remaining: null, resetAt: null },
-          { kind: "weekly", usedPercent: 85, remainingPercent: 15, used: null, limit: null, remaining: null, resetAt: null },
-          { kind: "monthly", usedPercent: 40, remainingPercent: 60, used: null, limit: null, remaining: null, resetAt: null },
-        ],
-      }],
+      providers: [
+        {
+          providerId: "kimi",
+          label: "Kimi",
+          plan: null,
+          configured: true,
+          error: null,
+          balances: null,
+          windows: [
+            {
+              kind: "5h",
+              usedPercent: 45,
+              remainingPercent: 55,
+              used: null,
+              limit: null,
+              remaining: null,
+              resetAt: null,
+            },
+            {
+              kind: "weekly",
+              usedPercent: 85,
+              remainingPercent: 15,
+              used: null,
+              limit: null,
+              remaining: null,
+              resetAt: null,
+            },
+            {
+              kind: "monthly",
+              usedPercent: 40,
+              remainingPercent: 60,
+              used: null,
+              limit: null,
+              remaining: null,
+              resetAt: null,
+            },
+          ],
+        },
+      ],
     });
     expect(bar.segments.map((seg) => [seg.text, seg.color])).toEqual([
       ["Kimi 55%/5h", "yellow"],
@@ -481,11 +1157,117 @@ describe("formatQuotaBar", () => {
     const errored = formatQuotaBar({
       fetchedAt: "2026-08-22T00:00:00.000Z",
       providers: [
-        { providerId: "kimi", label: "Kimi", plan: null, configured: true, error: "HTTP 500", windows: [], balances: null },
+        {
+          providerId: "kimi",
+          label: "Kimi",
+          plan: null,
+          configured: true,
+          error: "HTTP 500",
+          windows: [],
+          balances: null,
+        },
         { providerId: "mimo", label: "MiMo", plan: null, configured: false, error: null, windows: [], balances: null },
       ],
     });
     expect(errored.segments).toEqual([{ text: "Kimi ?", color: "neutral" }]);
     expect(formatQuotaBar({ fetchedAt: "x", providers: [] }).segments).toEqual([]);
+  });
+});
+
+describe("QuotaService.saveMimoCookie", () => {
+  function cookieSvc(dir: string): QuotaService {
+    return new QuotaService({
+      authFilePath: path.join(dir, "auth.json"),
+      quotaConfigPath: path.join(dir, "nested", "quota.json"),
+    });
+  }
+
+  it("creates quota.json (mkdir on demand) with the normalized cookie, preserving other keys; mode 0600 on POSIX", () => {
+    const dir = tmpDir();
+    fs.mkdirSync(path.join(dir, "nested"));
+    fs.writeFileSync(path.join(dir, "nested", "quota.json"), JSON.stringify({ other: true, mimo: { lang: "en" } }));
+    const svc = cookieSvc(dir);
+
+    svc.saveMimoCookie("Cookie: junk=1; api-platform_serviceToken=abc; userId=42; other=x");
+
+    const saved = JSON.parse(fs.readFileSync(path.join(dir, "nested", "quota.json"), "utf8"));
+    expect(saved).toEqual({ other: true, mimo: { lang: "en", cookie: "api-platform_serviceToken=abc; userId=42" } });
+  });
+
+  it.skipIf(process.platform === "win32")("marks the file owner-only (0600) after writing", () => {
+    const dir = tmpDir();
+    const svc = cookieSvc(dir);
+
+    svc.saveMimoCookie("api-platform_serviceToken=abc; userId=42");
+
+    const file = path.join(dir, "nested", "quota.json");
+    expect(fs.existsSync(file)).toBe(true);
+    expect(fs.statSync(file).mode & 0o777).toBe(0o600);
+  });
+
+  it("heals a corrupt existing quota.json into valid JSON carrying the cookie", () => {
+    const dir = tmpDir();
+    fs.mkdirSync(path.join(dir, "nested"));
+    fs.writeFileSync(path.join(dir, "nested", "quota.json"), "{ not json !!!");
+    const svc = cookieSvc(dir);
+
+    svc.saveMimoCookie("api-platform_serviceToken=abc; userId=42");
+
+    const saved = JSON.parse(fs.readFileSync(path.join(dir, "nested", "quota.json"), "utf8"));
+    expect(saved.mimo.cookie).toBe("api-platform_serviceToken=abc; userId=42");
+  });
+
+  it("throws MIMO_COOKIE_INVALID for cookies missing required parts", () => {
+    const dir = tmpDir();
+    const svc = cookieSvc(dir);
+
+    expect(() => svc.saveMimoCookie("userId=42")).toThrow("MIMO_COOKIE_INVALID");
+    expect(fs.existsSync(path.join(dir, "nested", "quota.json"))).toBe(false);
+  });
+
+  it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+    "throws CONFIG_UNREADABLE when quota.json exists but cannot be read",
+    () => {
+      const dir = tmpDir();
+      fs.mkdirSync(path.join(dir, "nested"));
+      const file = path.join(dir, "nested", "quota.json");
+      fs.writeFileSync(file, "{}");
+      fs.chmodSync(file, 0o000);
+      const svc = cookieSvc(dir);
+
+      try {
+        expect(() => svc.saveMimoCookie("api-platform_serviceToken=abc; userId=42")).toThrow("CONFIG_UNREADABLE");
+      } finally {
+        fs.chmodSync(file, 0o600);
+      }
+    },
+  );
+});
+
+describe("deriveRemainingPercent", () => {
+  function window(partial: Partial<QuotaWindow>): QuotaWindow {
+    return {
+      kind: "weekly",
+      usedPercent: null,
+      remainingPercent: null,
+      used: null,
+      limit: null,
+      remaining: null,
+      resetAt: null,
+      ...partial,
+    };
+  }
+
+  it("prefers the API-provided remainingPercent", () => {
+    expect(deriveRemainingPercent(window({ remainingPercent: 72, usedPercent: 28 }))).toBe(72);
+  });
+
+  it("derives from usedPercent (one decimal) when remainingPercent is null", () => {
+    expect(deriveRemainingPercent(window({ usedPercent: 33.3 }))).toBe(66.7);
+    expect(deriveRemainingPercent(window({ usedPercent: 0 }))).toBe(100);
+  });
+
+  it("returns null when both percents are unknown", () => {
+    expect(deriveRemainingPercent(window({}))).toBeNull();
   });
 });
