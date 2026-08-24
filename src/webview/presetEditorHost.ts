@@ -1,13 +1,16 @@
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
+
 import * as vscode from "vscode";
-import { KNOWN_AGENTS, KNOWN_CATEGORIES, VARIANTS } from "../core/types";
-import type { ModelOption, ModelSetting, Preset, Variant } from "../core/types";
-import type { ConfigStore } from "../core/configStore";
-import type { PresetService } from "../core/presetService";
-import type { PresetRow, WebviewInitPayload } from "../shared/protocol";
+
 import { PRESET_EDITOR_VIEW_TYPE, presetDraftKey, presetNameError } from "../constants";
+import type { ConfigStore } from "../core/configStore";
+import { errorMessage } from "../core/errors";
+import type { PresetService } from "../core/presetService";
+import { KNOWN_AGENTS, KNOWN_CATEGORIES } from "../core/types";
+import type { ModelOption, ModelSetting, Preset } from "../core/types";
+import type { PresetRow, WebviewInitPayload } from "../shared/protocol";
 
 export interface PresetEditorDeps {
   configStore: ConfigStore;
@@ -18,12 +21,37 @@ export interface PresetEditorDeps {
 
 const openPanels = new Map<string, vscode.WebviewPanel>();
 
-export function notifyPresetEditorsModelsChanged(models: ModelOption[]): void {
+/**
+ * Push a refreshed model catalog to every open preset editor. Accepts the list
+ * itself or a lazy provider; the provider is only invoked when at least one
+ * panel is open, so callers avoid computing `listModels()` when nobody listens.
+ */
+export function notifyPresetEditorsModelsChanged(models: ModelOption[] | (() => ModelOption[])): void {
+  if (openPanels.size === 0) {
+    return;
+  }
+  const resolved = typeof models === "function" ? models() : models;
   for (const panel of openPanels.values()) {
-    void panel.webview.postMessage({ type: "modelsUpdated", payload: { models } });
+    void panel.webview.postMessage({ type: "modelsUpdated", payload: { models: resolved } });
   }
 }
 
+/**
+ * Test-only bridge for e2e: post a raw protocol message into the open preset
+ * editor panel registered under `name` (its CURRENT name key). Returns false
+ * when no open panel matches. Gives tests access to the save/apply protocol
+ * without exposing the module-private panel map.
+ */
+export function postMessageToPresetEditor(name: string, message: unknown): boolean {
+  const panel = openPanels.get(name);
+  if (panel === undefined) {
+    return false;
+  }
+  void panel.webview.postMessage(message);
+  return true;
+}
+
+/** Open (or reveal) the webview matrix editor for a preset; `name` null means a new unsaved preset. */
 export async function openPresetEditor(
   ctx: vscode.ExtensionContext,
   deps: PresetEditorDeps,
@@ -60,23 +88,29 @@ export async function openPresetEditor(
 
   let currentName: string | null = name;
   let lastInit: WebviewInitPayload | undefined;
+  // One workspaceState write per dirty period: the webview sends only the false→true edge,
+  // and this guard makes that edge write exactly once until a successful save resets it.
+  let dirtySaved = false;
   let resolveReady: () => void;
+  let rejectReady: (error: Error) => void;
   let readySettled = false;
+  let readyTimer: ReturnType<typeof setTimeout> | undefined;
   const ready = new Promise<void>((resolve, reject) => {
-    resolveReady = () => {
-      if (!readySettled) {
-        readySettled = true;
-        resolve();
+    const settle = (fn: () => void): void => {
+      if (readySettled) {
+        return;
       }
+      readySettled = true;
+      if (readyTimer !== undefined) {
+        clearTimeout(readyTimer);
+      }
+      fn();
     };
-    // A webview that fails to boot (bad bundle, CSP mismatch) must not hang the command.
-    setTimeout(() => {
-      if (!readySettled) {
-        readySettled = true;
-        reject(new Error("模板编辑器初始化超时"));
-      }
-    }, 20_000);
+    resolveReady = () => settle(resolve);
+    rejectReady = (error: Error) => settle(() => reject(error));
   });
+  // A webview that fails to boot (bad bundle, CSP mismatch) must not hang the command.
+  readyTimer = setTimeout(() => rejectReady(new Error("模板编辑器初始化超时")), 20_000);
 
   const buildInitPayload = (): WebviewInitPayload => {
     const assignments = deps.configStore.ohMyAssignments();
@@ -121,8 +155,7 @@ export async function openPresetEditor(
       reply(action, false, nameError);
       return;
     }
-    const original =
-      currentName !== null && deps.presetService.exists(currentName) ? currentName : null;
+    const original = currentName !== null && deps.presetService.exists(currentName) ? currentName : null;
     if (newName !== original && deps.presetService.exists(newName)) {
       reply(action, false, `模板 ${newName} 已存在`);
       return;
@@ -139,24 +172,9 @@ export async function openPresetEditor(
         deps.presetService.rename(original, newName);
       }
     }
-    const { agents, categories } = rowsToModelSettings(message.rows);
-    const preset: Preset = {
-      name: newName,
-      ...(message.description !== undefined && message.description !== ""
-        ? { description: message.description }
-        : {}),
-      createdAt,
-      appliedAt,
-      defaults,
-      agents,
-      categories,
-    };
-    deps.presetService.save(preset);
-    void ctx.workspaceState.update(presetDraftKey(name), undefined);
-    if (message.apply) {
-      deps.presetService.apply(newName);
-    }
-    deps.refreshAll();
+    // Identity must track the on-disk name BEFORE save/apply can throw, or a
+    // partial failure leaves this panel keyed under the old name and later
+    // reveals open a duplicate editor.
     currentName = newName;
     if (newName !== panelKey) {
       // Re-key so a later editPreset(newName) reuses this panel instead of opening a duplicate.
@@ -165,6 +183,31 @@ export async function openPresetEditor(
       panelKey = newName;
     }
     panel.title = `编辑模板: ${newName}`;
+    const { agents, categories } = rowsToModelSettings(message.rows);
+    const preset: Preset = {
+      name: newName,
+      ...(message.description !== undefined && message.description !== "" ? { description: message.description } : {}),
+      createdAt,
+      appliedAt,
+      defaults,
+      agents,
+      categories,
+    };
+    deps.presetService.save(preset);
+    void ctx.workspaceState.update(presetDraftKey(name), undefined);
+    dirtySaved = false;
+    if (message.apply) {
+      try {
+        deps.presetService.apply(newName);
+      } catch (error) {
+        const msg = errorMessage(error);
+        deps.log(`presetEditor: 模板已保存为 ${newName}，但应用失败: ${msg}`);
+        reply(action, false, `模板已保存${newName !== original ? `为「${newName}」` : ""}，但应用失败：${msg}`);
+        deps.refreshAll();
+        return;
+      }
+    }
+    deps.refreshAll();
     reply(action, true);
   };
 
@@ -172,17 +215,29 @@ export async function openPresetEditor(
     const message = parseMessage(raw);
     if (message === undefined) {
       const preview = JSON.stringify(raw) ?? String(raw);
-      console.warn(`[presetEditor] 忽略无法识别的 webview 消息: ${preview}`);
       deps.log(`presetEditor: 忽略无法识别的 webview 消息: ${preview}`);
+      // Backstop: a save-typed message that failed validation must still get a
+      // reply, or the webview stays busy forever (awaitingResult never clears).
+      if (isSaveTyped(raw)) {
+        reply(saveActionOf(raw), false, "保存请求格式无法识别");
+      }
       return;
     }
     switch (message.kind) {
       case "ready":
-        sendInit();
-        resolveReady();
+        try {
+          sendInit();
+          resolveReady();
+        } catch (error) {
+          const msg = errorMessage(error);
+          deps.log(`presetEditor: 初始化数据装载失败: ${msg}`);
+          void panel.webview.postMessage({ type: "initFailed", payload: { error: msg } });
+          rejectReady(new Error(msg));
+        }
         break;
       case "dirty":
-        if (message.dirty && lastInit) {
+        if (message.dirty && lastInit && !dirtySaved) {
+          dirtySaved = true;
           void ctx.workspaceState.update(presetDraftKey(name), lastInit);
         }
         break;
@@ -201,30 +256,23 @@ export async function openPresetEditor(
     }
   });
 
-    panel.onDidDispose(() => {
-      listener.dispose();
-      openPanels.delete(panelKey);
-      resolveReady(); // unblock a caller still awaiting the ready handshake
-    });
+  panel.onDidDispose(() => {
+    listener.dispose();
+    openPanels.delete(panelKey);
+    resolveReady(); // unblock a caller still awaiting the ready handshake
+  });
 
   panel.webview.html = buildHtml(panel, html, distWebviewUri);
   await ready;
 }
 
-function buildHtml(
-  panel: vscode.WebviewPanel,
-  html: string,
-  distWebviewUri: vscode.Uri,
-): string {
+function buildHtml(panel: vscode.WebviewPanel, html: string, distWebviewUri: vscode.Uri): string {
   const nonce = crypto.randomBytes(16).toString("hex");
   const jsUri = panel.webview.asWebviewUri(vscode.Uri.joinPath(distWebviewUri, "index.js"));
   const cssUri = panel.webview.asWebviewUri(vscode.Uri.joinPath(distWebviewUri, "main.css"));
   // CSP: no remote origins, no inline scripts; inline styles allowed for VSCode CSS variables.
   const csp = `default-src 'none'; style-src ${panel.webview.cspSource} 'unsafe-inline'; script-src ${panel.webview.cspSource};`;
-  let out = html.replace(
-    /(<script[^>]*?)\ssrc=["'][^"']*\/index\.js["']/i,
-    `$1 src="${jsUri}" nonce="${nonce}"`,
-  );
+  let out = html.replace(/(<script[^>]*?)\ssrc=["'][^"']*\/index\.js["']/i, `$1 src="${jsUri}" nonce="${nonce}"`);
   out = out.replace(/(<link[^>]*?)\shref=["'][^"']*\/main\.css["']/i, `$1 href="${cssUri}"`);
   const meta = `<meta http-equiv="Content-Security-Policy" content="${csp}">`;
   if (/<head[^>]*>/i.test(out)) {
@@ -257,11 +305,7 @@ function unionRows(
   for (const section of sections) {
     const live = assignments[section.key];
     const stored = preset ? preset[section.key] : {};
-    const keys = new Set<string>([
-      ...section.known,
-      ...Object.keys(live),
-      ...Object.keys(stored),
-    ]);
+    const keys = new Set<string>([...section.known, ...Object.keys(live), ...Object.keys(stored)]);
     const extras = [...keys].filter((k) => !section.known.includes(k)).sort();
     for (const name of [...section.known, ...extras]) {
       const setting = stored[name];
@@ -269,7 +313,7 @@ function unionRows(
         section: section.key,
         name,
         model: setting ? setting.model : null,
-        variant: setting ? setting.variant ?? null : null,
+        variant: setting ? (setting.variant ?? null) : null,
       });
     }
   }
@@ -297,11 +341,13 @@ interface SavePayload {
 }
 
 type ParsedMessage =
-  | { kind: "ready" }
-  | { kind: "dirty"; dirty: boolean }
-  | { kind: "cancel" }
-  | { kind: "save"; payload: SavePayload };
+  { kind: "ready" } | { kind: "dirty"; dirty: boolean } | { kind: "cancel" } | { kind: "save"; payload: SavePayload };
 
+/**
+ * Validate an incoming webview message against the protocol shape. Returns
+ * undefined for anything unrecognized. Module-private — the runtime entry point
+ * is the `onDidReceiveMessage` listener.
+ */
 function parseMessage(raw: unknown): ParsedMessage | undefined {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
     return undefined;
@@ -321,6 +367,16 @@ function parseMessage(raw: unknown): ParsedMessage | undefined {
     default:
       return undefined;
   }
+}
+
+function isSaveTyped(raw: unknown): raw is { apply?: unknown } {
+  return (
+    typeof raw === "object" && raw !== null && !Array.isArray(raw) && (raw as Record<string, unknown>).type === "save"
+  );
+}
+
+function saveActionOf(raw: { apply?: unknown }): "save" | "apply" {
+  return raw.apply === true ? "apply" : "save";
 }
 
 function parseSavePayload(raw: unknown): SavePayload | undefined {
@@ -373,8 +429,13 @@ function parseRows(raw: unknown): PresetRow[] | undefined {
   return rows;
 }
 
-function isVariantOrNull(value: unknown): value is Variant | null {
-  return value === null || (typeof value === "string" && (VARIANTS as readonly string[]).includes(value));
+/**
+ * PresetRow.variant is deliberately wider than the classic VARIANTS five —
+ * omo accepts harness-native tokens like "off"/"minimal", so any non-empty
+ * bounded string passes (length cap mirrors the name caps in parseRows).
+ */
+function isVariantOrNull(value: unknown): value is string | null {
+  return value === null || (typeof value === "string" && value.length > 0 && value.length <= 64);
 }
 
 function isValidInitPayload(raw: unknown): raw is WebviewInitPayload {
@@ -386,11 +447,5 @@ function isValidInitPayload(raw: unknown): raw is WebviewInitPayload {
     return false;
   }
   const preset = p.preset as Record<string, unknown>;
-  return (
-    typeof preset.name === "string" && parseRows(preset.rows) !== undefined && Array.isArray(p.models)
-  );
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  return typeof preset.name === "string" && parseRows(preset.rows) !== undefined && Array.isArray(p.models);
 }

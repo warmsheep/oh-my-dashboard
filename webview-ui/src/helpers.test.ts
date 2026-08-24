@@ -1,14 +1,18 @@
 import type { PresetRow } from "@shared/protocol";
 import { describe, expect, it } from "vitest";
+
 import {
-  type FormState,
+  countConfigured,
   groupModelsByProvider,
   isDirty,
-  type ModelOption,
+  isDirtyRisingEdge,
+  isKnownVariant,
   mergeRows,
   setAllModels,
   variantFromLabel,
   variantLabel,
+  type FormState,
+  type ModelOption,
 } from "./helpers";
 
 const row = (
@@ -34,15 +38,12 @@ const form = (over: Partial<FormState> = {}): FormState => ({
 
 describe("setAllModels", () => {
   it("sets the model on every row that already has a model configured", () => {
-    const rows = [
-      row("agents", "oracle", "old/a"),
-      row("categories", "quick", "old/b"),
-    ];
+    const rows = [row("agents", "oracle", "old/a"), row("categories", "quick", "old/b")];
     const next = setAllModels(rows, "new/x");
     expect(next.map((r) => r.model)).toEqual(["new/x", "new/x"]);
   });
 
-  it("fills placeholder rows too: “全部模型设为” covers rows the preset never configured (e.g. newly added agents)", () => {
+  it('fills placeholder rows too: "全部模型设为" covers rows the preset never configured (e.g. newly added agents)', () => {
     const rows = [
       row("agents", "oracle", null),
       row("agents", "sisyphus-junior", null),
@@ -79,18 +80,8 @@ describe("mergeRows", () => {
       row("agents", "alpha", null),
       row("agents", "momus", "m/3"),
     ];
-    const next = mergeRows(
-      ["hephaestus", "oracle", "momus"],
-      current,
-      "agents",
-    );
-    expect(next.map((r) => r.name)).toEqual([
-      "hephaestus",
-      "oracle",
-      "momus",
-      "alpha",
-      "zeta",
-    ]);
+    const next = mergeRows(["hephaestus", "oracle", "momus"], current, "agents");
+    expect(next.map((r) => r.name)).toEqual(["hephaestus", "oracle", "momus", "alpha", "zeta"]);
   });
 
   it("keeps the existing model/variant values of rows present in current", () => {
@@ -101,17 +92,11 @@ describe("mergeRows", () => {
 
   it("creates placeholder rows (model/variant null) for known names missing from current", () => {
     const next = mergeRows(["oracle", "metis"], [], "agents");
-    expect(next).toEqual([
-      row("agents", "oracle", null),
-      row("agents", "metis", null),
-    ]);
+    expect(next).toEqual([row("agents", "oracle", null), row("agents", "metis", null)]);
   });
 
   it("only merges rows of the requested section and tags placeholders with that section", () => {
-    const current = [
-      row("categories", "quick", "m/1"),
-      row("agents", "oracle", "m/2"),
-    ];
+    const current = [row("categories", "quick", "m/1"), row("agents", "oracle", "m/2")];
     const next = mergeRows(["quick"], current, "categories");
     expect(next).toEqual([row("categories", "quick", "m/1")]);
   });
@@ -133,9 +118,7 @@ describe("isDirty", () => {
       description: "d",
       rows: [row("agents", "oracle", "m/1", "high")],
     });
-    expect(isDirty(state, { ...state, rows: [{ ...state.rows[0] }] })).toBe(
-      false,
-    );
+    expect(isDirty(state, { ...state, rows: [{ ...state.rows[0] }] })).toBe(false);
   });
 
   it("detects a name change", () => {
@@ -143,39 +126,19 @@ describe("isDirty", () => {
   });
 
   it("detects a description change", () => {
-    expect(isDirty(form({ description: "" }), form({ description: "x" }))).toBe(
-      true,
-    );
+    expect(isDirty(form({ description: "" }), form({ description: "x" }))).toBe(true);
   });
 
   it("detects deep row changes: model, variant and name", () => {
     const rows = [row("agents", "oracle", "m/1", "low")];
-    expect(
-      isDirty(
-        form({ rows }),
-        form({ rows: [row("agents", "oracle", "m/2", "low")] }),
-      ),
-    ).toBe(true);
-    expect(
-      isDirty(
-        form({ rows }),
-        form({ rows: [row("agents", "oracle", "m/1", "max")] }),
-      ),
-    ).toBe(true);
-    expect(
-      isDirty(
-        form({ rows }),
-        form({ rows: [row("agents", "renamed", "m/1", "low")] }),
-      ),
-    ).toBe(true);
+    expect(isDirty(form({ rows }), form({ rows: [row("agents", "oracle", "m/2", "low")] }))).toBe(true);
+    expect(isDirty(form({ rows }), form({ rows: [row("agents", "oracle", "m/1", "max")] }))).toBe(true);
+    expect(isDirty(form({ rows }), form({ rows: [row("agents", "renamed", "m/1", "low")] }))).toBe(true);
   });
 
   it("treats null vs value model/variant as different", () => {
     expect(
-      isDirty(
-        form({ rows: [row("agents", "oracle", null)] }),
-        form({ rows: [row("agents", "oracle", "m/1", null)] }),
-      ),
+      isDirty(form({ rows: [row("agents", "oracle", null)] }), form({ rows: [row("agents", "oracle", "m/1", null)] })),
     ).toBe(true);
   });
 
@@ -225,6 +188,42 @@ describe("variantLabel ↔ variantFromLabel ('' ↔ null mapping)", () => {
   });
 });
 
+describe("isDirtyRisingEdge (host is notified only on false→true)", () => {
+  it("fires only on the false→true transition", () => {
+    expect(isDirtyRisingEdge(true, false)).toBe(true);
+  });
+
+  it("stays silent while dirty stays true (no per-keystroke messages)", () => {
+    expect(isDirtyRisingEdge(true, true)).toBe(false);
+  });
+
+  it("stays silent on falling and steady-false edges (host ignores dirty:false)", () => {
+    expect(isDirtyRisingEdge(false, true)).toBe(false);
+    expect(isDirtyRisingEdge(false, false)).toBe(false);
+  });
+});
+
+describe("isKnownVariant (classic five membership, wide-string safe)", () => {
+  it("accepts the classic five and rejects harness-native tokens", () => {
+    for (const v of ["low", "medium", "high", "xhigh", "max"]) {
+      expect(isKnownVariant(v)).toBe(true);
+    }
+    expect(isKnownVariant("off")).toBe(false);
+    expect(isKnownVariant("minimal")).toBe(false);
+  });
+});
+
+describe("countConfigured", () => {
+  it("counts only rows with a non-null model: 0 / partial / all", () => {
+    expect(countConfigured([])).toBe(0);
+    expect(countConfigured([row("agents", "oracle", null), row("categories", "quick", null)])).toBe(0);
+    expect(
+      countConfigured([row("agents", "oracle", "a/1"), row("agents", "momus", null), row("categories", "deep", "b/2")]),
+    ).toBe(2);
+    expect(countConfigured([row("agents", "oracle", "a/1"), row("categories", "quick", "b/2", "high")])).toBe(2);
+  });
+});
+
 describe("groupModelsByProvider", () => {
   it("groups models by provider preserving first-appearance order of providers", () => {
     const groups = groupModelsByProvider([
@@ -234,10 +233,7 @@ describe("groupModelsByProvider", () => {
       model("google/gemini-2.5-pro", "google", "Gemini 2.5 Pro"),
     ]);
     expect([...groups.keys()]).toEqual(["zhipu", "anthropic", "google"]);
-    expect(groups.get("zhipu")?.map((m) => m.id)).toEqual([
-      "zhipu/glm-4.7",
-      "zhipu/glm-4.5-air",
-    ]);
+    expect(groups.get("zhipu")?.map((m) => m.id)).toEqual(["zhipu/glm-4.7", "zhipu/glm-4.5-air"]);
     expect(groups.get("anthropic")?.[0].label).toBe("Claude Sonnet 4.5");
   });
 

@@ -1,28 +1,21 @@
-import type {
-  ExtToWebview,
-  PresetRow,
-  WebviewInitPayload,
-} from "@shared/protocol";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { ExtToWebview, PresetRow, WebviewInitPayload } from "@shared/protocol";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+
 import { SECTIONS, VARIANT_ORDER } from "./constants";
 import {
   countConfigured,
-  type FormState,
   groupModelsByProvider,
   isDirty,
-  type ModelOption,
+  isDirtyRisingEdge,
+  isKnownVariant,
   mergeRows,
   setAllModels,
   variantFromLabel,
   variantLabel,
+  type FormState,
+  type ModelOption,
 } from "./helpers";
-import {
-  clearDraft,
-  hasVSCodeApi,
-  loadDraft,
-  postToHost,
-  saveDraft,
-} from "./vscode";
+import { clearDraft, hasVSCodeApi, loadDraft, postToHost, saveDraft } from "./vscode";
 
 const DEV_INIT_PAYLOAD: WebviewInitPayload = {
   preset: {
@@ -123,20 +116,18 @@ function toFormState(payload: WebviewInitPayload): FormState {
   return {
     name: payload.preset.name,
     description: payload.preset.description ?? "",
-    rows: SECTIONS.flatMap((s) =>
-      mergeRows(s.known, payload.preset.rows, s.key),
-    ),
+    rows: SECTIONS.flatMap((s) => mergeRows(s.known, payload.preset.rows, s.key)),
   };
 }
 
 function ModelSelect({
-  models,
+  groups,
   value,
   disabled,
   ariaLabel,
   onChange,
 }: {
-  models: readonly ModelOption[];
+  groups: Map<string, ModelOption[]>;
   value: string | null;
   disabled: boolean;
   ariaLabel: string;
@@ -151,7 +142,7 @@ function ModelSelect({
       onChange={(e) => onChange(e.target.value || null)}
     >
       <option value="">（未设置）</option>
-      {[...groupModelsByProvider(models)].map(([provider, opts]) => (
+      {[...groups].map(([provider, opts]) => (
         <optgroup key={provider} label={provider}>
           {opts.map((m) => (
             <option key={m.id} value={m.id}>
@@ -164,20 +155,16 @@ function ModelSelect({
   );
 }
 
-function MatrixRow({
+const MatrixRow = memo(function MatrixRow({
   row,
-  models,
+  groups,
   disabled,
   onUpdate,
 }: {
   row: PresetRow;
-  models: readonly ModelOption[];
+  groups: Map<string, ModelOption[]>;
   disabled: boolean;
-  onUpdate: (
-    section: PresetRow["section"],
-    name: string,
-    patch: Partial<Pick<PresetRow, "model" | "variant">>,
-  ) => void;
+  onUpdate: (section: PresetRow["section"], name: string, patch: Partial<Pick<PresetRow, "model" | "variant">>) => void;
 }) {
   return (
     <div className={row.model ? "row" : "row unset"}>
@@ -185,7 +172,7 @@ function MatrixRow({
         {row.name}
       </span>
       <ModelSelect
-        models={models}
+        groups={groups}
         value={row.model}
         disabled={disabled}
         ariaLabel={`${row.name} 模型`}
@@ -208,18 +195,16 @@ function MatrixRow({
             {v}
           </option>
         ))}
-        {row.variant !== null && !VARIANT_ORDER.includes(row.variant) && (
-          <option value={row.variant}>{row.variant}</option>
-        )}
+        {row.variant !== null && !isKnownVariant(row.variant) && <option value={row.variant}>{row.variant}</option>}
       </select>
     </div>
   );
-}
+});
 
 function SectionBlock({
   meta,
   rows,
-  models,
+  groups,
   collapsed,
   disabled,
   onToggle,
@@ -227,24 +212,15 @@ function SectionBlock({
 }: {
   meta: (typeof SECTIONS)[number];
   rows: PresetRow[];
-  models: readonly ModelOption[];
+  groups: Map<string, ModelOption[]>;
   collapsed: boolean;
   disabled: boolean;
   onToggle: () => void;
-  onUpdate: (
-    section: PresetRow["section"],
-    name: string,
-    patch: Partial<Pick<PresetRow, "model" | "variant">>,
-  ) => void;
+  onUpdate: (section: PresetRow["section"], name: string, patch: Partial<Pick<PresetRow, "model" | "variant">>) => void;
 }) {
   return (
     <section className="block">
-      <button
-        type="button"
-        className="block-head"
-        onClick={onToggle}
-        aria-expanded={!collapsed}
-      >
+      <button type="button" className="block-head" onClick={onToggle} aria-expanded={!collapsed}>
         <span className={`chev${collapsed ? "" : " open"}`} aria-hidden="true">
           ▸
         </span>
@@ -264,7 +240,7 @@ function SectionBlock({
               <MatrixRow
                 key={`${r.section}:${r.name}`}
                 row={r}
-                models={models}
+                groups={groups}
                 disabled={disabled}
                 onUpdate={onUpdate}
               />
@@ -283,6 +259,7 @@ export default function App() {
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
   const [batchModel, setBatchModel] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [initError, setInitError] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [confirmingCancel, setConfirmingCancel] = useState(false);
   const [awaitingResult, setAwaitingResult] = useState(false);
@@ -315,37 +292,35 @@ export default function App() {
     setLocked(false);
     setConfirmingCancel(false);
     setError(null);
+    setInitError(null);
   }, []);
 
-  const handleResult = useCallback(
-    (result: { action: "save" | "apply"; ok: boolean; error?: string }) => {
-      setAwaitingResult(false);
-      if (!result.ok) {
-        setError(result.error ?? "操作失败，请重试");
-        return;
-      }
-      const current = formRef.current;
-      if (current) {
-        const normalized: FormState = {
-          name: current.name.trim(),
-          description: current.description.trim(),
-          rows: current.rows,
-        };
-        setForm(normalized);
-        setBaseline(normalized);
-        saveDraft({ origName: origNameRef.current, form: normalized });
-      }
-      setError(null);
-      if (result.action === "apply") {
-        setToast("已保存并应用");
-        setLocked(true);
-        window.setTimeout(() => setLocked(false), 1400);
-      } else {
-        setToast("已保存");
-      }
-    },
-    [],
-  );
+  const handleResult = useCallback((result: { action: "save" | "apply"; ok: boolean; error?: string }) => {
+    setAwaitingResult(false);
+    if (!result.ok) {
+      setError(result.error ?? "操作失败，请重试");
+      return;
+    }
+    const current = formRef.current;
+    if (current) {
+      const normalized: FormState = {
+        name: current.name.trim(),
+        description: current.description.trim(),
+        rows: current.rows,
+      };
+      setForm(normalized);
+      setBaseline(normalized);
+      saveDraft({ origName: origNameRef.current, form: normalized });
+    }
+    setError(null);
+    if (result.action === "apply") {
+      setToast("已保存并应用");
+      setLocked(true);
+      window.setTimeout(() => setLocked(false), 1400);
+    } else {
+      setToast("已保存");
+    }
+  }, []);
 
   const handlersRef = useRef({ init: handleInit, result: handleResult });
   useEffect(() => {
@@ -357,6 +332,7 @@ export default function App() {
       const msg = event.data as ExtToWebview | undefined;
       if (!msg || typeof msg !== "object") return;
       if (msg.type === "init") handlersRef.current.init(msg.payload);
+      else if (msg.type === "initFailed") setInitError(msg.payload.error);
       else if (msg.type === "result") handlersRef.current.result(msg.payload);
       else if (msg.type === "modelsUpdated") {
         setPayload((current) => (current ? { ...current, models: msg.payload.models } : current));
@@ -365,10 +341,7 @@ export default function App() {
     window.addEventListener("message", onMessage);
     postToHost({ type: "ready" });
     if (!hasVSCodeApi()) {
-      const t = window.setTimeout(
-        () => handlersRef.current.init(DEV_INIT_PAYLOAD),
-        60,
-      );
+      const t = window.setTimeout(() => handlersRef.current.init(DEV_INIT_PAYLOAD), 60);
       return () => {
         window.removeEventListener("message", onMessage);
         window.clearTimeout(t);
@@ -377,14 +350,29 @@ export default function App() {
     return () => window.removeEventListener("message", onMessage);
   }, []);
 
-  const dirty = useMemo(
-    () => (form && baseline ? isDirty(baseline, form) : false),
-    [form, baseline],
-  );
+  const dirty = useMemo(() => (form && baseline ? isDirty(baseline, form) : false), [form, baseline]);
+
+  const lastDirtyRef = useRef(false);
+  useEffect(() => {
+    if (isDirtyRisingEdge(dirty, lastDirtyRef.current)) {
+      postToHost({ type: "dirty", payload: true });
+    }
+    lastDirtyRef.current = dirty;
+  }, [dirty]);
 
   useEffect(() => {
-    if (form) postToHost({ type: "dirty", payload: dirty });
-  }, [dirty, form]);
+    if (!awaitingResult) return;
+    const t = window.setTimeout(() => {
+      setAwaitingResult(false);
+      setError("保存无响应，请重试");
+    }, 12_000);
+    return () => window.clearTimeout(t);
+  }, [awaitingResult]);
+
+  const modelsByProvider = useMemo(
+    () => (payload ? groupModelsByProvider(payload.models) : new Map<string, ModelOption[]>()),
+    [payload],
+  );
 
   useEffect(() => {
     if (!toast) return;
@@ -411,16 +399,10 @@ export default function App() {
   }, []);
 
   const updateRow = useCallback(
-    (
-      section: PresetRow["section"],
-      name: string,
-      patch: Partial<Pick<PresetRow, "model" | "variant">>,
-    ) => {
+    (section: PresetRow["section"], name: string, patch: Partial<Pick<PresetRow, "model" | "variant">>) => {
       patchForm((f) => ({
         ...f,
-        rows: f.rows.map((r) =>
-          r.section === section && r.name === name ? { ...r, ...patch } : r,
-        ),
+        rows: f.rows.map((r) => (r.section === section && r.name === name ? { ...r, ...patch } : r)),
       }));
     },
     [patchForm],
@@ -475,6 +457,19 @@ export default function App() {
     postToHost({ type: "cancel" });
   }, []);
 
+  if (initError !== null) {
+    return (
+      <div className="boot">
+        <div className="banner-error" role="alert">
+          <span className="banner-icon" aria-hidden="true">
+            ⛔
+          </span>
+          {initError}
+        </div>
+      </div>
+    );
+  }
+
   if (!payload || !form) {
     return <div className="boot">正在加载…</div>;
   }
@@ -492,9 +487,7 @@ export default function App() {
       <main className="page">
         <header className="page-head">
           <h1>模板矩阵编辑器</h1>
-          <p>
-            为各 Agent 与 Category 指定模型和 variant；未设置的行继承默认配置。
-          </p>
+          <p>为各 Agent 与 Category 指定模型和 variant；未设置的行继承默认配置。</p>
         </header>
 
         {draftRestored && <div className="notice">已恢复上次未保存的草稿</div>}
@@ -524,9 +517,7 @@ export default function App() {
               autoComplete="off"
               spellCheck={false}
               placeholder="例如：日常开发"
-              onChange={(e) =>
-                patchForm((f) => ({ ...f, name: e.target.value }))
-              }
+              onChange={(e) => patchForm((f) => ({ ...f, name: e.target.value }))}
             />
           </div>
           <div className="field">
@@ -538,9 +529,7 @@ export default function App() {
               autoComplete="off"
               spellCheck={false}
               placeholder="可选，一句话说明这个模板的用途"
-              onChange={(e) =>
-                patchForm((f) => ({ ...f, description: e.target.value }))
-              }
+              onChange={(e) => patchForm((f) => ({ ...f, description: e.target.value }))}
             />
           </div>
         </fieldset>
@@ -555,24 +544,17 @@ export default function App() {
             onChange={(e) => applyBatchModel(e.target.value)}
           >
             <option value="">全部模型设为…</option>
-            {[...groupModelsByProvider(payload.models)].map(
-              ([provider, opts]) => (
-                <optgroup key={provider} label={provider}>
-                  {opts.map((m) => (
-                    <option key={m.id} value={m.id}>
-                      {m.label} ({m.id})
-                    </option>
-                  ))}
-                </optgroup>
-              ),
-            )}
+            {[...modelsByProvider].map(([provider, opts]) => (
+              <optgroup key={provider} label={provider}>
+                {opts.map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.label} ({m.id})
+                  </option>
+                ))}
+              </optgroup>
+            ))}
           </select>
-          <button
-            type="button"
-            className="btn secondary"
-            disabled={busy}
-            onClick={clearAllVariants}
-          >
+          <button type="button" className="btn secondary" disabled={busy} onClick={clearAllVariants}>
             清除全部 variant
           </button>
         </div>
@@ -583,7 +565,7 @@ export default function App() {
               key={meta.key}
               meta={meta}
               rows={form.rows.filter((r) => r.section === meta.key)}
-              models={payload.models}
+              groups={modelsByProvider}
               collapsed={collapsed[meta.key] ?? false}
               disabled={busy}
               onToggle={() =>
@@ -602,47 +584,26 @@ export default function App() {
         {confirmingCancel && (
           <div className="confirm" role="alertdialog" aria-label="确认放弃修改">
             <span className="confirm-text">确认放弃修改？</span>
-            <button
-              type="button"
-              className="btn secondary"
-              onClick={discardAndClose}
-            >
+            <button type="button" className="btn secondary" onClick={discardAndClose}>
               放弃
             </button>
-            <button
-              type="button"
-              className="btn primary"
-              onClick={() => setConfirmingCancel(false)}
-            >
+            <button type="button" className="btn primary" onClick={() => setConfirmingCancel(false)}>
               继续编辑
             </button>
           </div>
         )}
         <div className="footer-bar">
-          <span
-            className={`dirty-hint${dirty ? " on" : ""}`}
-            aria-live="polite"
-          >
+          <span className={`dirty-hint${dirty ? " on" : ""}`} aria-live="polite">
             {dirty ? "● 有未保存的修改" : ""}
           </span>
           <div className="actions">
-            <button
-              type="button"
-              className="btn secondary"
-              disabled={busy}
-              onClick={cancel}
-            >
+            <button type="button" className="btn secondary" disabled={busy} onClick={cancel}>
               取消
             </button>
             <button type="submit" className="btn secondary" disabled={busy}>
               保存
             </button>
-            <button
-              type="button"
-              className="btn primary"
-              disabled={busy}
-              onClick={() => save(true)}
-            >
+            <button type="button" className="btn primary" disabled={busy} onClick={() => save(true)}>
               保存并应用
             </button>
           </div>

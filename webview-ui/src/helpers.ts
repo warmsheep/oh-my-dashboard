@@ -1,4 +1,5 @@
 import type { PresetRow, WebviewInitPayload } from "@shared/protocol";
+import { VARIANT_ORDER } from "@shared/protocol";
 
 /** Variant values, derived from the frozen protocol (PresetRow["variant"]). */
 export type Variant = NonNullable<PresetRow["variant"]>;
@@ -18,10 +19,7 @@ export interface FormState {
  * means "inherit the default configuration", and 「全部模型设为…」 only
  * re-targets rows the user has explicitly configured.
  */
-export function setAllModels(
-  rows: readonly PresetRow[],
-  model: string,
-): PresetRow[] {
+export function setAllModels(rows: readonly PresetRow[], model: string): PresetRow[] {
   return rows.map((r) => ({ ...r, model }));
 }
 
@@ -43,14 +41,10 @@ export function mergeRows(
   const seen = new Set<string>();
   for (const name of known) {
     seen.add(name);
-    merged.push(
-      byName.get(name) ?? { section, name, model: null, variant: null },
-    );
+    merged.push(byName.get(name) ?? { section, name, model: null, variant: null });
   }
 
-  const extras = own
-    .filter((r) => !seen.has(r.name))
-    .sort((a, b) => a.name.localeCompare(b.name));
+  const extras = own.filter((r) => !seen.has(r.name)).sort((a, b) => a.name.localeCompare(b.name));
 
   return [...merged, ...extras];
 }
@@ -66,13 +60,22 @@ export function isDirty(initial: FormState, current: FormState): boolean {
   if (initial.rows.length !== current.rows.length) return true;
   return initial.rows.some((r, i) => {
     const c = current.rows[i];
-    return (
-      r.section !== c.section ||
-      r.name !== c.name ||
-      r.model !== c.model ||
-      r.variant !== c.variant
-    );
+    return r.section !== c.section || r.name !== c.name || r.model !== c.model || r.variant !== c.variant;
   });
+}
+
+/**
+ * Dirty-notification edge rule: the host persists a draft marker on the first
+ * dirty message only (its `case "dirty"` treats payload:false as a no-op), so
+ * the webview posts only on the false→true transition — never per keystroke.
+ */
+export function isDirtyRisingEdge(current: boolean, last: boolean): boolean {
+  return current && !last;
+}
+
+/** True when the variant is one of the classic five (VARIANT_ORDER membership). */
+export function isKnownVariant(variant: string): boolean {
+  return (VARIANT_ORDER as readonly string[]).includes(variant);
 }
 
 /** Variant ↔ select value mapping: the empty string represents `null` ('—'). */
@@ -86,9 +89,7 @@ export function variantFromLabel(label: string): Variant | null {
 }
 
 /** Group models by provider, preserving first-appearance order of providers. */
-export function groupModelsByProvider(
-  models: readonly ModelOption[],
-): Map<string, ModelOption[]> {
+export function groupModelsByProvider(models: readonly ModelOption[]): Map<string, ModelOption[]> {
   const groups = new Map<string, ModelOption[]>();
   for (const m of models) {
     const list = groups.get(m.provider);
