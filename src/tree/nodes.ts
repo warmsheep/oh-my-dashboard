@@ -1,5 +1,17 @@
 import * as path from "node:path";
-import type { BackupEntry, DirEntry, DiscoveredConfig, JsoncError, ModelEntry, ModelSetting, PluginEntry, Preset } from "../core/types";
+
+import { CMD } from "../constants";
+import { BACKUP_REASON_LABELS, KNOWN_AGENTS, KNOWN_CATEGORIES } from "../core/types";
+import type {
+  BackupEntry,
+  DirEntry,
+  DiscoveredConfig,
+  JsoncError,
+  ModelEntry,
+  ModelSetting,
+  PluginEntry,
+  Preset,
+} from "../core/types";
 
 export type NodeKind =
   | "configRoot"
@@ -42,39 +54,6 @@ export interface BaseNode {
 /** Description badge marking the currently applied preset (also used to pick its pin icon). */
 export const CURRENT_PRESET_BADGE = "（当前）";
 
-// Mirrors of KNOWN_AGENTS / KNOWN_CATEGORIES from src/core/types.ts. The tree layer may only
-// import types from src/core, so the canonical ordering lists are duplicated here.
-// KEEP IN SYNC with src/core/types.ts.
-const KNOWN_AGENT_ORDER: readonly string[] = [
-  "hephaestus",
-  "oracle",
-  "librarian",
-  "explore",
-  "multimodal-looker",
-  "prometheus",
-  "metis",
-  "momus",
-  "atlas",
-  "sisyphus",
-  "sisyphus-junior",
-];
-
-const KNOWN_CATEGORY_ORDER: readonly string[] = [
-  "visual-engineering",
-  "ultrabrain",
-  "deep",
-  "artistry",
-  "quick",
-  "unspecified-low",
-  "unspecified-high",
-  "writing",
-  "architect",
-  "backend",
-  "frontend",
-  "qa",
-  "product",
-];
-
 export interface Assignments {
   agents: Record<string, ModelSetting>;
   categories: Record<string, ModelSetting>;
@@ -85,7 +64,12 @@ export interface Assignments {
  * files, so an empty path means "missing" (the extension glue clears paths of non-existent
  * files when assembling the snapshot).
  */
-function configFileNode(id: string, fileName: string, filePath: string, parseErrors: Map<string, JsoncError[]>): BaseNode {
+function configFileNode(
+  id: string,
+  fileName: string,
+  filePath: string,
+  parseErrors: Map<string, JsoncError[]>,
+): BaseNode {
   const errors = filePath ? (parseErrors.get(filePath) ?? []) : [];
   const hasErrors = errors.length > 0;
   const node: BaseNode = {
@@ -95,7 +79,7 @@ function configFileNode(id: string, fileName: string, filePath: string, parseErr
     tooltip: filePath || undefined,
     contextValue: "configFile",
     collapsibleState: "none",
-    command: "opencode.openConfigFile",
+    command: CMD.openConfigFile,
     filePath: filePath || undefined,
   };
   if (hasErrors) {
@@ -134,8 +118,8 @@ function assignmentNodes(assignments: Assignments): BaseNode[] {
   });
 
   return [
-    ...ordered(assignments.agents, KNOWN_AGENT_ORDER).map((name) => toNode("agent", "🤖", name, assignments.agents[name])),
-    ...ordered(assignments.categories, KNOWN_CATEGORY_ORDER).map((name) =>
+    ...ordered(assignments.agents, KNOWN_AGENTS).map((name) => toNode("agent", "🤖", name, assignments.agents[name])),
+    ...ordered(assignments.categories, KNOWN_CATEGORIES).map((name) =>
       toNode("category", "📦", name, assignments.categories[name]),
     ),
   ];
@@ -152,7 +136,7 @@ function agentsMdNodes(d: DiscoveredConfig): BaseNode[] {
       tooltip: entry.path,
       contextValue: "agentsMd",
       collapsibleState: "none" as const,
-      command: "opencode.openConfigFile",
+      command: CMD.openConfigFile,
       filePath: entry.path,
     };
   });
@@ -177,7 +161,7 @@ function dirEntryNodes(entries: DirEntry[]): BaseNode[] {
           tooltip: entry.path,
           contextValue: "fileEntry",
           collapsibleState: "none" as const,
-          command: "opencode.openConfigFile",
+          command: CMD.openConfigFile,
           filePath: entry.path,
         },
   );
@@ -203,14 +187,16 @@ function dirSummaryNodes(d: DiscoveredConfig): BaseNode[] {
     contextValue: "dirSummary",
     collapsibleState: root.tree.length > 0 ? ("collapsed" as const) : ("none" as const),
     children: dirEntryNodes(root.tree),
-    command: "opencode.openConfigFile",
+    command: CMD.openConfigFile,
     filePath: root.dir,
   }));
 }
 
 function pluginDescription(entry: PluginEntry): string {
   if (entry.kind === "npm") {
-    if (!entry.installed) return "未安装";
+    if (!entry.installed) {
+      return "未安装";
+    }
     return entry.version ?? "已安装";
   }
   return entry.installed ? "本地路径" : "缺失";
@@ -256,22 +242,19 @@ function toDate(iso: string): Date | null {
 
 function formatBackupStamp(iso: string): string {
   const dt = toDate(iso);
-  if (!dt) return iso;
+  if (!dt) {
+    return iso;
+  }
   return `${dt.getUTCFullYear()}-${pad2(dt.getUTCMonth() + 1)}-${pad2(dt.getUTCDate())} ${pad2(dt.getUTCHours())}:${pad2(dt.getUTCMinutes())}`;
 }
 
 function formatAppliedStamp(iso: string): string {
   const dt = toDate(iso);
-  if (!dt) return iso;
+  if (!dt) {
+    return iso;
+  }
   return `${pad2(dt.getUTCMonth() + 1)}-${pad2(dt.getUTCDate())}`;
 }
-
-const BACKUP_REASON_LABELS: Record<string, string> = {
-  manual: "手动",
-  "pre-apply": "应用前",
-  "pre-save": "保存前",
-  "pre-restore": "恢复前",
-};
 
 const MODEL_SOURCE_LABELS: Record<ModelEntry["source"], string> = {
   opencode: "opencode.json",
@@ -317,7 +300,7 @@ function modelNodes(models: ModelEntry[]): BaseNode[] {
  *   agent/category children (KNOWN order first, extras alphabetical); when absent it stays a leaf.
  *   A config file counts as missing when its path is empty (see existence convention above).
  * @param plugins Optional plugin entries from opencode.json's plugin array; when absent or
- *   empty the 插件 section shows a single guide row.
+ *   empty the plugins section shows a single guide row.
  */
 export function buildConfigTree(
   d: DiscoveredConfig,
@@ -336,10 +319,11 @@ export function buildConfigTree(
     agentConfigPath,
     parseErrors,
   );
-  const assignmentChildren = assignments ? assignmentNodes(assignments) : [];
   if (assignments) {
-    ohMy.children = [...(ohMy.children ?? []), ...assignmentChildren];
-    if (ohMy.children.length > 0) ohMy.collapsibleState = "collapsed";
+    ohMy.children = [...(ohMy.children ?? []), ...assignmentNodes(assignments)];
+    if (ohMy.children.length > 0) {
+      ohMy.collapsibleState = "collapsed";
+    }
   }
 
   const configChildren: BaseNode[] = [
@@ -355,7 +339,7 @@ export function buildConfigTree(
       label: "配置不存在，点击从模板创建",
       contextValue: "guide",
       collapsibleState: "none",
-      command: "opencode.createConfig",
+      command: CMD.createConfig,
     });
   }
 
@@ -366,7 +350,7 @@ export function buildConfigTree(
       label: "➕ 从当前配置捕获…",
       contextValue: "captureAction",
       collapsibleState: "none",
-      command: "opencode.capturePreset",
+      command: CMD.capturePreset,
     },
     ...[...presets]
       .sort((a, b) => a.name.localeCompare(b.name))
@@ -386,7 +370,7 @@ export function buildConfigTree(
           tooltip,
           contextValue: "preset",
           collapsibleState: "none",
-          command: "opencode.editPreset",
+          command: CMD.editPreset,
         };
       }),
   ];
@@ -429,16 +413,45 @@ export function buildConfigTree(
       label: "➕ 添加模型…",
       contextValue: "modelAddAction",
       collapsibleState: "none",
-      command: "opencode.addModel",
+      command: CMD.addModel,
     },
     ...modelNodes(models ?? []),
   ];
 
   return [
-    { kind: "configRoot", id: "root:config", label: "配置", tooltip: d.configDir, contextValue: "configRoot", collapsibleState: "expanded", children: configChildren },
-    { kind: "presetRoot", id: "root:presets", label: "模板", contextValue: "presetRoot", collapsibleState: "expanded", children: presetChildren },
-    { kind: "backupRoot", id: "root:backups", label: "备份", contextValue: "backupRoot", collapsibleState: "expanded", children: backupChildren },
-    { kind: "modelRoot", id: "root:models", label: "模型", contextValue: "modelRoot", collapsibleState: "expanded", children: modelChildren },
+    {
+      kind: "configRoot",
+      id: "root:config",
+      label: "配置",
+      tooltip: d.configDir,
+      contextValue: "configRoot",
+      collapsibleState: "expanded",
+      children: configChildren,
+    },
+    {
+      kind: "presetRoot",
+      id: "root:presets",
+      label: "模板",
+      contextValue: "presetRoot",
+      collapsibleState: "expanded",
+      children: presetChildren,
+    },
+    {
+      kind: "backupRoot",
+      id: "root:backups",
+      label: "备份",
+      contextValue: "backupRoot",
+      collapsibleState: "expanded",
+      children: backupChildren,
+    },
+    {
+      kind: "modelRoot",
+      id: "root:models",
+      label: "模型",
+      contextValue: "modelRoot",
+      collapsibleState: "expanded",
+      children: modelChildren,
+    },
     {
       kind: "pluginRoot",
       id: "root:plugins",
@@ -447,7 +460,7 @@ export function buildConfigTree(
       contextValue: "pluginRoot",
       collapsibleState: "expanded",
       children: pluginNodes(plugins ?? []),
-      command: "opencode.openConfigFile",
+      command: CMD.openConfigFile,
       filePath: d.opencodeJson || undefined,
     },
   ];

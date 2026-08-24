@@ -1,11 +1,13 @@
 import * as defaultFs from "node:fs";
 import * as path from "node:path";
+
+import { agentAssignmentEdits } from "./agentAssignment";
+import type { ConfigStore } from "./configStore";
 import * as realEditor from "./jsoncEditor";
 import type { JsoncEdit } from "./jsoncEditor";
+import type * as jsoncEditorModule from "./jsoncEditor";
 import { assertContainedFileName, presetNameError } from "./pathSafety";
 import type { ModelSetting, Preset } from "./types";
-import type { ConfigStore } from "./configStore";
-import type * as jsoncEditorModule from "./jsoncEditor";
 
 export interface JsoncEditorApi {
   parseSafe: typeof jsoncEditorModule.parseSafe;
@@ -32,7 +34,7 @@ export interface ApplyChange {
 }
 
 export interface ApplyResult {
-  preset: import("./types").Preset;
+  preset: Preset;
   changes: ApplyChange[];
 }
 
@@ -60,7 +62,7 @@ export class PresetService {
   private readonly presetsDir: string;
   private readonly configStore: ConfigStore;
   private readonly now: () => Date;
-  private readonly fs: typeof import("node:fs");
+  private readonly fsMod: typeof import("node:fs");
   private readonly editor: JsoncEditorApi;
   private readonly platform: NodeJS.Platform;
 
@@ -68,14 +70,13 @@ export class PresetService {
     this.presetsDir = opts.presetsDir;
     this.configStore = opts.configStore;
     this.now = opts.now ?? (() => new Date());
-    this.fs = opts.fs ?? defaultFs;
+    this.fsMod = opts.fs ?? defaultFs;
     this.platform = opts.platform ?? process.platform;
-    this.editor =
-      opts.editor ?? {
-        parseSafe: realEditor.parseSafe,
-        getValue: realEditor.getValue,
-        applyEdits: realEditor.applyEdits,
-      };
+    this.editor = opts.editor ?? {
+      parseSafe: realEditor.parseSafe,
+      getValue: realEditor.getValue,
+      applyEdits: realEditor.applyEdits,
+    };
   }
 
   private presetPath(name: string): string {
@@ -85,18 +86,29 @@ export class PresetService {
     return path.join(this.presetsDir, `${name}.json`);
   }
 
-  list(): import("./types").Preset[] {
-    if (!this.fs.existsSync(this.presetsDir)) {
+  list(): Preset[] {
+    let entries: string[];
+    try {
+      if (!this.fsMod.existsSync(this.presetsDir)) {
+        return [];
+      }
+      entries = this.fsMod.readdirSync(this.presetsDir);
+    } catch {
+      // The presets path existing as a FILE (ENOTDIR) or an unreadable dir (EACCES) must
+      // degrade this section to empty — a throw here would take the whole tree down.
       return [];
     }
     const presets: Preset[] = [];
-    for (const entry of this.fs.readdirSync(this.presetsDir)) {
+    for (const entry of entries) {
       if (!entry.endsWith(".json")) {
         continue;
       }
       try {
-        const text = this.fs.readFileSync(this.presetPath(entry.slice(0, -".json".length)), "utf8");
-        presets.push(JSON.parse(text) as Preset);
+        // The FILENAME (sans .json) is the preset identity — load/apply/rename/delete all
+        // address by filename, so a mismatched content `name` must never leak into list().
+        const name = entry.slice(0, -".json".length);
+        const text = this.fsMod.readFileSync(this.presetPath(name), "utf8");
+        presets.push({ ...JSON.parse(text), name } as Preset);
       } catch {
         // Invalid entries are skipped silently.
       }
@@ -104,34 +116,34 @@ export class PresetService {
     return presets.sort(byName);
   }
 
-  load(name: string): import("./types").Preset {
+  load(name: string): Preset {
     const file = this.presetPath(name);
-    if (!this.fs.existsSync(file)) {
+    if (!this.fsMod.existsSync(file)) {
       throw new Error("PRESET_NOT_FOUND");
     }
     try {
-      return JSON.parse(this.fs.readFileSync(file, "utf8")) as Preset;
+      return JSON.parse(this.fsMod.readFileSync(file, "utf8")) as Preset;
     } catch {
       throw new Error("PRESET_INVALID");
     }
   }
 
   exists(name: string): boolean {
-    return this.fs.existsSync(this.presetPath(name));
+    return this.fsMod.existsSync(this.presetPath(name));
   }
 
-  save(preset: import("./types").Preset): void {
+  save(preset: Preset): void {
     // Strict portability validation applies only when CREATING a new preset file;
     // re-saving an existing one (e.g. apply() stamping appliedAt on a preset named
     // under older, laxer rules) must keep working on the platform where it exists.
     if (!this.exists(preset.name) && presetNameError(preset.name) !== undefined) {
       throw new Error("INVALID_PRESET_NAME");
     }
-    this.fs.mkdirSync(this.presetsDir, { recursive: true });
+    this.fsMod.mkdirSync(this.presetsDir, { recursive: true });
     this.configStore.writeAtomic(this.presetPath(preset.name), JSON.stringify(preset, null, 2) + "\n");
   }
 
-  capture(name: string, description?: string): import("./types").Preset {
+  capture(name: string, description?: string): Preset {
     const assignments = this.configStore.ohMyAssignments();
     const preset: Preset = {
       name,
@@ -148,45 +160,50 @@ export class PresetService {
 
   rename(oldName: string, newName: string): void {
     const preset = this.load(oldName);
-    this.save({ ...preset, name: newName });
     const oldPath = this.presetPath(oldName);
     const newPath = this.presetPath(newName);
     // Case-insensitive filesystems (NTFS, default APFS, and ci mounts on Linux): a
     // case-only rename means both paths are the same file — rmSync would delete the
     // preset we just wrote. dev+ino identity is ground truth; the platform fold is
     // the fallback for filesystems that don't report stable inode numbers.
-    let sameFile =
-      this.platform === "linux" ? oldPath === newPath : oldPath.toLowerCase() === newPath.toLowerCase();
+    let sameFile = this.platform === "linux" ? oldPath === newPath : oldPath.toLowerCase() === newPath.toLowerCase();
     try {
-      const a = this.fs.statSync(oldPath);
-      const b = this.fs.statSync(newPath);
+      const a = this.fsMod.statSync(oldPath);
+      const b = this.fsMod.statSync(newPath);
       if (a.dev === b.dev && a.ino === b.ino) {
         sameFile = true;
       }
     } catch {
       // keep the platform heuristic
     }
+    // Overwrite guard: a genuinely different target must not silently replace an
+    // existing preset (the UI pre-checks this, but the service holds the invariant
+    // itself for the race window between check and save).
+    if (!sameFile && this.fsMod.existsSync(newPath)) {
+      throw new Error("PRESET_ALREADY_EXISTS");
+    }
+    this.save({ ...preset, name: newName });
     if (!sameFile) {
       // force: an external delete between load and here must not fail the rename —
       // the new preset is already saved and on-disk state is correct.
-      this.fs.rmSync(oldPath, { force: true });
+      this.fsMod.rmSync(oldPath, { force: true });
     }
   }
 
   remove(name: string): void {
     const file = this.presetPath(name);
-    if (!this.fs.existsSync(file)) {
+    if (!this.fsMod.existsSync(file)) {
       throw new Error("PRESET_NOT_FOUND");
     }
-    this.fs.rmSync(file);
+    this.fsMod.rmSync(file);
   }
 
   exportTo(name: string, targetFile: string): void {
     const source = this.presetPath(name);
-    if (!this.fs.existsSync(source)) {
+    if (!this.fsMod.existsSync(source)) {
       throw new Error("PRESET_NOT_FOUND");
     }
-    this.configStore.writeAtomic(targetFile, this.fs.readFileSync(source, "utf8"));
+    this.configStore.writeAtomic(targetFile, this.fsMod.readFileSync(source, "utf8"));
   }
 
   apply(name: string): ApplyResult {
@@ -195,23 +212,22 @@ export class PresetService {
     const target = discovered.agentConfig;
     const changes: ApplyChange[] = [];
 
-    // One edit batch for the agent config: for every listed key, set model, set-or-remove the
-    // target's reasoning key, and drop the deprecated sibling key plus any `models` chain —
-    // otherwise the preset's single-model assignment would silently lose to them. Keys NOT
-    // present in the preset are never touched.
+    // One edit batch for the agent config, built by the shared agentAssignmentEdits()
+    // helper (same rules as ConfigStore.setAgentModel): keys NOT present in the
+    // preset are never touched.
     const edits: JsoncEdit[] = [];
-    const otherReasoningKey = target.reasoningKey === "reasoning" ? "variant" : "reasoning";
     const collect = (section: "agents" | "categories", settings: Record<string, ModelSetting>): void => {
       for (const [key, setting] of Object.entries(settings)) {
-        const base = [...target.sectionPath, section, key];
-        edits.push({ path: [...base, "model"], value: setting.model, op: "set" });
-        if (setting.variant != null) {
-          edits.push({ path: [...base, target.reasoningKey], value: setting.variant, op: "set" });
-        } else {
-          edits.push({ path: [...base, target.reasoningKey], value: undefined, op: "remove" });
-        }
-        edits.push({ path: [...base, otherReasoningKey], value: undefined, op: "remove" });
-        edits.push({ path: [...base, "models"], value: undefined, op: "remove" });
+        edits.push(
+          ...agentAssignmentEdits(
+            target.sectionPath,
+            target.reasoningKey,
+            section,
+            key,
+            setting.model,
+            setting.variant ?? null,
+          ),
+        );
       }
     };
     collect("agents", preset.agents);
@@ -246,7 +262,7 @@ export class PresetService {
 
     const newAgentText = this.editor.applyEdits(agentText.length > 0 ? agentText : "{}", edits);
     if (newAgentText !== agentText) {
-      this.fs.mkdirSync(path.dirname(target.path), { recursive: true });
+      this.fsMod.mkdirSync(path.dirname(target.path), { recursive: true });
       this.configStore.writeAtomic(target.path, newAgentText);
     }
 
@@ -266,9 +282,10 @@ export class PresetService {
     return { preset, changes };
   }
 
-  currentPresetName(): string | null {
+  /** Latest-applied preset name; pass a pre-fetched list to avoid re-listing during one refresh. */
+  currentPresetName(presets?: Preset[]): string | null {
     let best: { name: string; appliedAt: string } | null = null;
-    for (const preset of this.list()) {
+    for (const preset of presets ?? this.list()) {
       if (typeof preset.appliedAt !== "string") {
         continue;
       }

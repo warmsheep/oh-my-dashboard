@@ -1,6 +1,8 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+
 import { describe, expect, it } from "vitest";
+
 import {
   applyEdits,
   getValue,
@@ -155,9 +157,7 @@ describe("applyEdits", () => {
   });
 
   it("treats op:'remove' the same as removeKey", () => {
-    const viaOp = applyEdits(ohMyText, [
-      { path: ["agents", "metis", "variant"], value: undefined, op: "remove" },
-    ]);
+    const viaOp = applyEdits(ohMyText, [{ path: ["agents", "metis", "variant"], value: undefined, op: "remove" }]);
     const viaFn = removeKey(ohMyText, ["agents", "metis", "variant"]);
     expect(viaOp).toBe(viaFn);
     expect(getValue(viaOp, ["agents", "metis", "variant"])).toBeUndefined();
@@ -228,6 +228,62 @@ describe("removeKey", () => {
     }
     expect(caught).toBeInstanceOf(JsoncSyntaxError);
     expect((caught as JsoncSyntaxError).errors.length).toBeGreaterThan(0);
+  });
+});
+
+describe("UTF-8 BOM handling", () => {
+  // readFileSync(path, "utf8") keeps a leading \uFEFF — a file saved as "UTF-8 with BOM"
+  // (old Notepad, PowerShell redirect) must still parse and stay editable.
+  const bomText = `\uFEFF${ohMyText}`;
+
+  it("parseSafe accepts a BOM-prefixed valid file without errors", () => {
+    const result = parseSafe<Record<string, unknown>>(bomText);
+    expect(result.errors).toEqual([]);
+    expect(result.value).not.toBeNull();
+  });
+
+  it("validate accepts a BOM-prefixed valid file (edit paths are not blocked)", () => {
+    expect(validate(bomText)).toEqual([]);
+  });
+
+  it("applyEdits preserves the original BOM and applies the edit", () => {
+    const result = applyEdits(bomText, [{ path: ["agents", "oracle", "variant"], value: "low" }]);
+    expect(result.startsWith("\uFEFF")).toBe(true);
+    expect(getValue<string>(result, ["agents", "oracle", "variant"])).toBe("low");
+    expect(validate(result)).toEqual([]);
+  });
+
+  it("applyEdits does not introduce a BOM when the input had none", () => {
+    const result = applyEdits(ohMyText, [{ path: ["agents", "oracle", "variant"], value: "low" }]);
+    expect(result.startsWith("\uFEFF")).toBe(false);
+  });
+
+  it("still reports real syntax errors in a BOM-prefixed file with offsets shifted past the BOM", () => {
+    const result = parseSafe<unknown>(`\uFEFF${invalidText}`);
+    expect(result.errors.length).toBeGreaterThan(0);
+  });
+
+  it("strips ALL leading BOMs: a double-BOM file (script/PowerShell concatenation) parses clean", () => {
+    const result = parseSafe<Record<string, unknown>>(`\uFEFF\uFEFF${ohMyText}`);
+    expect(result.errors).toEqual([]);
+    expect(result.value).not.toBeNull();
+  });
+
+  it("applyEdits works on a double-BOM file and preserves the full original BOM prefix", () => {
+    const result = applyEdits(`\uFEFF\uFEFF${ohMyText}`, [{ path: ["agents", "oracle", "variant"], value: "low" }]);
+    expect(result.startsWith("\uFEFF\uFEFF")).toBe(true);
+    expect(getValue<string>(result, ["agents", "oracle", "variant"])).toBe("low");
+    expect(validate(result)).toEqual([]);
+  });
+});
+
+describe("user-facing parse-error message", () => {
+  it("reports parser error codes in Chinese (tree labels render the message verbatim)", () => {
+    const errors = validate("{ broken");
+    expect(errors.length).toBeGreaterThan(0);
+    for (const err of errors) {
+      expect(err.message).toMatch(/^语法错误（错误码 \d+）$/);
+    }
   });
 });
 

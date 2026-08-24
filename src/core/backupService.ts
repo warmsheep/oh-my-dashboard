@@ -1,14 +1,27 @@
+import * as defaultFs from "node:fs";
+import type { Dirent } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import * as defaultFs from "node:fs";
+
 import { strFromU8, unzipSync, zipSync } from "fflate";
+
 import { writeFileAtomic } from "./atomicFile";
 import { assertContainedFileName } from "./pathSafety";
 import type { BackupEntry, BackupManifest, BackupReason } from "./types";
 
-/** Zip import caps — a backup is a handful of config files; anything bigger is hostile. */
+/** Zip size caps shared by import AND export so the two directions stay symmetric. */
 const ZIP_MAX_ENTRIES = 20_000;
 const ZIP_MAX_TOTAL_BYTES = 256 * 1024 * 1024;
+/**
+ * A single entry declaring far more original bytes than its compressed size is a bomb.
+ * 1000 sits just under deflate's theoretical 1032:1 ceiling: extreme bomb shapes are
+ * still caught while honest low-entropy files (zero-filled/sparse, ~400-1000:1) that
+ * this extension itself exports survive import. The total-bytes cap and the
+ * declared-size re-verification do the real bomb defense; this is a redundant layer.
+ */
+const ZIP_MAX_RATIO = 1000;
+/** Max directory levels the backup copier descends (source-side cycles are impossible, hostile depth is not). */
+const MAX_COPY_DEPTH = 16;
 
 export interface BackupServiceOptions {
   configDir: string;
@@ -42,18 +55,24 @@ const MANAGED_DIRS = ["command", "skills", "presets"] as const;
 const MANIFEST_FILE = "manifest.json";
 const ALL_REASONS = Object.keys(DEFAULT_RETENTION) as BackupReason[];
 
+/** DOS device names are illegal file names on Windows even with an extension (CON.txt) — same set as pathSafety's preset check. */
+const WINDOWS_RESERVED_SEGMENT = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i;
+
 /**
  * Zip entry names use "/" on every platform; reject anything that could escape the
- * staging dir when joined (absolute, drive letters, backslashes, ".." segments, NUL).
+ * staging dir when joined (absolute, drive letters, backslashes, ".." segments, NUL),
+ * plus statically hostile names: any segment over 255 bytes (ENAMETOOLONG on ext4/NTFS)
+ * and, on win32, DOS device segments (CON.txt etc. — EINVAL/EPERM at write time).
  */
-function assertZipEntryName(name: string): void {
+export function assertZipEntryName(name: string, platform: NodeJS.Platform = process.platform): void {
   const bad =
     name.length === 0 ||
     name.startsWith("/") ||
     name.includes("\\") ||
     name.includes("\0") ||
     /^[A-Za-z]:/.test(name) ||
-    name.split("/").some((seg) => seg === "..");
+    name.split("/").some((seg) => seg === ".." || Buffer.byteLength(seg, "utf8") > 255) ||
+    (platform === "win32" && name.split("/").some((seg) => WINDOWS_RESERVED_SEGMENT.test(seg.split(".")[0] ?? seg)));
   if (bad) {
     throw new Error("BACKUP_IMPORT_INVALID");
   }
@@ -63,22 +82,33 @@ export function isoFs(d: Date): string {
   return d.toISOString().replace(/:/g, "-").replace(/\./g, "-");
 }
 
+/**
+ * Years outside 0-9999 fall outside the ISO-8601 four-digit scheme the dirName relies
+ * on: modern engines render them as extended years ("+100000-…"), older ones throw
+ * RangeError from toISOString. Either way the documented fallback is now().
+ */
+function isoYearOutOfRange(d: Date): boolean {
+  const year = d.getUTCFullYear();
+  return year < 0 || year > 9999;
+}
+
 export class BackupService {
   private readonly configDir: string;
   private readonly backupsDir: string;
   private readonly hostname: string;
   private readonly now: () => Date;
-  private readonly fs: typeof import("node:fs");
+  private readonly fsMod: typeof import("node:fs");
   private readonly retention: Record<BackupReason, number | null>;
   private readonly managedFiles: readonly { label: string; src: string }[];
   private readonly extraDirs: readonly { label: string; src: string }[];
+  private readonly manifestCache = new Map<string, { mtimeMs: number; entry: BackupEntry | null }>();
 
   constructor(opts: BackupServiceOptions) {
     this.configDir = opts.configDir;
     this.backupsDir = path.join(opts.configDir, "backups");
     this.hostname = opts.hostname ?? os.hostname();
     this.now = opts.now ?? (() => new Date());
-    this.fs = opts.fs ?? defaultFs;
+    this.fsMod = opts.fs ?? defaultFs;
     this.retention = { ...DEFAULT_RETENTION, ...opts.retention };
     this.managedFiles = opts.managedFiles
       ? opts.managedFiles.map((src) => ({ label: path.basename(src), src }))
@@ -88,46 +118,42 @@ export class BackupService {
 
   create(reason: BackupReason, meta?: { preset?: string; name?: string }): BackupEntry {
     const at = this.now();
-    const dirName = `${isoFs(at)}-${reason}`;
+    const baseDirName = `${isoFs(at)}-${reason}`;
+    // Same-millisecond double backup: negotiate a -N suffix instead of failing the
+    // final rename with a raw ENOTEMPTY (same loop importZip uses for collisions).
+    let dirName = baseDirName;
+    for (let n = 1; this.fsMod.existsSync(path.join(this.backupsDir, dirName)); n += 1) {
+      dirName = `${baseDirName}-${n}`;
+    }
     const dir = path.join(this.backupsDir, dirName);
     // Build in a hidden staging sibling and publish by rename: a mid-copy failure
     // (EPERM/ENOSPC/ENOENT race) must not leave a manifest-less partial backup that
     // list() can never see or prune.
     const staging = path.join(this.backupsDir, `.tmp-${dirName}`);
     this.sweepStaging();
-    this.fs.rmSync(staging, { recursive: true, force: true });
-    this.fs.mkdirSync(staging, { recursive: true });
+    this.fsMod.rmSync(staging, { recursive: true, force: true });
+    this.fsMod.mkdirSync(staging, { recursive: true });
 
     try {
-      let fileCount = 0;
+      const budget = { files: 0, bytes: 0, entries: 0 };
       for (const { label, src } of this.managedFiles) {
-        if (this.fs.existsSync(src)) {
-          this.fs.copyFileSync(src, path.join(staging, label));
-          fileCount++;
+        if (this.fsMod.existsSync(src)) {
+          this.chargeBudget(budget, this.fsMod.statSync(src).size);
+          this.fsMod.copyFileSync(src, path.join(staging, label));
         }
       }
       for (const name of MANAGED_DIRS) {
         const src = path.join(this.configDir, name);
-        if (!this.fs.existsSync(src)) continue;
-        const dest = path.join(staging, name);
-        if (this.fs.statSync(src).isDirectory()) {
-          // dereference: snapshots store real content — recreating symlinks needs
-          // privileges on Windows (EPERM without Developer Mode).
-          this.fs.cpSync(src, dest, { recursive: true, dereference: true });
-        } else {
-          this.fs.copyFileSync(src, dest);
+        if (!this.fsMod.existsSync(src)) {
+          continue;
         }
-        fileCount += this.countFiles(dest);
+        this.copyTreeSafe(src, path.join(staging, name), budget, 1);
       }
       for (const { label, src } of this.extraDirs) {
-        if (!this.fs.existsSync(src)) continue;
-        const dest = path.join(staging, label);
-        if (this.fs.statSync(src).isDirectory()) {
-          this.fs.cpSync(src, dest, { recursive: true, dereference: true });
-        } else {
-          this.fs.copyFileSync(src, dest);
+        if (!this.fsMod.existsSync(src)) {
+          continue;
         }
-        fileCount += this.countFiles(dest);
+        this.copyTreeSafe(src, path.join(staging, label), budget, 1);
       }
 
       const manifest: BackupManifest = {
@@ -136,13 +162,13 @@ export class BackupService {
         ...(meta?.name !== undefined && meta.name.length > 0 ? { name: meta.name } : {}),
         ...(meta?.preset !== undefined ? { preset: meta.preset } : {}),
         createdAt: at.toISOString(),
-        fileCount,
+        fileCount: budget.files,
         machine: this.hostname,
       };
-      writeFileAtomic(path.join(staging, MANIFEST_FILE), JSON.stringify(manifest, null, 2), this.fs);
-      this.fs.renameSync(staging, dir);
+      writeFileAtomic(path.join(staging, MANIFEST_FILE), JSON.stringify(manifest, null, 2), this.fsMod);
+      this.fsMod.renameSync(staging, dir);
     } catch (error) {
-      this.fs.rmSync(staging, { recursive: true, force: true });
+      this.fsMod.rmSync(staging, { recursive: true, force: true });
       throw error;
     }
 
@@ -155,23 +181,101 @@ export class BackupService {
     return entry;
   }
 
-  private sweepStaging(): void {    if (!this.fs.existsSync(this.backupsDir)) {
+  /**
+   * Symlink-safe recursive copy: every entry is lstat'd and symbolic links are SKIPPED
+   * (never dereferenced). cpSync({dereference:true}) would follow a third-party-planted
+   * link inside a skills dir and copy secrets (auth.json) or entire home dirs into a
+   * backup that exportZip can then ship anywhere — and on restore() the same walk keeps
+   * a hand-planted link inside a backup dir from materializing its target into the
+   * managed config dir. The walk is bounded by the same caps as zip import
+   * (entries/bytes — directories count as entries, mirroring the zip walks) plus a
+   * depth limit; exceeding any aborts the operation. Skipped links are intentionally
+   * not recorded in the manifest (BackupManifest is a frozen shape shared with the
+   * tree/UI layers). `budget` is omitted on the restore() path (no create-side caps).
+   */
+  private copyTreeSafe(
+    src: string,
+    dest: string,
+    budget: { files: number; bytes: number; entries: number } | undefined,
+    depth: number,
+  ): void {
+    const st = this.fsMod.lstatSync(src);
+    if (st.isSymbolicLink()) {
+      return; // skipped: see method doc
+    }
+    if (st.isDirectory()) {
+      if (depth >= MAX_COPY_DEPTH) {
+        throw new Error("BACKUP_CREATE_TOO_LARGE");
+      }
+      if (budget !== undefined) {
+        this.chargeDirEntry(budget);
+      }
+      this.fsMod.mkdirSync(dest, { recursive: true });
+      for (const ent of this.fsMod.readdirSync(src, { withFileTypes: true })) {
+        this.copyTreeSafe(path.join(src, ent.name), path.join(dest, ent.name), budget, depth + 1);
+      }
       return;
     }
-    for (const ent of this.fs.readdirSync(this.backupsDir, { withFileTypes: true })) {
+    if (st.isFile()) {
+      if (budget !== undefined) {
+        this.chargeBudget(budget, st.size);
+      }
+      this.fsMod.copyFileSync(src, dest);
+    }
+    // Other node types (fifo/socket/device) are skipped.
+  }
+
+  private chargeBudget(budget: { files: number; bytes: number; entries: number }, bytes: number): void {
+    budget.files += 1;
+    budget.entries += 1;
+    budget.bytes += bytes;
+    this.assertWithinCaps(budget);
+  }
+
+  /** Directory entries consume the entry budget (export/import count them too) but not fileCount. */
+  private chargeDirEntry(budget: { files: number; bytes: number; entries: number }): void {
+    budget.entries += 1;
+    this.assertWithinCaps(budget);
+  }
+
+  private assertWithinCaps(budget: { files: number; bytes: number; entries: number }): void {
+    if (budget.entries > ZIP_MAX_ENTRIES || budget.bytes > ZIP_MAX_TOTAL_BYTES) {
+      throw new Error("BACKUP_CREATE_TOO_LARGE");
+    }
+  }
+
+  private sweepStaging(): void {
+    if (!this.fsMod.existsSync(this.backupsDir)) {
+      return;
+    }
+    for (const ent of this.fsMod.readdirSync(this.backupsDir, { withFileTypes: true })) {
       if (ent.isDirectory() && ent.name.startsWith(".tmp-")) {
-        this.fs.rmSync(path.join(this.backupsDir, ent.name), { recursive: true, force: true });
+        this.fsMod.rmSync(path.join(this.backupsDir, ent.name), { recursive: true, force: true });
       }
     }
   }
 
   list(): BackupEntry[] {
-    if (!this.fs.existsSync(this.backupsDir)) return [];
+    if (!this.fsMod.existsSync(this.backupsDir)) {
+      return [];
+    }
+    let dirents: Dirent[];
+    try {
+      dirents = this.fsMod.readdirSync(this.backupsDir, { withFileTypes: true });
+    } catch {
+      // An unreadable backups dir (EACCES, AV lock) must not take the whole tree down —
+      // degrade this section to empty, mirroring configStore's readdirSafe contract.
+      return [];
+    }
     const entries: BackupEntry[] = [];
-    for (const ent of this.fs.readdirSync(this.backupsDir, { withFileTypes: true })) {
-      if (!ent.isDirectory() || ent.name.startsWith(".tmp-")) continue;
+    for (const ent of dirents) {
+      if (!ent.isDirectory() || ent.name.startsWith(".tmp-")) {
+        continue;
+      }
       const entry = this.readEntry(ent.name);
-      if (entry) entries.push(entry);
+      if (entry) {
+        entries.push(entry);
+      }
     }
     return entries.sort((a, b) => (a.dirName < b.dirName ? 1 : a.dirName > b.dirName ? -1 : 0));
   }
@@ -184,7 +288,7 @@ export class BackupService {
 
   remove(dirName: string): void {
     this.assertDirName(dirName);
-    this.fs.rmSync(path.join(this.backupsDir, dirName), { recursive: true, force: true });
+    this.fsMod.rmSync(path.join(this.backupsDir, dirName), { recursive: true, force: true });
   }
 
   rename(dirName: string, name: string): BackupEntry {
@@ -194,7 +298,7 @@ export class BackupService {
       throw new Error("BACKUP_NOT_FOUND");
     }
     const manifest: BackupManifest = { ...entry.manifest, name };
-    writeFileAtomic(path.join(entry.dir, MANIFEST_FILE), JSON.stringify(manifest, null, 2), this.fs);
+    writeFileAtomic(path.join(entry.dir, MANIFEST_FILE), JSON.stringify(manifest, null, 2), this.fsMod);
     return { ...entry, manifest };
   }
 
@@ -205,22 +309,57 @@ export class BackupService {
     // (ENOSPC/EPERM) must never truncate the live opencode.json / omo.jsonc.
     for (const { label, src } of this.managedFiles) {
       const backup = path.join(srcDir, label);
-      if (this.fs.existsSync(backup)) {
-        this.fs.mkdirSync(path.dirname(src), { recursive: true });
-        writeFileAtomic(src, this.fs.readFileSync(backup, "utf8"), this.fs);
+      if (this.fsMod.existsSync(backup)) {
+        this.fsMod.mkdirSync(path.dirname(src), { recursive: true });
+        writeFileAtomic(src, this.fsMod.readFileSync(backup, "utf8"), this.fsMod);
       }
     }
     for (const name of MANAGED_DIRS) {
       const src = path.join(srcDir, name);
-      if (this.fs.existsSync(src)) {
-        this.fs.cpSync(src, path.join(this.configDir, name), { recursive: true, dereference: true });
+      if (this.fsMod.existsSync(src)) {
+        const target = path.join(this.configDir, name);
+        this.removeSymlinksInWay(src, target);
+        // Same symlink-skipping walk as create(): a hand-planted link inside the
+        // backup dir must not materialize its target into the managed config dir.
+        this.copyTreeSafe(src, target, undefined, 1);
       }
     }
     for (const { label, src } of this.extraDirs) {
       const backup = path.join(srcDir, label);
-      if (this.fs.existsSync(backup)) {
-        this.fs.mkdirSync(path.dirname(src), { recursive: true });
-        this.fs.cpSync(backup, src, { recursive: true, dereference: true });
+      if (this.fsMod.existsSync(backup)) {
+        this.fsMod.mkdirSync(path.dirname(src), { recursive: true });
+        this.removeSymlinksInWay(backup, src);
+        this.copyTreeSafe(backup, src, undefined, 1);
+      }
+    }
+  }
+
+  /**
+   * Delete symlink entries in `target` that sit where `src`'s content will land:
+   * cpSync/copyFileSync follow existing links on the TARGET side, so a planted
+   * ~/.agents/skills/x -> ~/.bashrc would otherwise turn restore into an arbitrary
+   * file overwrite. Backup trees themselves contain no symlinks (create() skips them).
+   */
+  private removeSymlinksInWay(src: string, target: string): void {
+    let dirents: Dirent[];
+    try {
+      dirents = this.fsMod.readdirSync(src, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const ent of dirents) {
+      const from = path.join(src, ent.name);
+      const to = path.join(target, ent.name);
+      let st: defaultFs.Stats;
+      try {
+        st = this.fsMod.lstatSync(to);
+      } catch {
+        continue; // nothing planted at this path
+      }
+      if (st.isSymbolicLink()) {
+        this.fsMod.rmSync(to, { recursive: true, force: true });
+      } else if (ent.isDirectory() && st.isDirectory()) {
+        this.removeSymlinksInWay(from, to);
       }
     }
   }
@@ -229,7 +368,7 @@ export class BackupService {
     const pairs: { label: string; backup: string; current: string }[] = [];
     for (const { label, src } of this.managedFiles) {
       const backup = path.join(entry.dir, label);
-      if (this.fs.existsSync(backup) && this.fs.existsSync(src)) {
+      if (this.fsMod.existsSync(backup) && this.fsMod.existsSync(src)) {
         pairs.push({ label, backup, current: src });
       }
     }
@@ -238,8 +377,10 @@ export class BackupService {
 
   /**
    * Export a backup as a zip (entry names use "/" per the zip spec — platform-neutral).
-   * Backups hold no symlinks (create/restore dereference); a foreign symlink placed by
-   * hand matches neither isDirectory nor isFile and is skipped, never followed.
+   * Backups hold no symlinks (create() skips them, never dereferences), so a foreign
+   * link placed by hand matches neither isDirectory nor isFile and is skipped here too.
+   * The walk enforces the SAME caps as importZip (entries/total bytes) and fails with
+   * BACKUP_EXPORT_TOO_LARGE before the zip is built in memory.
    */
   exportZip(dirName: string, targetFile: string): void {
     this.assertDirName(dirName);
@@ -248,19 +389,32 @@ export class BackupService {
     }
     const srcDir = path.join(this.backupsDir, dirName);
     const files: Record<string, Uint8Array> = {};
+    let entryCount = 0;
+    let totalBytes = 0;
     const walk = (dir: string, rel: string): void => {
-      for (const ent of this.fs.readdirSync(dir, { withFileTypes: true })) {
+      for (const ent of this.fsMod.readdirSync(dir, { withFileTypes: true })) {
         const childRel = rel ? `${rel}/${ent.name}` : ent.name;
         if (ent.isDirectory()) {
+          entryCount += 1;
+          if (entryCount > ZIP_MAX_ENTRIES) {
+            throw new Error("BACKUP_EXPORT_TOO_LARGE");
+          }
           files[`${childRel}/`] = new Uint8Array(0); // explicit entry keeps empty dirs
           walk(path.join(dir, ent.name), childRel);
         } else if (ent.isFile()) {
-          files[childRel] = new Uint8Array(this.fs.readFileSync(path.join(dir, ent.name)));
+          const full = path.join(dir, ent.name);
+          const size = this.fsMod.statSync(full).size;
+          entryCount += 1;
+          totalBytes += size;
+          if (entryCount > ZIP_MAX_ENTRIES || totalBytes > ZIP_MAX_TOTAL_BYTES) {
+            throw new Error("BACKUP_EXPORT_TOO_LARGE");
+          }
+          files[childRel] = new Uint8Array(this.fsMod.readFileSync(full));
         }
       }
     };
     walk(srcDir, "");
-    writeFileAtomic(targetFile, zipSync(files, { level: 6 }), this.fs);
+    writeFileAtomic(targetFile, zipSync(files, { level: 6 }), this.fsMod);
   }
 
   /**
@@ -272,23 +426,30 @@ export class BackupService {
   importZip(zipFile: string): BackupEntry {
     // Cap the compressed file itself first — readFileSync of a multi-GB "zip" would OOM
     // before any other check runs.
-    const zipSize = this.fs.statSync(zipFile).size;
+    const zipSize = this.fsMod.statSync(zipFile).size;
     if (zipSize > ZIP_MAX_TOTAL_BYTES) {
       throw new Error("BACKUP_IMPORT_INVALID");
     }
     // fflate's filter runs BEFORE inflating each entry and carries the header's declared
     // originalSize — enforcing caps here keeps a well-formed zip bomb from ever being
-    // decompressed into extension-host memory.
+    // decompressed into extension-host memory. The compression-ratio guard rejects
+    // entries declaring far more bytes than they compress to (classic bomb shape).
     let entryCount = 0;
     let totalBytes = 0;
     let capsExceeded = false;
+    const declaredSizes: Record<string, number> = {};
     let entries: Record<string, Uint8Array>;
     try {
-      entries = unzipSync(new Uint8Array(this.fs.readFileSync(zipFile)), {
+      entries = unzipSync(new Uint8Array(this.fsMod.readFileSync(zipFile)), {
         filter: (file) => {
           entryCount += 1;
           totalBytes += file.originalSize;
-          if (entryCount > ZIP_MAX_ENTRIES || totalBytes > ZIP_MAX_TOTAL_BYTES) {
+          declaredSizes[file.name] = file.originalSize;
+          if (
+            entryCount > ZIP_MAX_ENTRIES ||
+            totalBytes > ZIP_MAX_TOTAL_BYTES ||
+            file.originalSize > ZIP_MAX_RATIO * Math.max(1, file.size)
+          ) {
             capsExceeded = true;
             return false;
           }
@@ -301,12 +462,23 @@ export class BackupService {
     if (capsExceeded) {
       throw new Error("BACKUP_IMPORT_INVALID");
     }
+    // fflate preallocates the declared buffer and silently truncates overflow — a
+    // lying central directory must not slip truncated content through: re-verify the
+    // materialized length of every entry against its declared originalSize.
     for (const name of Object.keys(entries)) {
+      const content = entries[name];
+      if (!(content instanceof Uint8Array) || content.length !== declaredSizes[name]) {
+        throw new Error("BACKUP_IMPORT_INVALID");
+      }
       assertZipEntryName(name);
+    }
+    const raw = entries[MANIFEST_FILE];
+    if (!(raw instanceof Uint8Array)) {
+      throw new Error("BACKUP_IMPORT_INVALID");
     }
     let manifest: BackupManifest;
     try {
-      manifest = JSON.parse(strFromU8(entries[MANIFEST_FILE]!)) as BackupManifest;
+      manifest = JSON.parse(strFromU8(raw)) as BackupManifest;
     } catch {
       throw new Error("BACKUP_IMPORT_INVALID");
     }
@@ -318,37 +490,44 @@ export class BackupService {
       ? (manifest.reason as BackupReason)
       : "manual";
     let createdAt = new Date(manifest.createdAt);
-    if (Number.isNaN(createdAt.getTime())) {
+    if (Number.isNaN(createdAt.getTime()) || isoYearOutOfRange(createdAt)) {
       createdAt = this.now();
     }
     const baseDirName = `${isoFs(createdAt)}-${reason}`;
     let dirName = baseDirName;
-    for (let n = 1; this.fs.existsSync(path.join(this.backupsDir, dirName)); n += 1) {
+    for (let n = 1; this.fsMod.existsSync(path.join(this.backupsDir, dirName)); n += 1) {
       dirName = `${baseDirName}-import-${n}`;
     }
 
     const staging = path.join(this.backupsDir, `.tmp-import-${process.pid}-${Math.random().toString(36).slice(2, 10)}`);
     this.sweepStaging();
-    this.fs.mkdirSync(staging, { recursive: true });
+    this.fsMod.mkdirSync(staging, { recursive: true });
     try {
       for (const name of Object.keys(entries)) {
         const content = entries[name]!;
         if (name.endsWith("/")) {
-          this.fs.mkdirSync(path.join(staging, ...name.split("/")), { recursive: true });
+          this.fsMod.mkdirSync(path.join(staging, ...name.split("/")), { recursive: true });
           continue;
         }
         const target = path.join(staging, ...name.split("/"));
-        this.fs.mkdirSync(path.dirname(target), { recursive: true });
-        this.fs.writeFileSync(target, content);
+        this.fsMod.mkdirSync(path.dirname(target), { recursive: true });
+        this.fsMod.writeFileSync(target, content);
       }
-      this.fs.renameSync(staging, path.join(this.backupsDir, dirName));
+      this.fsMod.renameSync(staging, path.join(this.backupsDir, dirName));
     } catch (error) {
-      this.fs.rmSync(staging, { recursive: true, force: true });
+      this.fsMod.rmSync(staging, { recursive: true, force: true });
       // Structural conflicts in a hostile zip (file `a` + `a/b`, dir `a/` + file `a`,
-      // Windows-illegal names) throw EEXIST/ENOTDIR/EISDIR — those mean "bad archive",
-      // while ENOSPC/EACCES are real disk problems worth surfacing as-is.
+      // Windows-illegal or over-long names) map to "bad archive", while ENOSPC/EACCES
+      // are real disk problems worth surfacing as-is.
       const code = (error as NodeJS.ErrnoException).code;
-      if (code === "EEXIST" || code === "ENOTDIR" || code === "EISDIR") {
+      if (
+        code === "EEXIST" ||
+        code === "ENOTDIR" ||
+        code === "EISDIR" ||
+        code === "ENAMETOOLONG" ||
+        code === "EINVAL" ||
+        code === "ERR_INVALID_FILE_NAME"
+      ) {
         throw new Error("BACKUP_IMPORT_INVALID");
       }
       throw error;
@@ -366,7 +545,9 @@ export class BackupService {
     const removed: BackupEntry[] = [];
     for (const r of reasons) {
       const keep = this.retention[r];
-      if (typeof keep !== "number") continue;
+      if (typeof keep !== "number") {
+        continue;
+      }
       const excess = all.filter((e) => e.manifest.reason === r).slice(keep);
       for (const entry of excess) {
         // A foreign/unremovable dir (odd name, locked on Windows) must not poison
@@ -385,23 +566,26 @@ export class BackupService {
   private readEntry(dirName: string): BackupEntry | null {
     const manifestPath = path.join(this.backupsDir, dirName, MANIFEST_FILE);
     try {
-      if (!this.fs.existsSync(manifestPath)) return null;
-      const manifest = JSON.parse(this.fs.readFileSync(manifestPath, "utf8")) as BackupManifest;
-      if (manifest.version !== 1 || typeof manifest.reason !== "string") return null;
-      return { dirName, dir: path.join(this.backupsDir, dirName), manifest };
+      if (!this.fsMod.existsSync(manifestPath)) {
+        this.manifestCache.delete(dirName);
+        return null;
+      }
+      // Memoize the read+parse per dirName, invalidated by mtime: list() runs on every
+      // tree refresh and long-lived installs accumulate dozens of manifests.
+      const mtimeMs = this.fsMod.statSync(manifestPath).mtimeMs;
+      const cached = this.manifestCache.get(dirName);
+      if (cached && cached.mtimeMs === mtimeMs) {
+        return cached.entry;
+      }
+      const manifest = JSON.parse(this.fsMod.readFileSync(manifestPath, "utf8")) as BackupManifest;
+      const entry =
+        manifest.version !== 1 || typeof manifest.reason !== "string"
+          ? null
+          : { dirName, dir: path.join(this.backupsDir, dirName), manifest };
+      this.manifestCache.set(dirName, { mtimeMs, entry });
+      return entry;
     } catch {
       return null;
     }
-  }
-
-  private countFiles(p: string): number {
-    const st = this.fs.statSync(p);
-    if (st.isFile()) return 1;
-    if (!st.isDirectory()) return 0;
-    let n = 0;
-    for (const ent of this.fs.readdirSync(p, { withFileTypes: true })) {
-      n += this.countFiles(path.join(p, ent.name));
-    }
-    return n;
   }
 }

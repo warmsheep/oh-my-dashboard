@@ -1,23 +1,28 @@
-import * as fs from "node:fs";
+import * as defaultFs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { fileURLToPath } from "node:url";
-import { writeFileAtomic } from "./atomicFile";
-import { getValue, parseSafe } from "./jsoncEditor";
 
-export { writeFileAtomic } from "./atomicFile";
+import { agentAssignmentEdits } from "./agentAssignment";
+import { writeFileAtomic } from "./atomicFile";
 import { ensureLocalModelsFile, mergeModelOptions } from "./builtinModels";
+import { applyEdits, getValue, JsoncSyntaxError, parseSafe } from "./jsoncEditor";
+import { declaredPluginSpecifiers, listDeclaredPlugins } from "./pluginResolver";
+import { readdirSafe, readDirTree, skillDirCandidates, skillNamesFromTree } from "./skillScanner";
 import type {
   AgentConfigTarget,
-  DirEntry,
   DiscoveredConfig,
+  DiscoveredPaths,
   ModelEntry,
   ModelOption,
   ModelSetting,
   ParseResult,
   PluginEntry,
+  SkillDirLocation,
   SkillLocation,
 } from "./types";
+
+// Kept for test imports; production code imports writeFileAtomic from ./atomicFile directly.
+export { writeFileAtomic } from "./atomicFile";
 
 export interface ConfigStoreOptions {
   configDirOverride?: string;
@@ -27,107 +32,15 @@ export interface ConfigStoreOptions {
   platform?: NodeJS.Platform;
 }
 
-const PLUGIN_TREE_EXCLUDES = new Set(["node_modules", ".git"]);
-
-/**
- * Project-level skills dir conventions, in display order: the cross-tool standard
- * first, then per-tool native paths (agentskills.io spec + Claude Code / opencode /
- * GitHub Copilot / Gemini CLI / Cursor / Windsurf docs).
- */
-const PROJECT_SKILL_DIRS = [
-  ".agents/skills",
-  ".claude/skills",
-  ".opencode/skills",
-  ".github/skills",
-  ".gemini/skills",
-  ".cursor/skills",
-  ".windsurf/skills",
-] as const;
-
-function isPathPluginSpecifier(specifier: string): boolean {
-  // Mirrors upstream isPathPluginSpec (file:// / . / absolute) plus ~, which npm names cannot contain.
-  return specifier.startsWith("file://") || specifier.startsWith("~") || specifier.startsWith(".") || path.isAbsolute(specifier);
-}
-
-function npmPluginName(specifier: string): string {
-  // @scope/name@1.0.0 → cut at the 2nd @; name@1.0.0 → cut at the 1st.
-  const from = specifier.startsWith("@") ? specifier.indexOf("@", 1) : specifier.indexOf("@");
-  return from === -1 ? specifier : specifier.slice(0, from);
-}
-
-/** Dirent.isDirectory() is false for symlinks — follow the link before classifying. */
-function isDirEntry(entry: fs.Dirent, entryPath: string): boolean {
-  if (entry.isDirectory()) {
-    return true;
-  }
-  if (entry.isSymbolicLink()) {
-    try {
-      return fs.statSync(entryPath).isDirectory();
-    } catch {
-      return false;
-    }
-  }
-  return false;
-}
-
-/**
- * A single unreadable dir (EACCES/EPERM) or one deleted mid-scan (ENOENT race) must not
- * break discovery of everything else — degrade that subtree to empty instead.
- */
-function readdirSafe(dir: string): fs.Dirent[] {
-  try {
-    return fs.readdirSync(dir, { withFileTypes: true });
-  } catch {
-    return [];
-  }
-}
-
-function readDirTree(dir: string, depth = 0, exclude?: ReadonlySet<string>, visited: Set<string> = new Set()): DirEntry[] {
-  if (depth > 8 || !fs.existsSync(dir)) {
-    return [];
-  }
-  // Symlink cycles terminate via the depth cap, but k self-links still fan out k^8 —
-  // a visited set of real paths kills both cycles and fan-out.
-  let real: string;
-  try {
-    real = fs.realpathSync(dir);
-  } catch {
-    real = dir;
-  }
-  if (visited.has(real)) {
-    return [];
-  }
-  visited.add(real);
-  const entries = readdirSafe(dir)
-    .filter((entry) => !exclude?.has(entry.name))
-    .sort((a, b) => {
-      const aDir = isDirEntry(a, path.join(dir, a.name));
-      const bDir = isDirEntry(b, path.join(dir, b.name));
-      if (aDir !== bDir) {
-        return aDir ? -1 : 1;
-      }
-      return a.name.localeCompare(b.name);
-    });
-  return entries.map((entry) => {
-    const entryPath = path.join(dir, entry.name);
-    if (isDirEntry(entry, entryPath)) {
-      const children = readDirTree(entryPath, depth + 1, exclude, visited);
-      return {
-        name: entry.name,
-        path: entryPath,
-        isDir: true,
-        ...(children.length > 0 ? { children } : {}),
-      };
-    }
-    return { name: entry.name, path: entryPath, isDir: false };
-  });
-}
-
 export class ConfigStore {
   private readonly env: Record<string, string | undefined>;
   private readonly homeDir: string;
   private readonly platform: NodeJS.Platform;
   private readonly configDirOverride?: string;
+  private readonly fileMemo = new Map<
+    string,
+    { mtimeMs: number; size: number; text: string; parse?: ParseResult<unknown> }
+  >();
 
   constructor(opts: ConfigStoreOptions = {}) {
     this.env = opts.env ?? process.env;
@@ -136,10 +49,7 @@ export class ConfigStore {
     this.configDirOverride = opts.configDirOverride;
   }
 
-  static resolveConfigDir(
-    env?: Record<string, string | undefined>,
-    homeDir?: string,
-  ): string {
+  static resolveConfigDir(env?: Record<string, string | undefined>, homeDir?: string): string {
     const effectiveEnv = env ?? process.env;
     const home = homeDir ?? os.homedir();
     // opencode resolves its config dir via xdg-basedir, which has NO platform branches:
@@ -191,100 +101,17 @@ export class ConfigStore {
    * file://) resolve against home / configDir. Declaration order is preserved.
    */
   listPlugins(): PluginEntry[] {
-    const text = this.readTextOrEmpty(this.resolveOpencodeConfigPath());
+    const text = this.readMemoizedText(this.resolveOpencodeConfigPath());
     if (!text) {
       return [];
     }
-    const raw = getValue<unknown>(text, ["plugin"]) ?? getValue<unknown>(text, ["plugins"]);
-    if (!Array.isArray(raw)) {
-      return [];
-    }
-    return raw.flatMap((item) => {
-      const specifier =
-        typeof item === "string" ? item.trim() : item && typeof item === "object" && typeof (item as { package?: unknown }).package === "string" ? (item as { package: string }).package.trim() : "";
-      return specifier ? [this.resolvePlugin(specifier)] : [];
+    return listDeclaredPlugins(text, {
+      configDir: this.configDir,
+      pluginCacheDir: this.pluginCacheDir,
+      homeDir: this.homeDir,
+      platform: this.platform,
+      readPackageJson: (filePath) => this.readParseMemoized(filePath),
     });
-  }
-
-  private resolvePlugin(specifier: string): PluginEntry {
-    return isPathPluginSpecifier(specifier) ? this.resolvePathPlugin(specifier) : this.resolveNpmPlugin(specifier);
-  }
-
-  private resolvePathPlugin(specifier: string): PluginEntry {
-    // fileURLToPath handles percent-encoding and Windows drive URLs (file:///C:/x);
-    // relative forms like file://./x are not valid absolute URLs and fall back to slicing.
-    let spec = specifier;
-    if (specifier.startsWith("file://")) {
-      try {
-        spec = fileURLToPath(specifier);
-      } catch {
-        spec = specifier.slice("file://".length);
-      }
-    }
-    const resolved = spec.startsWith("~") ? path.join(this.homeDir, spec.slice(1)) : path.resolve(this.configDir, spec);
-    let stat: fs.Stats | undefined;
-    try {
-      stat = fs.statSync(resolved);
-    } catch {
-      stat = undefined;
-    }
-    const tree = stat?.isDirectory()
-      ? readDirTree(resolved, 0, PLUGIN_TREE_EXCLUDES)
-      : stat?.isFile()
-        ? [{ name: path.basename(resolved), path: resolved, isDir: false }]
-        : [];
-    return { name: path.basename(resolved), specifier, kind: "path", resolvedPath: resolved, installed: stat !== undefined, tree };
-  }
-
-  /** Mirrors opencode's npm.ts sanitize(): on win32, path-illegal chars become "_". */
-  private sanitizePkgDir(spec: string): string {
-    if (this.platform !== "win32") {
-      return spec;
-    }
-    const illegal = new Set(["<", ">", ":", '"', "|", "?", "*"]);
-    return Array.from(spec, (char) => (illegal.has(char) || char.charCodeAt(0) < 32 ? "_" : char)).join("");
-  }
-
-  private resolveNpmPlugin(specifier: string): PluginEntry {
-    const name = npmPluginName(specifier);
-    const isInstalledDir = (candidate: string): boolean => {
-      try {
-        return fs.statSync(candidate).isDirectory();
-      } catch {
-        return false;
-      }
-    };
-    // Modern opencode (arborist) installs each plugin isolated under
-    // packages/<spec>/node_modules/<name> — the dir key is `${name}@latest` for bare names,
-    // else the raw specifier (see resolvePluginTarget + Npm.directory in opencode's source).
-    const dirKey = this.sanitizePkgDir(specifier === name ? `${name}@latest` : specifier);
-    const packagesRoot = path.join(this.pluginCacheDir, "packages");
-    const candidates = [
-      path.join(packagesRoot, dirKey, "node_modules", name),
-      path.join(this.pluginCacheDir, "node_modules", name), // bun-era flat layout
-      path.join(this.configDir, "node_modules", name),
-    ];
-    let resolvedPath: string | undefined = candidates.find(isInstalledDir);
-    if (resolvedPath === undefined && fs.existsSync(packagesRoot)) {
-      // Scan fallback: the exact dir key may drift from our reconstruction (npa normalization,
-      // dist-tags) — any packages/<dir>/node_modules/<name> hit counts as installed.
-      for (const entry of readdirSafe(packagesRoot)) {
-        const candidate = path.join(packagesRoot, entry.name, "node_modules", name);
-        if (isInstalledDir(candidate)) {
-          resolvedPath = candidate;
-          break;
-        }
-      }
-    }
-    const installed = resolvedPath !== undefined;
-    const finalPath = resolvedPath ?? candidates[0]!;
-    const version = installed ? this.installedPluginVersion(finalPath) : undefined;
-    return { name, specifier, kind: "npm", resolvedPath: finalPath, installed, ...(version !== undefined ? { version } : {}), tree: installed ? readDirTree(finalPath, 0, PLUGIN_TREE_EXCLUDES) : [] };
-  }
-
-  private installedPluginVersion(dir: string): string | undefined {
-    const parsed = this.readParse<{ version?: unknown }>(path.join(dir, "package.json"));
-    return typeof parsed.value?.version === "string" ? parsed.value.version : undefined;
   }
 
   /**
@@ -293,11 +120,11 @@ export class ConfigStore {
    */
   resolveOpencodeConfigPath(): string {
     const json = path.join(this.configDir, "opencode.json");
-    if (fs.existsSync(json)) {
+    if (defaultFs.existsSync(json)) {
       return json;
     }
     const jsonc = path.join(this.configDir, "opencode.jsonc");
-    return fs.existsSync(jsonc) ? jsonc : json;
+    return defaultFs.existsSync(jsonc) ? jsonc : json;
   }
 
   /**
@@ -317,10 +144,10 @@ export class ConfigStore {
       reasoningKey: "reasoning",
       exists,
     });
-    if (fs.existsSync(omoJsonc)) {
+    if (defaultFs.existsSync(omoJsonc)) {
       return omo(omoJsonc, true);
     }
-    if (fs.existsSync(omoJson)) {
+    if (defaultFs.existsSync(omoJson)) {
       return omo(omoJson, true);
     }
     for (const name of [
@@ -330,15 +157,15 @@ export class ConfigStore {
       "oh-my-openagent.json",
     ]) {
       const candidate = path.join(this.configDir, name);
-      if (fs.existsSync(candidate)) {
+      if (defaultFs.existsSync(candidate)) {
         return { kind: "legacy", path: candidate, sectionPath: [], reasoningKey: "variant", exists: true };
       }
     }
-    const plugins = getValue<unknown>(this.readTextOrEmpty(this.resolveOpencodeConfigPath()), ["plugin"]);
-    const usesOpenagent =
-      Array.isArray(plugins) &&
-      plugins.some((entry) => typeof entry === "string" && entry.startsWith("oh-my-openagent"));
-    if (fs.existsSync(this.omoDir) || usesOpenagent) {
+    // Same normalized declaration read as listPlugins (V1 `plugin` + V2 `plugins`).
+    const usesOpenagent = declaredPluginSpecifiers(this.readMemoizedText(this.resolveOpencodeConfigPath())).some(
+      (specifier) => specifier.startsWith("oh-my-openagent"),
+    );
+    if (defaultFs.existsSync(this.omoDir) || usesOpenagent) {
       return omo(omoJsonc, false);
     }
     return {
@@ -353,98 +180,28 @@ export class ConfigStore {
   discover(workspaceFolders?: string[]): DiscoveredConfig {
     const configDir = this.configDir;
     const opencodeJson = this.resolveOpencodeConfigPath();
-    const ohMyOpencodeJson = path.join(configDir, "oh-my-opencode.json");
     const agentConfig = this.resolveAgentConfig();
     const commandDir = path.join(configDir, "command");
 
-    const commandFiles = fs.existsSync(commandDir)
+    const commandFiles = defaultFs.existsSync(commandDir)
       ? readdirSafe(commandDir)
           .filter((entry) => entry.isFile() && entry.name.endsWith(".md"))
           .map((entry) => entry.name)
           .sort()
       : [];
 
-    const isSkillDir = (dir: string, entry: fs.Dirent): boolean =>
-      isDirEntry(entry, path.join(dir, entry.name)) && fs.existsSync(path.join(dir, entry.name, "SKILL.md"));
-
-    const listSkillNames = (dir: string): string[] =>
-      fs.existsSync(dir)
-        ? readdirSafe(dir)
-            .filter((entry) => isSkillDir(dir, entry))
-            .map((entry) => entry.name)
-            .sort()
-        : [];
-
-    // NTFS and default APFS are case-insensitive: compare folded, display original.
-    const fold = (p: string): string => (this.platform === "win32" || this.platform === "darwin" ? p.toLowerCase() : p);
-    const homePrefix = this.homeDir + path.sep;
-    const displayPath = (dir: string): string =>
-      fold(dir) === fold(this.homeDir) || fold(dir).startsWith(fold(homePrefix))
-        ? `~${dir.slice(this.homeDir.length)}`
-        : dir;
-
-    const skillLocation = (scope: SkillLocation["scope"], label: string, dir: string): SkillLocation => ({
-      scope,
-      label,
-      dir,
-      skillNames: listSkillNames(dir),
-      tree: readDirTree(dir),
+    // Skill names derive from the SAME walk that builds the tree (one scan per dir,
+    // not two): top-level entries that are dirs with a regular-file SKILL.md.
+    const skillLocations: SkillLocation[] = this.skillDirLocationsFor(workspaceFolders).map((candidate) => {
+      const tree = readDirTree(candidate.dir);
+      return { ...candidate, skillNames: skillNamesFromTree(tree), tree };
     });
-
-    // Home-level convention dirs in canonical order (cross-tool standard → Claude → opencode →
-    // Amp XDG → Copilot → Gemini → Cursor → Windsurf → Codex legacy); the opencode runtime's
-    // own ~/.cache/opencode/skills plugin cache is deliberately not a candidate. Rows appear
-    // only when the dir exists; configDir/skills may coincide with a home candidate → dedupe.
-    const xdgConfig = typeof this.env.XDG_CONFIG_HOME === "string" && this.env.XDG_CONFIG_HOME.trim() !== ""
-      ? this.env.XDG_CONFIG_HOME
-      : path.join(this.homeDir, ".config");
-    const globalSkillCandidates = [
-      path.join(this.homeDir, ".agents", "skills"),
-      path.join(this.homeDir, ".claude", "skills"),
-      path.join(configDir, "skills"),
-      path.join(xdgConfig, "agents", "skills"),
-      path.join(xdgConfig, "amp", "skills"),
-      path.join(this.homeDir, ".copilot", "skills"),
-      path.join(this.homeDir, ".gemini", "skills"),
-      path.join(this.homeDir, ".cursor", "skills"),
-      path.join(this.homeDir, ".codeium", "windsurf", "skills"),
-      path.join(this.homeDir, ".codex", "skills"),
-    ];
-    const seenSkillDirs = new Set<string>();
-    const skillLocations: SkillLocation[] = [];
-    for (const candidate of globalSkillCandidates) {
-      if (!seenSkillDirs.has(fold(candidate)) && fs.existsSync(candidate)) {
-        seenSkillDirs.add(fold(candidate));
-        skillLocations.push(skillLocation("global", displayPath(candidate), candidate));
-      }
-    }
-    for (const folder of workspaceFolders ?? []) {
-      for (const rel of PROJECT_SKILL_DIRS) {
-        const projectSkillsDir = path.join(folder, rel);
-        if (fs.existsSync(projectSkillsDir)) {
-          skillLocations.push(skillLocation("project", rel, projectSkillsDir));
-        }
-      }
-    }
-
-    const agentsMd: DiscoveredConfig["agentsMd"] = [
-      {
-        scope: "global",
-        path: path.join(configDir, "AGENTS.md"),
-        exists: fs.existsSync(path.join(configDir, "AGENTS.md")),
-      },
-      ...(workspaceFolders ?? []).map((folder) => {
-        const projectAgentsMd = path.join(folder, "AGENTS.md");
-        return { scope: "project" as const, path: projectAgentsMd, exists: fs.existsSync(projectAgentsMd) };
-      }),
-    ];
 
     return {
       configDir,
       opencodeJson,
-      ohMyOpencodeJson,
       agentConfig,
-      agentsMd,
+      agentsMd: this.agentsMdEntries(workspaceFolders),
       commandDir,
       commandFiles,
       skillLocations,
@@ -454,15 +211,58 @@ export class ConfigStore {
     };
   }
 
-  readText(filePath: string): string {
-    return fs.readFileSync(filePath, "utf8");
+  /**
+   * Cheap path-level discovery for activation wiring: the same config/agent/skill/AGENTS.md
+   * path resolution as discover(), but WITHOUT building skills/command trees, scanning dir
+   * contents, or touching plugins/presets/backups. discover() reuses the same helpers, so
+   * the two can never disagree.
+   */
+  discoverPaths(workspaceFolders?: string[]): DiscoveredPaths {
+    const configDir = this.configDir;
+    return {
+      configDir,
+      opencodeJson: this.resolveOpencodeConfigPath(),
+      agentConfig: this.resolveAgentConfig(),
+      agentsMd: this.agentsMdEntries(workspaceFolders),
+      commandDir: path.join(configDir, "command"),
+      skillsDir: path.join(configDir, "skills"),
+      skillLocations: this.skillDirLocationsFor(workspaceFolders),
+      presetsDir: path.join(configDir, "presets"),
+      backupsDir: path.join(configDir, "backups"),
+    };
+  }
+
+  /** Existing skills candidate dirs (canonical order) via the pure core/skillScanner. */
+  private skillDirLocationsFor(workspaceFolders?: string[]): SkillDirLocation[] {
+    return skillDirCandidates({
+      configDir: this.configDir,
+      homeDir: this.homeDir,
+      env: this.env,
+      platform: this.platform,
+      workspaceFolders,
+    });
+  }
+
+  private agentsMdEntries(workspaceFolders?: string[]): DiscoveredConfig["agentsMd"] {
+    const configDir = this.configDir;
+    return [
+      {
+        scope: "global",
+        path: path.join(configDir, "AGENTS.md"),
+        exists: defaultFs.existsSync(path.join(configDir, "AGENTS.md")),
+      },
+      ...(workspaceFolders ?? []).map((folder) => {
+        const projectAgentsMd = path.join(folder, "AGENTS.md");
+        return { scope: "project" as const, path: projectAgentsMd, exists: defaultFs.existsSync(projectAgentsMd) };
+      }),
+    ];
   }
 
   readTextOrEmpty(filePath: string): string {
     // existsSync guards absence, not permission: a chmod-000 or AV-locked config must
     // degrade to "empty" rather than kill discovery/activation.
     try {
-      return fs.existsSync(filePath) ? fs.readFileSync(filePath, "utf8") : "";
+      return defaultFs.existsSync(filePath) ? defaultFs.readFileSync(filePath, "utf8") : "";
     } catch {
       return "";
     }
@@ -475,7 +275,7 @@ export class ConfigStore {
    */
   readTextForEdit(filePath: string): string {
     try {
-      return fs.existsSync(filePath) ? fs.readFileSync(filePath, "utf8") : "";
+      return defaultFs.existsSync(filePath) ? defaultFs.readFileSync(filePath, "utf8") : "";
     } catch {
       throw new Error("CONFIG_UNREADABLE");
     }
@@ -485,8 +285,81 @@ export class ConfigStore {
     return parseSafe<T>(this.readTextOrEmpty(filePath));
   }
 
+  /**
+   * Memoized hot-config read (readTextOrEmpty semantics). Keyed by stat (mtimeMs, size):
+   * opencode.json is read by listPlugins / opencodeModels / defaultModel /
+   * resolveAgentConfig within a single refresh, so an unchanged file is read (and for
+   * readParseMemoized, parsed) at most once. Writes through writeAtomic delete the
+   * entry; external edits change the stat key and miss the cache.
+   */
+  private memoizedFile(filePath: string): {
+    mtimeMs: number;
+    size: number;
+    text: string;
+    parse?: ParseResult<unknown>;
+  } {
+    let stat: { mtimeMs: number; size: number } | null;
+    try {
+      const s = defaultFs.statSync(filePath);
+      stat = { mtimeMs: s.mtimeMs, size: s.size };
+    } catch {
+      stat = null;
+    }
+    const cached = this.fileMemo.get(filePath);
+    if (cached && stat !== null && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
+      return cached;
+    }
+    let text: string | null = null;
+    try {
+      text = defaultFs.readFileSync(filePath, "utf8");
+    } catch {
+      text = null;
+    }
+    if (text === null && stat !== null) {
+      // stat succeeded but the read failed (EACCES, AV lock): degrade to "" for THIS
+      // call without caching under the still-valid stat key — chmod recovery must not
+      // be fed a stale "" (chmod does not change mtime/size).
+      return { mtimeMs: stat.mtimeMs, size: stat.size, text: "" };
+    }
+    const entry = { mtimeMs: stat?.mtimeMs ?? -1, size: stat?.size ?? -1, text: text ?? "" };
+    this.fileMemo.set(filePath, entry);
+    return entry;
+  }
+
+  private readMemoizedText(filePath: string): string {
+    return this.memoizedFile(filePath).text;
+  }
+
+  private readParseMemoized<T>(filePath: string): ParseResult<T> {
+    const entry = this.memoizedFile(filePath);
+    entry.parse ??= parseSafe<unknown>(entry.text);
+    return entry.parse as ParseResult<T>;
+  }
+
+  /**
+   * Assign one agent/category entry on this machine's agent config: set the model and
+   * the target's reasoning key (or remove it when variant is null), clearing the sibling
+   * reasoning key and any `models` chain — the exact rules PresetService.apply() uses,
+   * via the shared agentAssignmentEdits() builder. Aborts with CONFIG_UNREADABLE /
+   * JsoncSyntaxError before writing anything; creates the file when missing.
+   */
+  setAgentModel(section: "agents" | "categories", name: string, model: string, variant: string | null): void {
+    const target = this.resolveAgentConfig();
+    const raw = this.readTextForEdit(target.path);
+    const parse = parseSafe<unknown>(raw);
+    if (parse.errors.length > 0) {
+      // Never touch a broken file — same contract as presetService.apply().
+      throw new JsoncSyntaxError(parse.errors);
+    }
+    const edits = agentAssignmentEdits(target.sectionPath, target.reasoningKey, section, name, model, variant);
+    const next = applyEdits(raw.length > 0 ? raw : "{}", edits);
+    defaultFs.mkdirSync(path.dirname(target.path), { recursive: true });
+    this.writeAtomic(target.path, next);
+  }
+
   writeAtomic(filePath: string, content: string): void {
     writeFileAtomic(filePath, content);
+    this.fileMemo.delete(filePath);
   }
 
   listModels(): ModelOption[] {
@@ -502,16 +375,12 @@ export class ConfigStore {
     const localIds = new Set(fromLocal.map((m) => m.id));
     return mergeModelOptions(fromOpencode, fromLocal).map((option) => ({
       option,
-      source: opencodeIds.has(option.id)
-        ? localIds.has(option.id)
-          ? "both"
-          : "opencode"
-        : "local",
+      source: opencodeIds.has(option.id) ? (localIds.has(option.id) ? "both" : "opencode") : "local",
     }));
   }
 
   private opencodeModels(): ModelOption[] {
-    const result = this.readParse<{ provider?: Record<string, { models?: Record<string, unknown> }> }>(
+    const result = this.readParseMemoized<{ provider?: Record<string, { models?: Record<string, unknown> }> }>(
       this.resolveOpencodeConfigPath(),
     );
     const options: ModelOption[] = [];
@@ -524,7 +393,9 @@ export class ConfigStore {
         }
         for (const [model, modelConfig] of Object.entries(models)) {
           const label =
-            modelConfig && typeof modelConfig === "object" && typeof (modelConfig as { name?: unknown }).name === "string"
+            modelConfig &&
+            typeof modelConfig === "object" &&
+            typeof (modelConfig as { name?: unknown }).name === "string"
               ? (modelConfig as { name: string }).name
               : model;
           options.push({ id: `${provider}/${model}`, provider, model, label });
@@ -535,7 +406,7 @@ export class ConfigStore {
   }
 
   defaultModel(): string | null {
-    const text = this.readTextOrEmpty(this.resolveOpencodeConfigPath());
+    const text = this.readMemoizedText(this.resolveOpencodeConfigPath());
     if (!text) {
       return null;
     }
@@ -586,11 +457,7 @@ function toModelSetting(entry: unknown): ModelSetting | null {
       ? (record.models[0] as Record<string, unknown>)
       : undefined;
   const model =
-    typeof record.model === "string"
-      ? record.model
-      : typeof chainHead?.model === "string"
-        ? chainHead.model
-        : null;
+    typeof record.model === "string" ? record.model : typeof chainHead?.model === "string" ? chainHead.model : null;
   if (model === null) {
     return null;
   }

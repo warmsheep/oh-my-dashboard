@@ -1,13 +1,11 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import {
-  BackupService,
-  DEFAULT_RETENTION,
-  isoFs,
-} from "../../src/core/backupService";
-import { strToU8, zipSync } from "fflate";
+
+import { deflateSync, strToU8, zipSync } from "fflate";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+
+import { assertZipEntryName, BackupService, DEFAULT_RETENTION, isoFs } from "../../src/core/backupService";
 
 // All tests run against throwaway sandboxes — NEVER the real ~/.config/opencode.
 let configDir: string;
@@ -23,10 +21,7 @@ afterEach(() => {
 /** Full managed tree: 2 jsons + AGENTS.md + command/{a.md,sub/b.md} + skills/one/x.md = 6 files. */
 function seedFullTree(): void {
   fs.writeFileSync(path.join(configDir, "opencode.json"), '{"model":"glm"}');
-  fs.writeFileSync(
-    path.join(configDir, "oh-my-opencode.json"),
-    '{"agents":{}}'
-  );
+  fs.writeFileSync(path.join(configDir, "oh-my-opencode.json"), '{"agents":{}}');
   fs.writeFileSync(path.join(configDir, "AGENTS.md"), "# AGENTS\n");
   fs.mkdirSync(path.join(configDir, "command", "sub"), { recursive: true });
   fs.writeFileSync(path.join(configDir, "command", "a.md"), "a");
@@ -49,9 +44,7 @@ function seqNow(startIso: string, stepMs = 1000): () => Date {
 
 describe("isoFs", () => {
   it("formats an ISO timestamp with colons/dots replaced by dashes (fs-safe)", () => {
-    expect(isoFs(new Date("2026-08-21T15:04:05.123Z"))).toBe(
-      "2026-08-21T15-04-05-123Z"
-    );
+    expect(isoFs(new Date("2026-08-21T15:04:05.123Z"))).toBe("2026-08-21T15-04-05-123Z");
   });
 });
 
@@ -82,27 +75,13 @@ describe("BackupService.create", () => {
     expect(entry.dir).toBe(path.join(configDir, "backups", entry.dirName));
 
     // every file copied at the correct relative path
-    expect(fs.readFileSync(path.join(entry.dir, "opencode.json"), "utf8")).toBe(
-      '{"model":"glm"}'
-    );
-    expect(
-      fs.readFileSync(path.join(entry.dir, "oh-my-opencode.json"), "utf8")
-    ).toBe('{"agents":{}}');
-    expect(fs.readFileSync(path.join(entry.dir, "AGENTS.md"), "utf8")).toBe(
-      "# AGENTS\n"
-    );
-    expect(
-      fs.readFileSync(path.join(entry.dir, "command", "a.md"), "utf8")
-    ).toBe("a");
-    expect(
-      fs.readFileSync(path.join(entry.dir, "command", "sub", "b.md"), "utf8")
-    ).toBe("b");
-    expect(
-      fs.readFileSync(path.join(entry.dir, "skills", "one", "x.md"), "utf8")
-    ).toBe("x");
-    expect(
-      fs.readFileSync(path.join(entry.dir, "presets", "work.json"), "utf8")
-    ).toBe('{"name":"work"}');
+    expect(fs.readFileSync(path.join(entry.dir, "opencode.json"), "utf8")).toBe('{"model":"glm"}');
+    expect(fs.readFileSync(path.join(entry.dir, "oh-my-opencode.json"), "utf8")).toBe('{"agents":{}}');
+    expect(fs.readFileSync(path.join(entry.dir, "AGENTS.md"), "utf8")).toBe("# AGENTS\n");
+    expect(fs.readFileSync(path.join(entry.dir, "command", "a.md"), "utf8")).toBe("a");
+    expect(fs.readFileSync(path.join(entry.dir, "command", "sub", "b.md"), "utf8")).toBe("b");
+    expect(fs.readFileSync(path.join(entry.dir, "skills", "one", "x.md"), "utf8")).toBe("x");
+    expect(fs.readFileSync(path.join(entry.dir, "presets", "work.json"), "utf8")).toBe('{"name":"work"}');
 
     // manifest fields exact
     expect(entry.manifest.version).toBe(1);
@@ -111,12 +90,10 @@ describe("BackupService.create", () => {
     expect(entry.manifest.fileCount).toBe(7);
     expect(entry.manifest.machine).toBe("test-host");
     expect(entry.manifest.createdAt).toBe("2026-08-21T15:04:05.123Z");
-    expect(() => Date.parse(entry.manifest.createdAt)).not.toBeNull();
+    expect(Number.isNaN(Date.parse(entry.manifest.createdAt))).toBe(false);
 
     // manifest.json persisted on disk matches the returned entry
-    const onDisk = JSON.parse(
-      fs.readFileSync(path.join(entry.dir, "manifest.json"), "utf8")
-    );
+    const onDisk = JSON.parse(fs.readFileSync(path.join(entry.dir, "manifest.json"), "utf8"));
     expect(onDisk).toEqual(entry.manifest);
   });
 
@@ -296,9 +273,7 @@ describe("BackupService.prune", () => {
     expect(svc.list()).toHaveLength(20);
     expect(svc.list().map((e) => e.dirName)).toEqual(created.slice(5).reverse()); // newest 20, DESC
     expect(fs.existsSync(path.join(configDir, "backups", created[0]))).toBe(false);
-    expect(
-      fs.existsSync(path.join(configDir, "backups", created[24]))
-    ).toBe(true);
+    expect(fs.existsSync(path.join(configDir, "backups", created[24]))).toBe(true);
   });
 
   it("manual backups survive prune() with no args; retention null for manual honored", () => {
@@ -323,14 +298,15 @@ describe("BackupService.prune", () => {
     const removed = svc.prune(); // no args → all reasons
 
     expect(removed).toHaveLength(2); // only the 2 oldest pre-save
-    expect(
-      removed.every((e) => e.manifest.reason !== "manual")
-    ).toBe(true);
+    expect(removed.every((e) => e.manifest.reason !== "manual")).toBe(true);
     const remaining = svc.list();
     // manual (null retention) fully survives; newest 2 pre-save kept per retention
-    expect(remaining.filter((e) => e.manifest.reason === "manual").map((e) => e.dirName).sort()).toEqual(
-      [...manualNames].sort()
-    );
+    expect(
+      remaining
+        .filter((e) => e.manifest.reason === "manual")
+        .map((e) => e.dirName)
+        .sort(),
+    ).toEqual([...manualNames].sort());
     expect(remaining.filter((e) => e.manifest.reason === "pre-save")).toHaveLength(2);
   });
 
@@ -361,10 +337,7 @@ describe("BackupService.restore", () => {
       now: seqNow("2026-08-21T15:04:00.000Z"),
     });
     const snap = svc.create("manual");
-    const original = fs.readFileSync(
-      path.join(configDir, "opencode.json"),
-      "utf8"
-    );
+    const original = fs.readFileSync(path.join(configDir, "opencode.json"), "utf8");
 
     fs.appendFileSync(path.join(configDir, "opencode.json"), "\n//garbage");
     fs.rmSync(path.join(configDir, "command", "a.md"));
@@ -372,18 +345,10 @@ describe("BackupService.restore", () => {
 
     svc.restore(snap.dirName);
 
-    expect(fs.readFileSync(path.join(configDir, "opencode.json"), "utf8")).toBe(
-      original
-    );
-    expect(
-      fs.readFileSync(path.join(configDir, "command", "a.md"), "utf8")
-    ).toBe("a");
-    expect(
-      fs.readFileSync(path.join(configDir, "command", "sub", "b.md"), "utf8")
-    ).toBe("b");
-    expect(
-      fs.readFileSync(path.join(configDir, "presets", "work.json"), "utf8")
-    ).toBe('{"name":"work"}');
+    expect(fs.readFileSync(path.join(configDir, "opencode.json"), "utf8")).toBe(original);
+    expect(fs.readFileSync(path.join(configDir, "command", "a.md"), "utf8")).toBe("a");
+    expect(fs.readFileSync(path.join(configDir, "command", "sub", "b.md"), "utf8")).toBe("b");
+    expect(fs.readFileSync(path.join(configDir, "presets", "work.json"), "utf8")).toBe('{"name":"work"}');
 
     expect(svc.list()).toHaveLength(1);
     expect(svc.list()[0].dirName).toBe(snap.dirName);
@@ -401,11 +366,7 @@ describe("BackupService.diffPairs", () => {
 
     // full tree → 3 pairs
     let pairs = svc.diffPairs(entry);
-    expect(pairs.map((p) => p.label).sort()).toEqual([
-      "AGENTS.md",
-      "oh-my-opencode.json",
-      "opencode.json",
-    ]);
+    expect(pairs.map((p) => p.label).sort()).toEqual(["AGENTS.md", "oh-my-opencode.json", "opencode.json"]);
     for (const p of pairs) {
       expect(p.backup).toBe(path.join(entry.dir, p.label));
       expect(p.current).toBe(path.join(configDir, p.label));
@@ -416,10 +377,7 @@ describe("BackupService.diffPairs", () => {
     // AGENTS.md gone from current → only 2 pairs
     fs.rmSync(path.join(configDir, "AGENTS.md"));
     pairs = svc.diffPairs(entry);
-    expect(pairs.map((p) => p.label).sort()).toEqual([
-      "oh-my-opencode.json",
-      "opencode.json",
-    ]);
+    expect(pairs.map((p) => p.label).sort()).toEqual(["oh-my-opencode.json", "opencode.json"]);
   });
 });
 
@@ -449,7 +407,16 @@ describe("BackupService staging + symlink handling", () => {
     // A leftover staging dir from a crashed run (even with a manifest) must stay invisible.
     const stale = path.join(configDir, "backups", ".tmp-2026-01-01T00-00-00-000Z-manual");
     fs.mkdirSync(stale, { recursive: true });
-    fs.writeFileSync(path.join(stale, "manifest.json"), JSON.stringify({ version: 1, reason: "manual", createdAt: "2026-01-01T00:00:00.000Z", fileCount: 0, machine: "x" }));
+    fs.writeFileSync(
+      path.join(stale, "manifest.json"),
+      JSON.stringify({
+        version: 1,
+        reason: "manual",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        fileCount: 0,
+        machine: "x",
+      }),
+    );
 
     const entry = svc.create("manual");
     expect(fs.existsSync(entry.dir)).toBe(true);
@@ -458,7 +425,7 @@ describe("BackupService staging + symlink handling", () => {
     expect(svc.list().map((e) => e.dirName)).toEqual([entry.dirName]);
   });
 
-  it("snapshots symlinked skill content by dereference (no symlink privilege needed on Windows)", () => {
+  it("create() SKIPS symlinked dir entries instead of dereferencing them (no exfiltration)", () => {
     seedFullTree();
     const realDir = path.join(configDir, "skills", "real-skill");
     fs.mkdirSync(realDir, { recursive: true });
@@ -472,13 +439,147 @@ describe("BackupService staging + symlink handling", () => {
     const svc = new BackupService({ configDir, now: seqNow("2026-08-21T15:04:00.000Z") });
     const entry = svc.create("manual");
 
-    const copy = path.join(entry.dir, "skills", "linked-skill", "SKILL.md");
-    expect(fs.readFileSync(copy, "utf8")).toBe("# real");
-    expect(fs.lstatSync(path.join(entry.dir, "skills", "linked-skill")).isSymbolicLink()).toBe(false);
-
-    svc.restore(entry.dirName);
-    expect(fs.readFileSync(path.join(configDir, "skills", "linked-skill", "SKILL.md"), "utf8")).toBe("# real");
+    expect(fs.existsSync(path.join(entry.dir, "skills", "linked-skill"))).toBe(false);
+    expect(fs.readFileSync(path.join(entry.dir, "skills", "real-skill", "SKILL.md"), "utf8")).toBe("# real");
+    // fileCount counts only real files (2 seeded skills files + 1 new SKILL.md = 3)
+    expect(entry.manifest.fileCount).toBe(7 + 1);
   });
+
+  it.runIf(process.platform !== "win32")(
+    "create() skips file symlinks pointing outside the tree (link target never copied)",
+    () => {
+      seedFullTree();
+      const victim = path.join(configDir, "secret.txt");
+      fs.writeFileSync(victim, "SECRET-API-KEY");
+      fs.symlinkSync(victim, path.join(configDir, "skills", "leak.txt"), "file");
+
+      const svc = new BackupService({ configDir, now: seqNow("2026-08-21T15:04:00.000Z") });
+      const entry = svc.create("manual");
+
+      expect(fs.existsSync(path.join(entry.dir, "skills", "leak.txt"))).toBe(false);
+      const exported = fs.readFileSync(path.join(entry.dir, "skills", "one", "x.md"), "utf8");
+      expect(exported).toBe("x");
+    },
+  );
+
+  it("create() skips a managed dir that is itself a symlink", () => {
+    fs.writeFileSync(path.join(configDir, "opencode.json"), "{}");
+    const realSkills = path.join(configDir, "real-skills");
+    fs.mkdirSync(realSkills, { recursive: true });
+    fs.writeFileSync(path.join(realSkills, "SKILL.md"), "# s");
+    fs.symlinkSync(realSkills, path.join(configDir, "skills"), process.platform === "win32" ? "junction" : "dir");
+    const svc = new BackupService({ configDir, now: () => new Date("2026-08-21T15:04:05.123Z") });
+    const entry = svc.create("manual");
+    expect(fs.existsSync(path.join(entry.dir, "skills"))).toBe(false);
+    expect(entry.manifest.fileCount).toBe(1);
+  });
+
+  it("create() aborts with BACKUP_CREATE_TOO_LARGE past the byte cap and leaves no residue", () => {
+    seedFullTree();
+    const blob = path.join(configDir, "skills", "blob.bin");
+    fs.writeFileSync(blob, "x");
+    fs.truncateSync(blob, 256 * 1024 * 1024 + 1); // sparse: stat size over cap, no real disk use
+
+    const svc = new BackupService({ configDir, now: () => new Date("2026-08-21T15:04:05.123Z") });
+    expect(() => svc.create("manual")).toThrow("BACKUP_CREATE_TOO_LARGE");
+
+    const backupsDir = path.join(configDir, "backups");
+    expect(fs.readdirSync(backupsDir)).toEqual([]); // staging swept, nothing published
+  });
+
+  it("create() aborts with BACKUP_CREATE_TOO_LARGE beyond the max directory depth", () => {
+    seedFullTree();
+    let deep = path.join(configDir, "skills");
+    for (let i = 0; i < 20; i++) {
+      deep = path.join(deep, `d${i}`);
+    }
+    fs.mkdirSync(deep, { recursive: true });
+    fs.writeFileSync(path.join(deep, "bottom.md"), "x");
+
+    const svc = new BackupService({ configDir, now: () => new Date("2026-08-21T15:04:05.123Z") });
+    expect(() => svc.create("manual")).toThrow("BACKUP_CREATE_TOO_LARGE");
+    expect(fs.readdirSync(path.join(configDir, "backups"))).toEqual([]);
+  });
+
+  it("create() counts DIRECTORY entries into the 20k-entry budget — >20k empty dirs fails at create (export parity)", () => {
+    // Real empty dirs (mkdir is cheap); fake-fs scaffolding would cost more than the
+    // 20k syscalls it stubs. exportZip counts dir entries, so a create() that ignores
+    // them would mint a backup that can never be exported (BACKUP_EXPORT_TOO_LARGE).
+    fs.writeFileSync(path.join(configDir, "opencode.json"), "{}");
+    const skillsDir = path.join(configDir, "skills");
+    fs.mkdirSync(skillsDir, { recursive: true });
+    for (let i = 0; i <= 20_000; i += 1) {
+      // 20,001 empty dirs: skills/ itself + 20,001 children = 20,002 dir entries.
+      fs.mkdirSync(path.join(skillsDir, `d${i}`));
+    }
+    const svc = new BackupService({ configDir, now: () => new Date("2026-08-21T15:04:05.123Z") });
+    expect(() => svc.create("manual")).toThrow("BACKUP_CREATE_TOO_LARGE");
+    expect(fs.readdirSync(path.join(configDir, "backups"))).toEqual([]);
+  });
+
+  it.runIf(process.platform !== "win32")(
+    "restore() skips a symlink planted INSIDE the backup dir — its target never materializes",
+    () => {
+      seedFullTree();
+      const svc = new BackupService({ configDir, now: seqNow("2026-08-21T15:04:00.000Z") });
+      const snap = svc.create("manual");
+
+      // Hand-plant a link inside the published backup (zip import cannot do this):
+      // a dereferencing restore would copy the victim's CONTENT into skills/loot,
+      // after which create()/exportZip happily ship it out.
+      const victim = path.join(configDir, "id_rsa");
+      fs.writeFileSync(victim, "PRIVATE-KEY");
+      fs.symlinkSync(victim, path.join(snap.dir, "skills", "loot"), "file");
+      fs.rmSync(path.join(configDir, "skills", "one"), { recursive: true, force: true });
+
+      svc.restore(snap.dirName);
+
+      expect(fs.existsSync(path.join(configDir, "skills", "loot"))).toBe(false);
+      expect(fs.readFileSync(victim, "utf8")).toBe("PRIVATE-KEY");
+      // real backup entries still restore
+      expect(fs.readFileSync(path.join(configDir, "skills", "one", "x.md"), "utf8")).toBe("x");
+    },
+  );
+
+  it("restore() replaces a symlinked dir planted in the target instead of writing through it", () => {
+    seedFullTree();
+    const svc = new BackupService({ configDir, now: seqNow("2026-08-21T15:04:00.000Z") });
+    const snap = svc.create("manual");
+
+    const victim = path.join(configDir, "victim-profile.txt");
+    fs.writeFileSync(victim, "VICTIM-CONTENT");
+    fs.rmSync(path.join(configDir, "skills"), { recursive: true, force: true });
+    fs.mkdirSync(path.join(configDir, "skills"));
+    // backup holds skills/one/x.md — plant a link AT skills/one so restore would
+    // otherwise write x.md THROUGH it into the victim file
+    fs.symlinkSync(victim, path.join(configDir, "skills", "one"), process.platform === "win32" ? "junction" : "dir");
+
+    svc.restore(snap.dirName);
+
+    expect(fs.lstatSync(path.join(configDir, "skills", "one")).isSymbolicLink()).toBe(false);
+    expect(fs.readFileSync(path.join(configDir, "skills", "one", "x.md"), "utf8")).toBe("x");
+    expect(fs.readFileSync(victim, "utf8")).toBe("VICTIM-CONTENT");
+  });
+
+  it.runIf(process.platform !== "win32")(
+    "restore() replaces a symlinked FILE planted in the target; link target untouched",
+    () => {
+      seedFullTree();
+      const svc = new BackupService({ configDir, now: seqNow("2026-08-21T15:04:00.000Z") });
+      const snap = svc.create("manual");
+
+      const victim = path.join(configDir, "victim-bashrc");
+      fs.writeFileSync(victim, "VICTIM-CONTENT");
+      fs.rmSync(path.join(configDir, "command", "a.md"));
+      fs.symlinkSync(victim, path.join(configDir, "command", "a.md"), "file");
+
+      svc.restore(snap.dirName);
+
+      expect(fs.lstatSync(path.join(configDir, "command", "a.md")).isSymbolicLink()).toBe(false);
+      expect(fs.readFileSync(path.join(configDir, "command", "a.md"), "utf8")).toBe("a");
+      expect(fs.readFileSync(victim, "utf8")).toBe("VICTIM-CONTENT");
+    },
+  );
 
   it("restore() keeps the live config intact when a managed file copy is impossible", () => {
     seedFullTree();
@@ -528,7 +629,12 @@ describe("BackupService zip export/import", () => {
 
     const second = svc.importZip(zipPath);
     expect(second.dirName).toBe(`${entry.dirName}-import-1`);
-    expect(svc.list().map((e) => e.dirName).sort()).toEqual([entry.dirName, second.dirName].sort());
+    expect(
+      svc
+        .list()
+        .map((e) => e.dirName)
+        .sort(),
+    ).toEqual([entry.dirName, second.dirName].sort());
   });
 
   it("rejects traversal entries and writes nothing", () => {
@@ -542,7 +648,15 @@ describe("BackupService zip export/import", () => {
       fs.writeFileSync(
         zipPath,
         zipSync({
-          "manifest.json": strToU8(JSON.stringify({ version: 1, reason: "manual", createdAt: "2026-01-01T00:00:00.000Z", fileCount: 1, machine: "x" })),
+          "manifest.json": strToU8(
+            JSON.stringify({
+              version: 1,
+              reason: "manual",
+              createdAt: "2026-01-01T00:00:00.000Z",
+              fileCount: 1,
+              machine: "x",
+            }),
+          ),
           [bad]: strToU8("x"),
         }),
       );
@@ -578,7 +692,15 @@ describe("BackupService zip export/import", () => {
     fs.writeFileSync(
       zipPath,
       zipSync({
-        "manifest.json": strToU8(JSON.stringify({ version: 1, reason: "weird-reason", createdAt: "2026-01-01T00:00:00.000Z", fileCount: 1, machine: "x" })),
+        "manifest.json": strToU8(
+          JSON.stringify({
+            version: 1,
+            reason: "weird-reason",
+            createdAt: "2026-01-01T00:00:00.000Z",
+            fileCount: 1,
+            machine: "x",
+          }),
+        ),
         "opencode.json": strToU8("{}"),
       }),
     );
@@ -598,7 +720,13 @@ describe("BackupService zip export/import", () => {
 describe("BackupService zip import hardening", () => {
   const manifestEntry = {
     "manifest.json": strToU8(
-      JSON.stringify({ version: 1, reason: "manual", createdAt: "2026-01-01T00:00:00.000Z", fileCount: 2, machine: "x" }),
+      JSON.stringify({
+        version: 1,
+        reason: "manual",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        fileCount: 2,
+        machine: "x",
+      }),
     ),
   };
 
@@ -619,7 +747,13 @@ describe("BackupService zip import hardening", () => {
       zipPath,
       zipSync({
         "manifest.json": strToU8(
-          JSON.stringify({ version: 1, reason: "constructor", createdAt: "2026-01-01T00:00:00.000Z", fileCount: 1, machine: "x" }),
+          JSON.stringify({
+            version: 1,
+            reason: "constructor",
+            createdAt: "2026-01-01T00:00:00.000Z",
+            fileCount: 1,
+            machine: "x",
+          }),
         ),
         "opencode.json": strToU8("{}"),
       }),
@@ -638,9 +772,347 @@ describe("BackupService zip import hardening", () => {
     fs.writeFileSync(zipPath, zipSync(many));
     expect(() => svc.importZip(zipPath)).toThrow("BACKUP_IMPORT_INVALID");
     const backupsDir = path.join(configDir, "backups");
-    const residue = fs.existsSync(backupsDir)
-      ? fs.readdirSync(backupsDir).filter((n) => !n.endsWith(".zip"))
-      : [];
+    const residue = fs.existsSync(backupsDir) ? fs.readdirSync(backupsDir).filter((n) => !n.endsWith(".zip")) : [];
     expect(residue).toEqual([]);
+  });
+
+  it("rejects an out-of-range createdAt (year > 9999) by falling back to now()", () => {
+    seedFullTree();
+    const svc = new BackupService({
+      configDir,
+      now: () => new Date("2026-08-22T10:00:00.000Z"),
+    });
+    const zipPath = path.join(configDir, "future.zip");
+    fs.writeFileSync(
+      zipPath,
+      zipSync({
+        "manifest.json": strToU8(
+          JSON.stringify({
+            version: 1,
+            reason: "manual",
+            createdAt: "+100000-01-01T00:00:00Z",
+            fileCount: 1,
+            machine: "x",
+          }),
+        ),
+        "opencode.json": strToU8("{}"),
+      }),
+    );
+    const imported = svc.importZip(zipPath);
+    expect(imported.dirName).toBe("2026-08-22T10-00-00-000Z-manual");
+  });
+});
+
+describe("BackupService lying-zip hardening", () => {
+  type CraftedEntry = { name: string; data: Buffer; declaredOriginalSize: number; method?: 0 | 8 };
+
+  /**
+   * Minimal zip writer with per-entry originalSize control — fflate's zipSync always
+   * writes honest central-directory headers, so hostile/truncated cases need raw bytes.
+   * CRC32 is left zero (fflate's sync unzip path does not verify it).
+   */
+  function craftZip(items: CraftedEntry[]): Buffer {
+    const locals: Buffer[] = [];
+    const centrals: Buffer[] = [];
+    let offset = 0;
+    for (const item of items) {
+      const nameBuf = Buffer.from(item.name, "utf8");
+      const method = item.method ?? 0;
+      const lfh = Buffer.alloc(30);
+      lfh.writeUInt32LE(0x04034b50, 0);
+      lfh.writeUInt16LE(20, 4);
+      lfh.writeUInt16LE(0x0800, 6); // UTF-8 names
+      lfh.writeUInt16LE(method, 8);
+      lfh.writeUInt32LE(item.data.length, 18);
+      lfh.writeUInt32LE(item.declaredOriginalSize, 22);
+      lfh.writeUInt16LE(nameBuf.length, 26);
+      locals.push(lfh, nameBuf, item.data);
+
+      const cdh = Buffer.alloc(46);
+      cdh.writeUInt32LE(0x02014b50, 0);
+      cdh.writeUInt16LE(20, 4);
+      cdh.writeUInt16LE(20, 6);
+      cdh.writeUInt16LE(0x0800, 8);
+      cdh.writeUInt16LE(method, 10);
+      cdh.writeUInt32LE(item.data.length, 20);
+      cdh.writeUInt32LE(item.declaredOriginalSize, 24);
+      cdh.writeUInt16LE(nameBuf.length, 28);
+      cdh.writeUInt32LE(offset, 42);
+      centrals.push(cdh, nameBuf);
+
+      offset += 30 + nameBuf.length + item.data.length;
+    }
+    const central = Buffer.concat(centrals);
+    const eocd = Buffer.alloc(22);
+    eocd.writeUInt32LE(0x06054b50, 0);
+    eocd.writeUInt16LE(items.length, 8);
+    eocd.writeUInt16LE(items.length, 10);
+    eocd.writeUInt32LE(central.length, 12);
+    eocd.writeUInt32LE(offset, 16);
+    return Buffer.concat([...locals, central, eocd]);
+  }
+
+  const manifest = (createdAt = "2026-01-01T00:00:00.000Z"): CraftedEntry => {
+    const data = Buffer.from(
+      JSON.stringify({ version: 1, reason: "manual", createdAt, fileCount: 1, machine: "x" }),
+      "utf8",
+    );
+    return { name: "manifest.json", data, declaredOriginalSize: data.length };
+  };
+
+  const honest = (entry: CraftedEntry): CraftedEntry => ({
+    ...entry,
+    declaredOriginalSize: entry.data.length,
+  });
+
+  it("rejects a stored entry whose materialized size differs from the declared originalSize", () => {
+    seedFullTree();
+    const svc = new BackupService({ configDir });
+    const zipPath = path.join(configDir, "lying.zip");
+    fs.writeFileSync(
+      zipPath,
+      craftZip([
+        honest(manifest()),
+        { name: "skills/blob.bin", data: Buffer.alloc(10, 0x41), declaredOriginalSize: 5 },
+      ]),
+    );
+    expect(() => svc.importZip(zipPath)).toThrow("BACKUP_IMPORT_INVALID");
+  });
+
+  it("rejects an honest-header zip bomb via the compression-ratio guard", () => {
+    seedFullTree();
+    const svc = new BackupService({ configDir });
+    // 4MB of zeros deflate to ~4KB (~1022:1, near deflate's 1032:1 ceiling) — above
+    // the 1000:1 cap while the declared 4MB stays under the 256MB total cap, so ONLY
+    // the per-entry ratio guard fires here.
+    const bomb = Buffer.alloc(4 * 1024 * 1024, 0);
+    const zipPath = path.join(configDir, "bomb.zip");
+    fs.writeFileSync(
+      zipPath,
+      craftZip([
+        honest(manifest()),
+        { name: "skills/bomb.bin", data: Buffer.from(deflateSync(bomb)), declaredOriginalSize: bomb.length, method: 8 },
+      ]),
+    );
+    expect(() => svc.importZip(zipPath)).toThrow("BACKUP_IMPORT_INVALID");
+  });
+
+  it("imports its own export of low-entropy files (zero-filled ~394:1) — the 1000:1 cap must not reject them", () => {
+    seedFullTree();
+    // A 10KB zero-filled (sparse) file: ~394:1 under fflate level 6 — the exact shape
+    // the old 200:1 cap false-rejected as "损坏" even though we exported it ourselves.
+    const sparse = path.join(configDir, "skills", "sparse.bin");
+    fs.writeFileSync(sparse, "");
+    fs.truncateSync(sparse, 10 * 1024);
+    const svc = new BackupService({ configDir, now: seqNow("2026-08-21T15:04:00.000Z") });
+    const entry = svc.create("manual");
+    const zipPath = path.join(configDir, "low-entropy.zip");
+    svc.exportZip(entry.dirName, zipPath);
+    svc.remove(entry.dirName);
+
+    const imported = svc.importZip(zipPath);
+
+    expect(fs.statSync(path.join(imported.dir, "skills", "sparse.bin")).size).toBe(10 * 1024);
+  });
+
+  it("rejects few-entry zips whose declared originalSize sum exceeds the total-bytes cap", () => {
+    seedFullTree();
+    const svc = new BackupService({ configDir });
+    // 300MB declared against a ~1.5MB stored payload is a 150:1 ratio — it passes the
+    // per-entry ratio guard (200:1) but crosses the 256MB declared-total cap on the very
+    // first filter call, so nothing is ever inflated into memory.
+    const declared = 300 * 1024 * 1024;
+    const zipPath = path.join(configDir, "sum-bomb.zip");
+    fs.writeFileSync(
+      zipPath,
+      craftZip([
+        honest(manifest()),
+        { name: "skills/huge.bin", data: Buffer.alloc(declared / 200 + 1024), declaredOriginalSize: declared },
+      ]),
+    );
+    expect(() => svc.importZip(zipPath)).toThrow("BACKUP_IMPORT_INVALID");
+    const backupsDir = path.join(configDir, "backups");
+    const residue = fs.existsSync(backupsDir) ? fs.readdirSync(backupsDir).filter((n) => !n.endsWith(".zip")) : [];
+    expect(residue).toEqual([]);
+  });
+
+  it("rejects a zip whose on-disk size exceeds the cap before reading any bytes", () => {
+    seedFullTree();
+    const zipPath = path.join(configDir, "huge-on-disk.zip");
+    fs.writeFileSync(zipPath, "placeholder");
+    let reads = 0;
+    const oversizedFs = {
+      ...fs,
+      statSync: (p: Parameters<typeof fs.statSync>[0]) => ({ ...fs.statSync(p), size: 256 * 1024 * 1024 + 1 }),
+      readFileSync: (...args: Parameters<typeof fs.readFileSync>) => {
+        reads += 1;
+        return fs.readFileSync(...args);
+      },
+    } as typeof fs;
+    const svc = new BackupService({ configDir, fs: oversizedFs });
+    expect(() => svc.importZip(zipPath)).toThrow("BACKUP_IMPORT_INVALID");
+    expect(reads).toBe(0); // the statSync precheck fires before readFileSync of the archive
+  });
+
+  it("maps write-phase ENAMETOOLONG / ERR_INVALID_FILE_NAME to BACKUP_IMPORT_INVALID", () => {
+    seedFullTree();
+    const zipPath = path.join(configDir, "ok.zip");
+    fs.writeFileSync(
+      zipPath,
+      zipSync({
+        "manifest.json": strToU8(
+          JSON.stringify({
+            version: 1,
+            reason: "manual",
+            createdAt: "2026-01-01T00:00:00.000Z",
+            fileCount: 1,
+            machine: "x",
+          }),
+        ),
+        "opencode.json": strToU8("{}"),
+      }),
+    );
+    for (const code of ["ENAMETOOLONG", "ERR_INVALID_FILE_NAME"] as const) {
+      const denied = new Error(`${code}: boom`) as NodeJS.ErrnoException;
+      denied.code = code;
+      const failingFs = {
+        ...fs,
+        writeFileSync: () => {
+          throw denied;
+        },
+      } as typeof fs;
+      const svc = new BackupService({ configDir, fs: failingFs });
+      expect(() => svc.importZip(zipPath)).toThrow("BACKUP_IMPORT_INVALID");
+    }
+  });
+});
+
+describe("assertZipEntryName (static hardening)", () => {
+  it("rejects path segments longer than 255 bytes on every platform", () => {
+    expect(() => assertZipEntryName(`dir/${"a".repeat(256)}.txt`, "linux")).toThrow("BACKUP_IMPORT_INVALID");
+    expect(() => assertZipEntryName("b".repeat(255), "win32")).not.toThrow();
+    expect(() => assertZipEntryName(`г/${"д".repeat(128)}`, "linux")).toThrow("BACKUP_IMPORT_INVALID"); // 256 bytes of 2-byte chars
+  });
+
+  it("rejects Windows reserved device names as segments on win32 only (any extension)", () => {
+    for (const evil of ["CON", "con.txt", "LPT1", "dir/Com7.md", "aux/skills"]) {
+      expect(() => assertZipEntryName(evil, "win32")).toThrow("BACKUP_IMPORT_INVALID");
+    }
+    expect(() => assertZipEntryName("CON", "linux")).not.toThrow();
+    expect(() => assertZipEntryName("console.txt", "win32")).not.toThrow();
+    expect(() => assertZipEntryName("contact.md", "win32")).not.toThrow();
+  });
+});
+
+describe("BackupService exportZip caps (symmetric with import)", () => {
+  function craftBackupDir(extra: (dir: string) => void): string {
+    const dirName = "2026-08-21T15-04-05-123Z-manual";
+    const backupDir = path.join(configDir, "backups", dirName);
+    fs.mkdirSync(backupDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(backupDir, "manifest.json"),
+      JSON.stringify({
+        version: 1,
+        reason: "manual",
+        createdAt: "2026-08-21T15:04:05.123Z",
+        fileCount: 1,
+        machine: "x",
+      }),
+    );
+    extra(backupDir);
+    return dirName;
+  }
+
+  it("refuses to export content over the total-bytes cap before building the zip", () => {
+    const dirName = craftBackupDir((backupDir) => {
+      const blob = path.join(backupDir, "skills", "blob.bin");
+      fs.mkdirSync(path.join(backupDir, "skills"));
+      fs.writeFileSync(blob, "x");
+      fs.truncateSync(blob, 256 * 1024 * 1024 + 1); // sparse — never actually read
+    });
+    const svc = new BackupService({ configDir });
+    const out = path.join(configDir, "out.zip");
+    expect(() => svc.exportZip(dirName, out)).toThrow("BACKUP_EXPORT_TOO_LARGE");
+    expect(fs.existsSync(out)).toBe(false);
+  });
+
+  it("refuses to export content over the entry cap before building the zip", () => {
+    const dirName = craftBackupDir((backupDir) => {
+      for (let i = 0; i < 20_001; i += 1) {
+        fs.writeFileSync(path.join(backupDir, `f${i}.txt`), "");
+      }
+    });
+    const svc = new BackupService({ configDir });
+    const out = path.join(configDir, "out.zip");
+    expect(() => svc.exportZip(dirName, out)).toThrow("BACKUP_EXPORT_TOO_LARGE");
+    expect(fs.existsSync(out)).toBe(false);
+  });
+});
+
+describe("BackupService same-millisecond create collision", () => {
+  it("create() negotiates a -N suffix instead of throwing ENOTEMPTY on rename", () => {
+    seedFullTree();
+    const frozen = () => new Date("2026-08-21T15:04:05.123Z");
+    const svc = new BackupService({ configDir, now: frozen });
+
+    const first = svc.create("manual");
+    const second = svc.create("manual");
+    const third = svc.create("manual");
+
+    expect(second.dirName).toBe(`${first.dirName}-1`);
+    expect(third.dirName).toBe(`${first.dirName}-2`);
+    for (const entry of [first, second, third]) {
+      expect(fs.existsSync(entry.dir)).toBe(true);
+      expect(fs.readFileSync(path.join(entry.dir, "opencode.json"), "utf8")).toBe('{"model":"glm"}');
+    }
+    expect(
+      svc
+        .list()
+        .map((e) => e.dirName)
+        .sort(),
+    ).toEqual([first.dirName, second.dirName, third.dirName].sort());
+  });
+});
+
+describe("BackupService.list resilience", () => {
+  it("degrades to [] when the backups dir is unreadable (EACCES)", () => {
+    fs.mkdirSync(path.join(configDir, "backups"), { recursive: true });
+    const denied = new Error("EACCES: permission denied, scandir") as NodeJS.ErrnoException;
+    denied.code = "EACCES";
+    const failingFs = {
+      ...fs,
+      readdirSync: () => {
+        throw denied;
+      },
+    } as typeof fs;
+    const svc = new BackupService({ configDir, fs: failingFs });
+    expect(svc.list()).toEqual([]);
+  });
+
+  it("memoizes the manifest parse per dirName and re-reads only when mtime changes", () => {
+    seedFullTree();
+    let manifestReads = 0;
+    const countingFs = {
+      ...fs,
+      readFileSync: (...args: Parameters<typeof fs.readFileSync>) => {
+        manifestReads += 1;
+        return fs.readFileSync(...args);
+      },
+    } as typeof fs;
+    const svc = new BackupService({
+      configDir,
+      now: seqNow("2026-08-21T15:04:00.000Z"),
+      fs: countingFs,
+    });
+    svc.create("manual");
+    expect(manifestReads).toBe(1); // create()'s publish check read (and warmed) it once
+    svc.list();
+    svc.list();
+    expect(manifestReads).toBe(1); // both list() calls reused the cached parse
+
+    const entry = svc.list()[0];
+    fs.utimesSync(path.join(entry.dir, "manifest.json"), new Date(), new Date());
+    svc.list();
+    expect(manifestReads).toBe(2); // mtime bumped → re-read
   });
 });

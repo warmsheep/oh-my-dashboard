@@ -1,8 +1,8 @@
-import * as fs from "node:fs";
+import * as defaultFs from "node:fs";
 import * as path from "node:path";
 
 export type AtomicFs = Pick<
-  typeof fs,
+  typeof defaultFs,
   "openSync" | "writeFileSync" | "fsyncSync" | "closeSync" | "renameSync" | "rmSync"
 >;
 
@@ -19,7 +19,7 @@ function sleepSync(ms: number): void {
  * so the rename retries with backoff before giving up; POSIX rename is atomic and unaffected.
  * The tmp file is removed on every failure path (write/fsync/rename).
  */
-export function writeFileAtomic(filePath: string, content: string | Uint8Array, fsMod: AtomicFs = fs): void {
+export function writeFileAtomic(filePath: string, content: string | Uint8Array, fsMod: AtomicFs = defaultFs): void {
   const dir = path.dirname(filePath);
   const tmpPath = path.join(dir, `.tmp-${process.pid}-${Math.random().toString(36).slice(2, 10)}`);
   try {
@@ -31,7 +31,13 @@ export function writeFileAtomic(filePath: string, content: string | Uint8Array, 
       fsMod.closeSync(fd);
     }
   } catch (error) {
-    fsMod.rmSync(tmpPath, { force: true });
+    // Best-effort cleanup: a locked tmp file (AV/indexer on Windows) must never
+    // replace the real write failure with an unrelated cleanup error.
+    try {
+      fsMod.rmSync(tmpPath, { force: true });
+    } catch {
+      // keep the original error
+    }
     throw error;
   }
   let lastError: unknown;
@@ -48,6 +54,10 @@ export function writeFileAtomic(filePath: string, content: string | Uint8Array, 
       sleepSync(50 * 2 ** attempt);
     }
   }
-  fsMod.rmSync(tmpPath, { force: true });
+  try {
+    fsMod.rmSync(tmpPath, { force: true });
+  } catch {
+    // keep the original rename error
+  }
   throw lastError;
 }

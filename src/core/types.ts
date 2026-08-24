@@ -1,5 +1,10 @@
-export type Variant = "low" | "medium" | "high" | "xhigh" | "max";
-export const VARIANTS: readonly Variant[] = ["low", "medium", "high", "xhigh", "max"];
+// Canonical KNOWN/VARIANT/ModelOption values live in shared/protocol.ts (single source,
+// also consumed by the webview via @shared); re-exported here so every existing
+// `import ... from "./types"` keeps working unchanged.
+import type { ModelOption } from "../shared/protocol";
+
+export { KNOWN_AGENTS, KNOWN_CATEGORIES, VARIANTS, VARIANT_ORDER } from "../shared/protocol";
+export type { ModelOption, Variant } from "../shared/protocol";
 
 export type JsonPath = (string | number)[];
 
@@ -24,6 +29,18 @@ export interface Preset {
 }
 
 export type BackupReason = "manual" | "pre-apply" | "pre-save" | "pre-restore";
+
+/**
+ * Chinese display labels for {@link BackupReason} values (tree rows, QuickPick items).
+ * Lookups fall back to the raw reason string when a foreign value sneaks in from a
+ * hand-edited manifest.
+ */
+export const BACKUP_REASON_LABELS: Record<string, string> = {
+  manual: "手动",
+  "pre-apply": "应用前",
+  "pre-save": "保存前",
+  "pre-restore": "恢复前",
+};
 
 export interface BackupManifest {
   version: 1;
@@ -51,13 +68,6 @@ export interface JsoncError {
 export interface ParseResult<T> {
   value: T | null;
   errors: JsoncError[];
-}
-
-export interface ModelOption {
-  id: string;
-  provider: string;
-  model: string;
-  label: string;
 }
 
 export interface ModelEntry {
@@ -119,10 +129,17 @@ export interface SkillLocation {
   tree: DirEntry[];
 }
 
+/** An existing skills candidate dir — the path-level row discoverPaths() reports, without tree/skill names. */
+export interface SkillDirLocation {
+  scope: SkillLocation["scope"];
+  /** Display path: `~/…` for home dirs, workspace-relative for project dirs. */
+  label: string;
+  dir: string;
+}
+
 export interface DiscoveredConfig {
   configDir: string;
   opencodeJson: string;
-  ohMyOpencodeJson: string;
   agentConfig: AgentConfigTarget;
   agentsMd: { scope: "global" | "project"; path: string; exists: boolean }[];
   commandDir: string;
@@ -133,32 +150,20 @@ export interface DiscoveredConfig {
   backupsDir: string;
 }
 
-export const KNOWN_AGENTS: readonly string[] = [
-  "hephaestus",
-  "oracle",
-  "librarian",
-  "explore",
-  "multimodal-looker",
-  "prometheus",
-  "metis",
-  "momus",
-  "atlas",
-  "sisyphus",
-  "sisyphus-junior",
-];
-
-export const KNOWN_CATEGORIES: readonly string[] = [
-  "visual-engineering",
-  "ultrabrain",
-  "deep",
-  "artistry",
-  "quick",
-  "unspecified-low",
-  "unspecified-high",
-  "writing",
-  "architect",
-  "backend",
-  "frontend",
-  "qa",
-  "product",
-];
+/**
+ * Cheap path-level subset of discover(): everything activation wiring needs (paths +
+ * existence flags) WITHOUT scanning skills/command trees or reading any file contents.
+ */
+export interface DiscoveredPaths {
+  configDir: string;
+  opencodeJson: string;
+  agentConfig: AgentConfigTarget;
+  agentsMd: { scope: "global" | "project"; path: string; exists: boolean }[];
+  commandDir: string;
+  /** The opencode-native skills dir (<configDir>/skills). */
+  skillsDir: string;
+  /** Existing skills candidate dirs in canonical order (dir-level rows only). */
+  skillLocations: SkillDirLocation[];
+  presetsDir: string;
+  backupsDir: string;
+}

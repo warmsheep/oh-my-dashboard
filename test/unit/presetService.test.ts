@@ -1,12 +1,14 @@
-import { afterEach, describe, expect, it } from "vitest";
 import { chmodSync } from "node:fs";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { ConfigStore } from "../../src/core/configStore";
+
+import { afterEach, describe, expect, it } from "vitest";
+
 import { BackupService } from "../../src/core/backupService";
-import { PresetService } from "../../src/core/presetService";
+import { ConfigStore } from "../../src/core/configStore";
 import { applyEdits, getValue, validate } from "../../src/core/jsoncEditor";
+import { PresetService } from "../../src/core/presetService";
 import type { Preset } from "../../src/core/types";
 
 const FIXTURES_DIR = path.resolve(process.cwd(), "test/fixtures");
@@ -51,7 +53,7 @@ function makeEnv(now?: () => Date): Env {
     homeDir,
     presetsDir: discovered.presetsDir,
     opencodePath: discovered.opencodeJson,
-    ohMyPath: discovered.ohMyOpencodeJson,
+    ohMyPath: discovered.agentConfig.path,
     store,
     backup,
     service,
@@ -274,6 +276,35 @@ describe("PresetService.list", () => {
     const env = makeEnv();
     expect(env.service.list()).toEqual([]);
   });
+
+  it("returns [] when the presets path exists as a FILE instead of a directory (ENOTDIR)", () => {
+    const env = makeEnv();
+    fs.writeFileSync(env.presetsDir, "not a dir");
+    expect(env.service.list()).toEqual([]);
+  });
+
+  it("returns [] when the presets dir exists but readdir fails (EACCES)", () => {
+    const env = makeEnv();
+    const unreadableFs = {
+      existsSync: () => true,
+      readdirSync: () => {
+        const err = new Error("permission denied") as NodeJS.ErrnoException;
+        err.code = "EACCES";
+        throw err;
+      },
+    } as unknown as typeof fs;
+    const service = new PresetService({ presetsDir: env.presetsDir, configStore: env.store, fs: unreadableFs });
+    expect(service.list()).toEqual([]);
+  });
+
+  it("derives the preset name from the FILENAME, ignoring a mismatched content name", () => {
+    const env = makeEnv();
+    env.service.capture("foo");
+    const raw = JSON.parse(fs.readFileSync(path.join(env.presetsDir, "foo.json"), "utf8")) as Preset;
+    fs.writeFileSync(path.join(env.presetsDir, "foo.json"), JSON.stringify({ ...raw, name: "bar" }));
+
+    expect(env.service.list().map((p) => p.name)).toEqual(["foo"]);
+  });
 });
 
 describe("PresetService.apply — merge semantics", () => {
@@ -421,6 +452,22 @@ describe("PresetService.apply — failure modes", () => {
     expect(fs.readFileSync(env.ohMyPath)).toEqual(ohMyBefore);
     expect(fs.readFileSync(env.opencodePath)).toEqual(opencodeBefore);
   });
+
+  it("pre-flights opencode.json syntax: a broken opencode.json aborts with the agent config untouched", () => {
+    const env = makeEnv();
+    env.service.capture("snap");
+
+    env.store.writeAtomic(env.opencodePath, '{"model": tr|ailing garbage');
+    const ohMyBefore = fs.readFileSync(env.ohMyPath);
+    const opencodeBefore = fs.readFileSync(env.opencodePath);
+
+    expect(() => env.service.apply("snap")).toThrow();
+
+    expect(fs.readFileSync(env.ohMyPath)).toEqual(ohMyBefore);
+    expect(fs.readFileSync(env.opencodePath)).toEqual(opencodeBefore);
+    expect(env.backup.list()).toEqual([]);
+    expect(env.service.load("snap").appliedAt).toBeNull();
+  });
 });
 
 describe("PresetService.rename / remove / exportTo", () => {
@@ -442,6 +489,21 @@ describe("PresetService.rename / remove / exportTo", () => {
     expect(() => env.service.remove("beta")).toThrow("PRESET_NOT_FOUND");
     expect(() => env.service.rename("nope", "x")).toThrow("PRESET_NOT_FOUND");
   });
+
+  it("rename onto an existing target throws PRESET_ALREADY_EXISTS and leaves both presets intact", () => {
+    const env = makeEnv();
+    env.service.capture("alpha");
+    env.service.capture("beta");
+    const alphaBefore = fs.readFileSync(path.join(env.presetsDir, "alpha.json"), "utf8");
+    const betaBefore = fs.readFileSync(path.join(env.presetsDir, "beta.json"), "utf8");
+
+    expect(() => env.service.rename("alpha", "beta")).toThrow("PRESET_ALREADY_EXISTS");
+
+    expect(fs.readFileSync(path.join(env.presetsDir, "alpha.json"), "utf8")).toBe(alphaBefore);
+    expect(fs.readFileSync(path.join(env.presetsDir, "beta.json"), "utf8")).toBe(betaBefore);
+    expect(env.service.load("alpha").name).toBe("alpha");
+    expect(env.service.load("beta").name).toBe("beta");
+  });
 });
 
 describe("PresetService.currentPresetName", () => {
@@ -456,6 +518,26 @@ describe("PresetService.currentPresetName", () => {
     env.service.apply("b");
     env.service.apply("a");
     expect(env.service.currentPresetName()).toBe("a");
+  });
+
+  it("accepts a pre-fetched list to avoid re-listing from disk", () => {
+    const env = makeEnv();
+    const preset = (name: string, appliedAt: string | null): Preset => ({
+      name,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      appliedAt,
+      defaults: { model: null },
+      agents: {},
+      categories: {},
+    });
+    const list = [
+      preset("older", "2026-08-01T00:00:00.000Z"),
+      preset("newest", "2026-08-02T00:00:00.000Z"),
+      preset("never", null),
+    ];
+
+    expect(env.service.currentPresetName(list)).toBe("newest");
+    expect(env.service.currentPresetName([])).toBeNull();
   });
 });
 

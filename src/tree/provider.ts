@@ -1,8 +1,16 @@
 import * as vscode from "vscode";
-import type { BackupEntry, DiscoveredConfig, JsoncError, ModelEntry, ModelSetting, PluginEntry, Preset } from "../core/types";
-import { buildConfigTree, CURRENT_PRESET_BADGE, type BaseNode } from "./nodes";
 
-export type TreeSection = "config" | "presets" | "backups" | "models" | "plugins";
+import type {
+  BackupEntry,
+  DiscoveredConfig,
+  JsoncError,
+  ModelEntry,
+  ModelSetting,
+  PluginEntry,
+  Preset,
+} from "../core/types";
+import { buildConfigTree, CURRENT_PRESET_BADGE } from "./nodes";
+import type { BaseNode } from "./nodes";
 
 export interface TreeDataSnapshot {
   discovered: DiscoveredConfig;
@@ -81,6 +89,9 @@ function iconId(node: BaseNode): string {
 export class ConfigTreeDataProvider implements vscode.TreeDataProvider<BaseNode> {
   private cache: TreeDataSnapshot | null = null;
   private reloading: Promise<TreeDataSnapshot> | null = null;
+  /** Root nodes memo keyed by snapshot identity — repeated root renders (view visibility
+   * changes, multiple getChildren per refresh) reuse one built tree instead of rebuilding. */
+  private rootNodes: { snapshot: TreeDataSnapshot; roots: BaseNode[] } | null = null;
   private readonly _onDidChangeTreeData = new vscode.EventEmitter<BaseNode | undefined | void>();
   readonly onDidChangeTreeData = this._onDidChangeTreeData.event;
 
@@ -98,6 +109,7 @@ export class ConfigTreeDataProvider implements vscode.TreeDataProvider<BaseNode>
     this.reloading = Promise.resolve(this.loadData())
       .then((snapshot) => {
         this.cache = snapshot;
+        this.rootNodes = null; // a new generation must rebuild roots even if the loader reuses objects
         this.reloading = null;
         this._onDidChangeTreeData.fire();
         return snapshot;
@@ -126,6 +138,7 @@ export class ConfigTreeDataProvider implements vscode.TreeDataProvider<BaseNode>
       (snapshot) => {
         if (this.cache === null) {
           this.cache = snapshot;
+          this.rootNodes = null;
         }
       },
       () => undefined,
@@ -159,19 +172,28 @@ export class ConfigTreeDataProvider implements vscode.TreeDataProvider<BaseNode>
   }
 
   async getChildren(element?: BaseNode): Promise<BaseNode[]> {
-    if (element) return element.children ?? [];
+    if (element) {
+      return element.children ?? [];
+    }
 
-    if (!this.cache) this.cache = await this.loadData();
-    const roots = buildConfigTree(
-      this.cache.discovered,
-      this.cache.presets,
-      this.cache.currentPreset,
-      this.cache.backups,
-      this.cache.parseErrors,
-      this.cache.assignments,
-      this.cache.models,
-      this.cache.plugins,
-    );
-    return roots;
+    if (!this.cache) {
+      this.cache = await this.loadData();
+    }
+    if (this.rootNodes?.snapshot !== this.cache) {
+      this.rootNodes = {
+        snapshot: this.cache,
+        roots: buildConfigTree(
+          this.cache.discovered,
+          this.cache.presets,
+          this.cache.currentPreset,
+          this.cache.backups,
+          this.cache.parseErrors,
+          this.cache.assignments,
+          this.cache.models,
+          this.cache.plugins,
+        ),
+      };
+    }
+    return this.rootNodes.roots;
   }
 }

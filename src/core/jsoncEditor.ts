@@ -6,7 +6,8 @@ import {
   parse,
   parseTree,
 } from "jsonc-parser";
-import type { JsonPath, JsoncError, ParseResult } from "./types";
+
+import type { JsoncError, JsonPath, ParseResult } from "./types";
 
 export interface JsoncEdit {
   path: JsonPath;
@@ -25,13 +26,23 @@ const PARSE_OPTIONS = { allowTrailingComma: true, allowEmptyContent: true } as c
 
 const FORMATTING_OPTIONS = { tabSize: 2, insertSpaces: true };
 
+/**
+ * Strip leading UTF-8 BOMs: readFileSync(path, "utf8") keeps them and jsonc-parser
+ * reports each BOM itself as a syntax error even when the rest of the file is valid.
+ * ALL leading BOMs are stripped — script/PowerShell concatenation can produce doubles.
+ */
+function stripBom(text: string): string {
+  return text.replace(/^\uFEFF+/, "");
+}
+
 function toErrors(errors: { offset: number; length: number; error: number }[]): JsoncError[] {
-  return errors.map((e) => ({ offset: e.offset, length: e.length, message: `Parse error code ${e.error}` }));
+  // User-visible (tree nodes render it verbatim) — keep it Chinese.
+  return errors.map((e) => ({ offset: e.offset, length: e.length, message: `语法错误（错误码 ${e.error}）` }));
 }
 
 export function parseSafe<T>(text: string): ParseResult<T> {
   const errors: { offset: number; length: number; error: number }[] = [];
-  const value = parse(text, errors, PARSE_OPTIONS) as T | undefined;
+  const value = parse(stripBom(text), errors, PARSE_OPTIONS) as T | undefined;
   return { value: value === undefined ? null : value, errors: toErrors(errors) };
 }
 
@@ -58,8 +69,11 @@ function hasPath(text: string, path: JsonPath): boolean {
 }
 
 export function applyEdits(text: string, edits: JsoncEdit[]): string {
-  assertParsable(text);
-  let current = text;
+  // Edit the BOM-stripped body so offsets stay aligned, then re-attach the original
+  // BOM prefix (however many) — a "UTF-8 with BOM" file must not silently lose it.
+  const bom = text.match(/^\uFEFF+/)?.[0] ?? "";
+  let current = bom ? text.slice(bom.length) : text;
+  assertParsable(current);
   for (const edit of edits) {
     const isRemove = (edit.op ?? "set") === "remove";
     if (isRemove && !hasPath(current, edit.path)) {
@@ -69,7 +83,7 @@ export function applyEdits(text: string, edits: JsoncEdit[]): string {
     const modifications = modify(current, edit.path, value, { formattingOptions: FORMATTING_OPTIONS });
     current = applyJsoncEdits(current, modifications);
   }
-  return current;
+  return bom + current;
 }
 
 export function setValues(text: string, entries: { path: JsonPath; value: unknown }[]): string {

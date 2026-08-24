@@ -1,7 +1,9 @@
-import { afterEach, describe, expect, it } from "vitest";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+
+import { afterEach, describe, expect, it } from "vitest";
+
 import { BackupService } from "../../src/core/backupService";
 import { ConfigStore } from "../../src/core/configStore";
 import { applyEdits, getValue, JsoncSyntaxError, validate } from "../../src/core/jsoncEditor";
@@ -36,7 +38,10 @@ interface EnvOptions {
 function makeEnv(opts: EnvOptions = {}): PipelineEnv {
   const configDir = fs.mkdtempSync(path.join(os.tmpdir(), "pipeline-"));
   sandboxes.push(configDir);
-  fs.copyFileSync(path.join(FIXTURES_DIR, opts.opencodeFixture ?? "opencode.jsonc"), path.join(configDir, "opencode.json"));
+  fs.copyFileSync(
+    path.join(FIXTURES_DIR, opts.opencodeFixture ?? "opencode.jsonc"),
+    path.join(configDir, "opencode.json"),
+  );
   fs.copyFileSync(path.join(FIXTURES_DIR, "oh-my-opencode.json"), path.join(configDir, "oh-my-opencode.json"));
   fs.writeFileSync(path.join(configDir, "AGENTS.md"), AGENTS_MD_SEED);
   fs.mkdirSync(path.join(configDir, "command"), { recursive: true });
@@ -66,7 +71,7 @@ function makeEnv(opts: EnvOptions = {}): PipelineEnv {
     presetsDir: discovered.presetsDir,
     backupsDir: discovered.backupsDir,
     opencodePath: discovered.opencodeJson,
-    ohMyPath: discovered.ohMyOpencodeJson,
+    ohMyPath: discovered.agentConfig.path,
     agentsMdPath: path.join(configDir, "AGENTS.md"),
     store,
     backup,
@@ -150,7 +155,9 @@ describe("integration: core pipeline (capture → mutate → apply → backup �
     expect(readBytes(env.agentsMdPath)).toEqual(Buffer.from(AGENTS_MD_SEED, "utf8"));
     expect(readBytes(path.join(env.configDir, "command", "a.md"))).toEqual(Buffer.from(COMMAND_A_SEED, "utf8"));
     expect(readBytes(path.join(env.configDir, "skills", "one", "x.md"))).toEqual(Buffer.from(SKILL_X_SEED, "utf8"));
-    expect(readBytes(path.join(env.configDir, "presets", "seeded.json"))).toEqual(Buffer.from('{"name":"seeded"}', "utf8"));
+    expect(readBytes(path.join(env.configDir, "presets", "seeded.json"))).toEqual(
+      Buffer.from('{"name":"seeded"}', "utf8"),
+    );
 
     expect(env.backup.list()).toHaveLength(1);
   });
@@ -266,9 +273,10 @@ describe("integration: core pipeline (capture → mutate → apply → backup �
     const manual = backup.create("manual");
     expect(fs.existsSync(path.join(manual.dir, "omo.jsonc"))).toBe(true);
 
-    env.store.writeAtomic(omoPath, applyEdits(appliedText, [
-      { path: ["[opencode]", "agents", "oracle", "model"], value: "y/mutated", op: "set" },
-    ]));
+    env.store.writeAtomic(
+      omoPath,
+      applyEdits(appliedText, [{ path: ["[opencode]", "agents", "oracle", "model"], value: "y/mutated", op: "set" }]),
+    );
     const pairs = backup.diffPairs(manual);
     expect(pairs.map((p) => p.label)).toContain("omo.jsonc");
     expect(pairs.find((p) => p.label === "omo.jsonc")?.current).toBe(omoPath);
@@ -305,5 +313,53 @@ describe("integration: core pipeline (capture → mutate → apply → backup �
     backup.restore(snap.dirName);
     expect(fs.readFileSync(path.join(userSkillsDir, "pdf", "SKILL.md"), "utf8")).toBe("# user pdf skill\n");
     expect(readBytes(path.join(env.configDir, "skills", "one", "x.md"))).toEqual(Buffer.from(SKILL_X_SEED, "utf8"));
+  });
+
+  it("scenario G: models.json seeds on first listModels, then corrupt hand-edits self-heal with a .bak of the user's bytes", () => {
+    const env = makeEnv({ now: seqNow("2026-08-23T09:00:00.000Z") });
+    const modelsFile = path.join(env.configDir, "models.json");
+    expect(fs.existsSync(modelsFile)).toBe(false);
+
+    const seeded = env.store.listModels();
+    expect(fs.existsSync(modelsFile)).toBe(true);
+    expect(seeded.length).toBeGreaterThan(0);
+    const seededFileModels = JSON.parse(readBytes(modelsFile).toString("utf8")).models;
+
+    const userBytes = '{ "models": [], "note": "hand edit gone wrong" }\n';
+    fs.writeFileSync(modelsFile, userBytes);
+
+    const healed = env.store.listModels();
+    expect(healed.length).toBe(seeded.length); // merge with opencode.json providers is unchanged
+    expect(readBytes(`${modelsFile}.bak`).toString("utf8")).toBe(userBytes);
+    expect(JSON.parse(readBytes(modelsFile).toString("utf8")).models).toEqual(seededFileModels);
+  });
+
+  it("scenario H: backup → exportZip → wipe machine → importZip → restore is byte-identical", () => {
+    const env = makeEnv({ now: seqNow("2026-08-23T10:00:00.000Z") });
+    env.service.capture("handcuff");
+    fs.appendFileSync(env.agentsMdPath, "\nhand-added line\n");
+    const entry = env.backup.create("manual");
+    const originalOhMy = readBytes(env.ohMyPath);
+    const originalOpencode = readBytes(env.opencodePath);
+    const originalAgentsMd = readBytes(env.agentsMdPath);
+    const originalCommandA = readBytes(path.join(env.configDir, "command", "a.md"));
+
+    const zipPath = path.join(env.configDir, "portable.zip");
+    env.backup.exportZip(entry.dirName, zipPath);
+    expect(fs.existsSync(zipPath)).toBe(true);
+
+    fs.rmSync(entry.dir, { recursive: true, force: true });
+    fs.writeFileSync(env.ohMyPath, '{"agents":{}}');
+    fs.writeFileSync(env.opencodePath, "{}");
+    fs.writeFileSync(env.agentsMdPath, "# wiped");
+    fs.rmSync(path.join(env.configDir, "command", "a.md"));
+
+    const imported = env.backup.importZip(zipPath);
+    env.backup.restore(imported.dirName);
+
+    expect(readBytes(env.ohMyPath)).toEqual(originalOhMy);
+    expect(readBytes(env.opencodePath)).toEqual(originalOpencode);
+    expect(readBytes(env.agentsMdPath)).toEqual(originalAgentsMd);
+    expect(readBytes(path.join(env.configDir, "command", "a.md"))).toEqual(originalCommandA);
   });
 });

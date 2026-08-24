@@ -4,17 +4,42 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
-  readFileSync,
   readdirSync,
+  readFileSync,
   rmSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
 import * as os from "node:os";
-import { BUILTIN_MODELS } from "../../src/core/builtinModels";
 import * as path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+import { BUILTIN_MODELS } from "../../src/core/builtinModels";
 import { ConfigStore, writeFileAtomic } from "../../src/core/configStore";
+import { getValue, JsoncSyntaxError, parseSafe, validate } from "../../src/core/jsoncEditor";
+
+// Transparent readFileSync counter for the memoization tests: the wrapper only logs
+// string paths while enabled and always delegates to the real implementation.
+// failOnce makes the NEXT read of a path throw EACCES (stat still succeeds).
+const fsReadSpy = vi.hoisted(() => ({ reads: [] as string[], on: false, failOnce: new Set<string>() }));
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs")>();
+  const realReadFileSync = actual.readFileSync;
+  return {
+    ...actual,
+    readFileSync: ((p: unknown, ...rest: unknown[]) => {
+      if (typeof p === "string" && fsReadSpy.failOnce.has(p)) {
+        fsReadSpy.failOnce.delete(p);
+        throw Object.assign(new Error(`EACCES: permission denied, open '${p}'`), { code: "EACCES" });
+      }
+      if (fsReadSpy.on && typeof p === "string") {
+        fsReadSpy.reads.push(p);
+      }
+      return (realReadFileSync as unknown as (path: unknown, ...args: unknown[]) => unknown)(p, ...rest);
+    }) as typeof actual.readFileSync,
+  };
+});
 
 const FIXTURES_DIR = path.resolve(process.cwd(), "test/fixtures");
 
@@ -61,12 +86,8 @@ describe("ConfigStore.resolveConfigDir", () => {
   });
 
   it("defaults to ~/.config/opencode (opencode's xdg-basedir has no platform branches: same on linux/macOS/win32)", () => {
-    expect(ConfigStore.resolveConfigDir({}, "/home/tester")).toBe(
-      path.join("/home/tester", ".config", "opencode"),
-    );
-    expect(ConfigStore.resolveConfigDir({}, "/Users/tester")).toBe(
-      path.join("/Users/tester", ".config", "opencode"),
-    );
+    expect(ConfigStore.resolveConfigDir({}, "/home/tester")).toBe(path.join("/home/tester", ".config", "opencode"));
+    expect(ConfigStore.resolveConfigDir({}, "/Users/tester")).toBe(path.join("/Users/tester", ".config", "opencode"));
     expect(ConfigStore.resolveConfigDir({}, "C:\\Users\\tester")).toBe(
       path.join("C:\\Users\\tester", ".config", "opencode"),
     );
@@ -104,7 +125,7 @@ describe("ConfigStore.discover", () => {
 
     expect(d.configDir).toBe(configDir);
     expect(d.opencodeJson).toBe(path.join(configDir, "opencode.json"));
-    expect(d.ohMyOpencodeJson).toBe(path.join(configDir, "oh-my-opencode.json"));
+    expect(d.agentConfig.path).toBe(path.join(configDir, "oh-my-opencode.json"));
     expect(d.commandDir).toBe(path.join(configDir, "command"));
     expect(d.presetsDir).toBe(path.join(configDir, "presets"));
     expect(d.backupsDir).toBe(path.join(configDir, "backups"));
@@ -113,7 +134,12 @@ describe("ConfigStore.discover", () => {
     expect(
       d.skillLocations.map((l) => ({ scope: l.scope, label: l.label, dir: l.dir, skillNames: l.skillNames })),
     ).toEqual([
-      { scope: "global", label: configDir + path.sep + "skills", dir: path.join(configDir, "skills"), skillNames: ["one", "two"] },
+      {
+        scope: "global",
+        label: configDir + path.sep + "skills",
+        dir: path.join(configDir, "skills"),
+        skillNames: ["one", "two"],
+      },
     ]);
     expect(d.agentsMd).toEqual([
       { scope: "global", path: path.join(configDir, "AGENTS.md"), exists: true },
@@ -195,7 +221,9 @@ describe("ConfigStore.discover", () => {
       "~/.codeium/windsurf/skills",
       "~/.codex/skills",
     ]);
-    expect(d.skillLocations.map((l) => l.skillNames.flat())).toEqual([["a"], ["b"], ["j"], ["h"], ["i"], ["d"], ["e"], ["f"], ["g"], ["c"]].map((n) => n));
+    expect(d.skillLocations.map((l) => l.skillNames.flat())).toEqual(
+      [["a"], ["b"], ["j"], ["h"], ["i"], ["d"], ["e"], ["f"], ["g"], ["c"]].map((n) => n),
+    );
   });
 
   it("honors XDG_CONFIG_HOME for the XDG-style global skills candidates", () => {
@@ -205,7 +233,11 @@ describe("ConfigStore.discover", () => {
     mkdirSync(path.join(xdg, "agents", "skills", "amp-skill"), { recursive: true });
     writeFileSync(path.join(xdg, "agents", "skills", "amp-skill", "SKILL.md"), "# amp");
 
-    const d = new ConfigStore({ configDirOverride: configDir, homeDir: home, env: { XDG_CONFIG_HOME: xdg } }).discover();
+    const d = new ConfigStore({
+      configDirOverride: configDir,
+      homeDir: home,
+      env: { XDG_CONFIG_HOME: xdg },
+    }).discover();
 
     const amp = d.skillLocations.find((l) => l.dir === path.join(xdg, "agents", "skills"));
     expect(amp?.scope).toBe("global");
@@ -246,11 +278,68 @@ describe("ConfigStore.discover", () => {
     expect(d.skillLocations[0].label).toBe("~/.claude/skills");
   });
 
+  it("a SKILL.md that is a DIRECTORY does not count as a skill", () => {
+    const configDir = seedConfigDir();
+    const home = sandbox();
+    mkdirSync(path.join(configDir, "skills", "fake", "SKILL.md"), { recursive: true }); // SKILL.md as a dir
+    mkdirSync(path.join(configDir, "skills", "real"), { recursive: true });
+    writeFileSync(path.join(configDir, "skills", "real", "SKILL.md"), "# real");
+
+    const d = new ConfigStore({ configDirOverride: configDir, homeDir: home }).discover();
+
+    const row = d.skillLocations[0];
+    expect(row.skillNames).toEqual(["real"]);
+    // the fake entry still shows in the file tree (it IS a directory), it just is not a skill
+    expect(row.tree.some((e) => e.name === "fake")).toBe(true);
+  });
+
+  it("a skills candidate path that is a FILE is not listed as a skill location", () => {
+    const configDir = seedConfigDir();
+    const home = sandbox();
+    mkdirSync(path.join(home, ".agents"));
+    writeFileSync(path.join(home, ".agents", "skills"), "not a dir"); // file shadowing the candidate
+    mkdirSync(path.join(home, ".claude", "skills", "s"), { recursive: true });
+    writeFileSync(path.join(home, ".claude", "skills", "s", "SKILL.md"), "# s");
+
+    const d = new ConfigStore({ configDirOverride: configDir, homeDir: home }).discover();
+
+    expect(d.skillLocations.map((l) => l.dir)).toEqual([path.join(home, ".claude", "skills")]);
+  });
+
+  it("a candidate dir that is a symlink to a real skills dir still counts (stat follows links)", () => {
+    const configDir = seedConfigDir();
+    const home = sandbox();
+    mkdirSync(path.join(home, ".agents", "skills", "pdf"), { recursive: true });
+    writeFileSync(path.join(home, ".agents", "skills", "pdf", "SKILL.md"), "# pdf");
+    mkdirSync(path.join(home, ".claude"), { recursive: true });
+    symlinkSync(
+      path.join(home, ".agents", "skills"),
+      path.join(home, ".claude", "skills"),
+      process.platform === "win32" ? "junction" : "dir",
+    );
+
+    const d = new ConfigStore({ configDirOverride: configDir, homeDir: home }).discover();
+
+    expect(d.skillLocations.map((l) => l.dir)).toEqual([
+      path.join(home, ".agents", "skills"),
+      path.join(home, ".claude", "skills"),
+    ]);
+    expect(d.skillLocations[1].skillNames).toEqual(["pdf"]);
+  });
+
   it("discovers project skills from every common project dir in candidate order", () => {
     const configDir = seedConfigDir();
     const home = sandbox();
     const ws = sandbox();
-    for (const rel of [".agents/skills", ".claude/skills", ".opencode/skills", ".github/skills", ".gemini/skills", ".cursor/skills", ".windsurf/skills"]) {
+    for (const rel of [
+      ".agents/skills",
+      ".claude/skills",
+      ".opencode/skills",
+      ".github/skills",
+      ".gemini/skills",
+      ".cursor/skills",
+      ".windsurf/skills",
+    ]) {
       const skillDir = path.join(ws, rel, "demo");
       mkdirSync(skillDir, { recursive: true });
       writeFileSync(path.join(skillDir, "SKILL.md"), "# demo");
@@ -274,6 +363,133 @@ describe("ConfigStore.discover", () => {
       `.opencode/skills @ ${path.join(wsOnlyNative, ".opencode", "skills")}`,
     ]);
     expect(projects.every((l) => l.skillNames.length === 1)).toBe(true);
+  });
+});
+
+describe("ConfigStore.discoverPaths", () => {
+  it("returns the path-level fields: dirs, existence flags, agent target, agentsMd — without trees", () => {
+    const configDir = seedConfigDir();
+    const home = sandbox();
+    mkdirSync(path.join(configDir, "command"));
+    writeFileSync(path.join(configDir, "command", "x.md"), "# x");
+    mkdirSync(path.join(configDir, "skills", "one"), { recursive: true });
+    writeFileSync(path.join(configDir, "skills", "one", "SKILL.md"), "# one");
+    writeFileSync(path.join(configDir, "AGENTS.md"), "# agents");
+    const ws = sandbox();
+    writeFileSync(path.join(ws, "AGENTS.md"), "# project agents");
+
+    const d = new ConfigStore({ configDirOverride: configDir, homeDir: home }).discoverPaths([ws]);
+
+    expect(d.configDir).toBe(configDir);
+    expect(d.opencodeJson).toBe(path.join(configDir, "opencode.json"));
+    expect(d.agentConfig).toEqual({
+      kind: "legacy",
+      path: path.join(configDir, "oh-my-opencode.json"),
+      sectionPath: [],
+      reasoningKey: "variant",
+      exists: true,
+    });
+    expect(d.commandDir).toBe(path.join(configDir, "command"));
+    expect(d.skillsDir).toBe(path.join(configDir, "skills"));
+    expect(d.presetsDir).toBe(path.join(configDir, "presets"));
+    expect(d.backupsDir).toBe(path.join(configDir, "backups"));
+    expect(d.agentsMd).toEqual([
+      { scope: "global", path: path.join(configDir, "AGENTS.md"), exists: true },
+      { scope: "project", path: path.join(ws, "AGENTS.md"), exists: true },
+    ]);
+    expect(d.skillLocations).toEqual([
+      { scope: "global", label: configDir + path.sep + "skills", dir: path.join(configDir, "skills") },
+    ]);
+  });
+
+  it("reports no skill rows on an empty config dir and a non-existent agent target", () => {
+    const dir = sandbox();
+    const home = sandbox();
+    const d = new ConfigStore({ configDirOverride: dir, homeDir: home }).discoverPaths();
+    expect(d.skillLocations).toEqual([]);
+    expect(d.agentConfig.exists).toBe(false);
+  });
+
+  it("agrees with discover() on the candidate dir set (same helper, minus trees/names)", () => {
+    const configDir = seedConfigDir();
+    const home = sandbox();
+    mkdirSync(path.join(home, ".agents", "skills", "pdf"), { recursive: true });
+    writeFileSync(path.join(home, ".agents", "skills", "pdf", "SKILL.md"), "# pdf");
+    const store = new ConfigStore({ configDirOverride: configDir, homeDir: home });
+
+    const paths = store.discoverPaths();
+    const full = store.discover();
+    expect(paths.skillLocations.map((l) => ({ scope: l.scope, label: l.label, dir: l.dir }))).toEqual(
+      full.skillLocations.map((l) => ({ scope: l.scope, label: l.label, dir: l.dir })),
+    );
+    expect(paths.agentConfig).toEqual(full.agentConfig);
+  });
+});
+
+describe("ConfigStore internal read memoization", () => {
+  it("reads opencode.json once across repeated listModels/listPlugins/defaultModel in one refresh", () => {
+    const dir = seedConfigDir({ opencode: true });
+    const store = new ConfigStore({ configDirOverride: dir });
+    const opencode = path.join(dir, "opencode.json");
+
+    fsReadSpy.reads.length = 0;
+    fsReadSpy.on = true;
+    try {
+      store.listModels();
+      store.listModels();
+      store.listPlugins();
+      expect(store.defaultModel()).toBeNull();
+      expect(fsReadSpy.reads.filter((p) => p === opencode)).toHaveLength(1);
+    } finally {
+      fsReadSpy.on = false;
+    }
+  });
+
+  it("writeAtomic busts the memo: the next read is fresh", () => {
+    const dir = seedConfigDir({ opencode: true });
+    const store = new ConfigStore({ configDirOverride: dir });
+    expect(store.defaultModel()).toBeNull(); // populate the memo
+
+    store.writeAtomic(path.join(dir, "opencode.json"), JSON.stringify({ model: "x/y" }));
+
+    expect(store.defaultModel()).toBe("x/y");
+  });
+
+  it("an external write (mtime bump) busts the memo without writeAtomic", () => {
+    const dir = seedConfigDir({ opencode: true });
+    const store = new ConfigStore({ configDirOverride: dir });
+    expect(store.defaultModel()).toBeNull(); // populate the memo
+
+    writeFileSync(path.join(dir, "opencode.json"), JSON.stringify({ model: "ext/z" }));
+
+    expect(store.defaultModel()).toBe("ext/z");
+  });
+
+  it("opencodeModels shares the memoized parse (provider models update after an external edit)", () => {
+    const dir = seedConfigDir({ opencode: true });
+    const store = new ConfigStore({ configDirOverride: dir });
+    expect(store.listModels().some((m) => m.id === "ext/brand-new")).toBe(false);
+
+    writeFileSync(
+      path.join(dir, "opencode.json"),
+      JSON.stringify({ provider: { ext: { models: { "brand-new": {} } } } }),
+    );
+
+    expect(store.listModels().some((m) => m.id === "ext/brand-new")).toBe(true);
+  });
+
+  it('a stat-ok but failing read (EACCES) is NOT cached as "" — permission recovery self-heals', () => {
+    const dir = seedConfigDir({ opencode: true });
+    const store = new ConfigStore({ configDirOverride: dir });
+    const opencode = path.join(dir, "opencode.json");
+    writeFileSync(opencode, JSON.stringify({ model: "a/b" }));
+
+    fsReadSpy.failOnce.add(opencode);
+    expect(store.defaultModel()).toBeNull(); // degraded to empty per readTextOrEmpty semantics
+
+    // No write, no mtime change — the next read must retry the real file instead of
+    // replaying the cached "" under the still-valid stat key.
+    expect(store.defaultModel()).toBe("a/b");
   });
 });
 
@@ -403,13 +619,22 @@ describe("ConfigStore.listModels", () => {
     const dir = seedConfigDir({ opencode: true });
     const models = new ConfigStore({ configDirOverride: dir }).listModels();
 
-    expect(models).toHaveLength(74);
+    // Dynamic: a hard-coded length breaks on every models.dev catalog bump (review P2-13).
+    const fixture = parseSafe<{ provider?: Record<string, { models?: Record<string, unknown> }> }>(
+      readFileSync(path.join(FIXTURES_DIR, "opencode.jsonc"), "utf8"),
+    );
+    const fixtureIds = Object.entries(fixture.value?.provider ?? {}).flatMap(([provider, cfg]) =>
+      Object.keys((cfg as { models?: Record<string, unknown> }).models ?? {}).map((model) => `${provider}/${model}`),
+    );
+    const expectedIds = [...new Set([...fixtureIds, ...BUILTIN_MODELS.map((m) => m.id)])].sort((a, b) =>
+      a < b ? -1 : a > b ? 1 : 0,
+    );
+    expect(models.map((m) => m.id)).toEqual(expectedIds);
     const ids = models.map((m) => m.id);
     expect(ids).toContain("WindsurfAI/claude-opus-4.6");
     expect(ids).toContain("zhipuai-coding-plan/glm-5");
     expect(ids).toContain("xai/grok-4.6");
     expect(ids).toContain("google/gemini-3.7-flash");
-    expect(ids).toEqual([...ids].sort());
     expect(new Set(ids).size).toBe(ids.length);
 
     const named = models.find((m) => m.id === "WindsurfAI/claude-opus-4.6");
@@ -429,6 +654,32 @@ describe("ConfigStore.listModels", () => {
     expect(models.length).toBe(BUILTIN_MODELS.length);
     expect(models.map((m) => m.id)).toContain("anthropic/claude-opus-5");
     expect(existsSync(path.join(dir, "models.json"))).toBe(true);
+  });
+});
+
+describe("ConfigStore.listModelEntries", () => {
+  it("labels each merged entry with its source: opencode-only, local-only, or both", () => {
+    const dir = seedConfigDir({ opencode: false, ohMy: false });
+    writeFileSync(
+      path.join(dir, "opencode.json"),
+      JSON.stringify({ provider: { provA: { models: { onlyA: {}, shared: {} } } } }),
+    );
+    writeFileSync(
+      path.join(dir, "models.json"),
+      JSON.stringify({
+        models: [
+          { provider: "provA", model: "shared", label: "shared" },
+          { provider: "provC", model: "onlyC" },
+        ],
+      }),
+    );
+
+    const entries = new ConfigStore({ configDirOverride: dir }).listModelEntries();
+    expect(entries.map((e) => [e.option.id, e.source])).toEqual([
+      ["provA/onlyA", "opencode"],
+      ["provA/shared", "both"],
+      ["provC/onlyC", "local"],
+    ]);
   });
 });
 
@@ -461,13 +712,10 @@ describe("ConfigStore.ohMyAssignments", () => {
   });
 });
 
-describe("ConfigStore.readText / readTextOrEmpty", () => {
-  it("readText throws on missing file; readTextOrEmpty returns ''", () => {
+describe("ConfigStore.readTextOrEmpty", () => {
+  it("returns '' for a missing file", () => {
     const dir = sandbox();
-    const store = new ConfigStore({ configDirOverride: dir });
-    const missing = path.join(dir, "nope.json");
-    expect(() => store.readText(missing)).toThrow();
-    expect(store.readTextOrEmpty(missing)).toBe("");
+    expect(new ConfigStore({ configDirOverride: dir }).readTextOrEmpty(path.join(dir, "nope.json"))).toBe("");
   });
 });
 
@@ -630,17 +878,20 @@ describe("ConfigStore.ohMyAssignments (omo target)", () => {
 });
 
 describe("ConfigStore hostile-environment tolerance", () => {
-  it.skipIf(process.platform === "win32" || process.getuid?.() === 0)("readTextOrEmpty returns '' for an unreadable (chmod 000) file", () => {
-    const dir = sandbox();
-    const file = path.join(dir, "opencode.json");
-    writeFileSync(file, "{}");
-    chmodSync(file, 0o000);
-    try {
-      expect(new ConfigStore({ configDirOverride: dir }).readTextOrEmpty(file)).toBe("");
-    } finally {
-      chmodSync(file, 0o644);
-    }
-  });
+  it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+    "readTextOrEmpty returns '' for an unreadable (chmod 000) file",
+    () => {
+      const dir = sandbox();
+      const file = path.join(dir, "opencode.json");
+      writeFileSync(file, "{}");
+      chmodSync(file, 0o000);
+      try {
+        expect(new ConfigStore({ configDirOverride: dir }).readTextOrEmpty(file)).toBe("");
+      } finally {
+        chmodSync(file, 0o644);
+      }
+    },
+  );
 
   it("readDirTree terminates on an ancestor symlink without duplicating nodes", () => {
     const dir = seedConfigDir();
@@ -679,6 +930,101 @@ describe("ConfigStore hostile-environment tolerance", () => {
       }
     }
   });
+});
+
+describe("ConfigStore.setAgentModel", () => {
+  it("legacy target: sets model+variant, clears the sibling reasoning key and any models chain", () => {
+    const dir = seedConfigDir({ opencode: true, ohMy: true });
+    const home = sandbox();
+    const store = new ConfigStore({ configDirOverride: dir, homeDir: home });
+    const target = path.join(dir, "oh-my-opencode.json");
+
+    store.setAgentModel("agents", "oracle", "x/y", "high");
+
+    const text = readFileSync(target, "utf8");
+    expect(validate(text)).toEqual([]);
+    expect(getValue(text, ["agents", "oracle", "model"])).toBe("x/y");
+    expect(getValue(text, ["agents", "oracle", "variant"])).toBe("high");
+    expect(getValue(text, ["agents", "oracle", "reasoning"])).toBeUndefined();
+    expect(getValue(text, ["agents", "oracle", "models"])).toBeUndefined();
+    // entries not addressed stay untouched
+    expect(getValue(text, ["agents", "librarian", "model"])).toBeDefined();
+  });
+
+  it("null variant removes the reasoning key entirely on the legacy target", () => {
+    const dir = seedConfigDir({ opencode: true, ohMy: true });
+    const store = new ConfigStore({ configDirOverride: dir, homeDir: sandbox() });
+    const target = path.join(dir, "oh-my-opencode.json");
+
+    store.setAgentModel("agents", "oracle", "x/y", null);
+
+    const text = readFileSync(target, "utf8");
+    expect(getValue(text, ["agents", "oracle", "model"])).toBe("x/y");
+    expect(getValue(text, ["agents", "oracle", "variant"])).toBeUndefined();
+  });
+
+  it("omo target: writes reasoning inside [opencode], clears variant/models chains, keeps comments", () => {
+    const dir = seedConfigDir({ opencode: true, ohMy: false });
+    const home = sandbox();
+    mkdirSync(path.join(home, ".omo"), { recursive: true });
+    const omoPath = path.join(home, ".omo", "omo.jsonc");
+    writeFileSync(
+      omoPath,
+      '// unified\n{\n  "[opencode]": {\n    "agents": {\n      "oracle": { "model": "old/old", "variant": "low", "models": [{ "model": "a/b" }] },\n    },\n  },\n}\n',
+    );
+    const store = new ConfigStore({ configDirOverride: dir, homeDir: home });
+
+    store.setAgentModel("agents", "oracle", "x/y", "max");
+
+    const text = readFileSync(omoPath, "utf8");
+    expect(validate(text)).toEqual([]);
+    expect(text).toContain("// unified");
+    expect(getValue(text, ["[opencode]", "agents", "oracle"])).toEqual({ model: "x/y", reasoning: "max" });
+    expect(getValue(text, ["[opencode]", "agents", "oracle", "variant"])).toBeUndefined();
+    expect(getValue(text, ["[opencode]", "agents", "oracle", "models"])).toBeUndefined();
+  });
+
+  it("creates the agent config from a missing file (fresh omo machine)", () => {
+    const dir = seedConfigDir({ opencode: true, ohMy: false });
+    const home = sandbox();
+    mkdirSync(path.join(home, ".omo"), { recursive: true });
+    const store = new ConfigStore({ configDirOverride: dir, homeDir: home });
+
+    store.setAgentModel("categories", "quick", "a/b", "low");
+
+    const created = path.join(home, ".omo", "omo.jsonc");
+    const text = readFileSync(created, "utf8");
+    expect(validate(text)).toEqual([]);
+    expect(getValue(text, ["[opencode]", "categories", "quick"])).toEqual({ model: "a/b", reasoning: "low" });
+  });
+
+  it("aborts with JsoncSyntaxError on a broken agent config and writes nothing", () => {
+    const dir = seedConfigDir({ opencode: true, ohMy: true });
+    const store = new ConfigStore({ configDirOverride: dir, homeDir: sandbox() });
+    const target = path.join(dir, "oh-my-opencode.json");
+    writeFileSync(target, "{ broken");
+    const before = readFileSync(target);
+
+    expect(() => store.setAgentModel("agents", "oracle", "x/y", null)).toThrow(JsoncSyntaxError);
+    expect(readFileSync(target)).toEqual(before);
+  });
+
+  it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+    "aborts with CONFIG_UNREADABLE when the agent config exists but cannot be read",
+    () => {
+      const dir = seedConfigDir({ opencode: true, ohMy: true });
+      const store = new ConfigStore({ configDirOverride: dir, homeDir: sandbox() });
+      const target = path.join(dir, "oh-my-opencode.json");
+      const before = readFileSync(target);
+      chmodSync(target, 0o000);
+      try {
+        expect(() => store.setAgentModel("agents", "oracle", "x/y", null)).toThrow("CONFIG_UNREADABLE");
+      } finally {
+        chmodSync(target, 0o644);
+      }
+      expect(readFileSync(target)).toEqual(before);
+    },
+  );
 });
 
 describe("ConfigStore.readTextForEdit", () => {

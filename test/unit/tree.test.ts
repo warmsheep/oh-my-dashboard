@@ -1,7 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
+
 import type { BackupEntry, DiscoveredConfig, JsoncError, ModelEntry, PluginEntry, Preset } from "../../src/core/types";
-import { buildConfigTree, CURRENT_PRESET_BADGE, type BaseNode } from "../../src/tree/nodes";
-import { ConfigTreeDataProvider, type TreeDataSnapshot } from "../../src/tree/provider";
+import { buildConfigTree, CURRENT_PRESET_BADGE } from "../../src/tree/nodes";
+import type { BaseNode } from "../../src/tree/nodes";
+import { ConfigTreeDataProvider } from "../../src/tree/provider";
+import type { TreeDataSnapshot } from "../../src/tree/provider";
 
 // VSCode is not available under vitest — mock exactly the surface the provider uses.
 vi.mock("vscode", () => ({
@@ -29,7 +32,6 @@ function makeDiscovered(overrides: Partial<DiscoveredConfig> = {}): DiscoveredCo
   return {
     configDir: "/cfg",
     opencodeJson: "/cfg/opencode.json",
-    ohMyOpencodeJson: "/cfg/oh-my-opencode.json",
     agentConfig: {
       kind: "legacy",
       path: "/cfg/oh-my-opencode.json",
@@ -155,7 +157,12 @@ const MODEL_ENTRIES: ModelEntry[] = [
     source: "local",
   },
   {
-    option: { id: "deepseek/deepseek-v4-flash", provider: "deepseek", model: "deepseek-v4-flash", label: "DeepSeek V4 Flash" },
+    option: {
+      id: "deepseek/deepseek-v4-flash",
+      provider: "deepseek",
+      model: "deepseek-v4-flash",
+      label: "DeepSeek V4 Flash",
+    },
     source: "both",
   },
 ];
@@ -169,12 +176,22 @@ const PLUGINS: PluginEntry[] = [
     version: "0.0.3",
     installed: true,
     tree: [
-      { name: "package.json", path: "/home/t/.cache/opencode/node_modules/@scope/installed/package.json", isDir: false },
+      {
+        name: "package.json",
+        path: "/home/t/.cache/opencode/node_modules/@scope/installed/package.json",
+        isDir: false,
+      },
       {
         name: "src",
         path: "/home/t/.cache/opencode/node_modules/@scope/installed/src",
         isDir: true,
-        children: [{ name: "index.ts", path: "/home/t/.cache/opencode/node_modules/@scope/installed/src/index.ts", isDir: false }],
+        children: [
+          {
+            name: "index.ts",
+            path: "/home/t/.cache/opencode/node_modules/@scope/installed/src/index.ts",
+            isDir: false,
+          },
+        ],
       },
     ],
   },
@@ -323,7 +340,13 @@ describe("buildConfigTree — full shape", () => {
     const kids = n.children!;
     expect(kids.map((k) => k.contextValue)).toEqual(["agent", "agent", "agent", "category", "category"]);
     // hephaestus & oracle are KNOWN (in that order); zeus is an extra, sorted after.
-    expect(kids.map((k) => k.id)).toEqual(["agent:hephaestus", "agent:oracle", "agent:zeus", "category:visual-engineering", "category:frontend"]);
+    expect(kids.map((k) => k.id)).toEqual([
+      "agent:hephaestus",
+      "agent:oracle",
+      "agent:zeus",
+      "category:visual-engineering",
+      "category:frontend",
+    ]);
 
     expect(kids[0].label).toBe("🤖 hephaestus");
     expect(kids[0].description).toBe("claude-opus · medium");
@@ -388,10 +411,7 @@ describe("buildConfigTree — full shape", () => {
       command: "opencode.openConfigFile",
       filePath: "/cfg/skills",
     });
-    const skillFile = find(
-      find(global.children!, "dir:/cfg/skills/pdf").children!,
-      "file:/cfg/skills/pdf/SKILL.md",
-    );
+    const skillFile = find(find(global.children!, "dir:/cfg/skills/pdf").children!, "file:/cfg/skills/pdf/SKILL.md");
     expect(skillFile.command).toBe("opencode.openConfigFile");
   });
 
@@ -474,7 +494,6 @@ describe("buildConfigTree — missing configs guide", () => {
   const roots = buildConfigTree(
     makeDiscovered({
       opencodeJson: "",
-      ohMyOpencodeJson: "",
       agentConfig: { kind: "legacy", path: "", sectionPath: [], reasoningKey: "variant", exists: false },
     }),
     [],
@@ -492,7 +511,15 @@ describe("buildConfigTree — missing configs guide", () => {
       command: "opencode.createConfig",
       collapsibleState: "none",
     });
-    expect(kids.slice(1).map((k) => k.kind)).toEqual(["configFile", "configFile", "agentsMd", "agentsMd", "dirSummary", "dirSummary", "dirSummary"]);
+    expect(kids.slice(1).map((k) => k.kind)).toEqual([
+      "configFile",
+      "configFile",
+      "agentsMd",
+      "agentsMd",
+      "dirSummary",
+      "dirSummary",
+      "dirSummary",
+    ]);
   });
 });
 
@@ -563,7 +590,8 @@ describe("buildConfigTree — current preset marker", () => {
         ),
       ],
     });
-    const kids = buildConfigTree(snap.discovered, snap.presets, snap.currentPreset, snap.backups, snap.parseErrors)[2].children!;
+    const kids = buildConfigTree(snap.discovered, snap.presets, snap.currentPreset, snap.backups, snap.parseErrors)[2]
+      .children!;
     expect(kids[0].label).toBe("升级前 · 2026-08-21 10:00");
     expect(kids[0].id).toBe("backup:2026-08-21T10-00-00-000Z-manual");
   });
@@ -597,6 +625,41 @@ describe("buildConfigTree — empty sections", () => {
     const kids = roots[1].children!;
     expect(kids).toHaveLength(1);
     expect(kids[0].kind).toBe("captureAction");
+  });
+});
+
+describe("buildConfigTree — hostile manifest data fallbacks", () => {
+  it("backup with an invalid createdAt shows the raw ISO and sorts as the oldest (no NaN crash)", () => {
+    const garbage = makeBackup(
+      { createdAt: "not-a-date" },
+      { dirName: "garbage-stamp", dir: "/cfg/backups/garbage-stamp" },
+    );
+    const fresh = makeBackup(
+      { createdAt: "2026-08-21T10:00:00.000Z" },
+      { dirName: "fresh-stamp", dir: "/cfg/backups/fresh-stamp" },
+    );
+    const tree = buildConfigTree(makeDiscovered(), [], null, [garbage, fresh], new Map());
+    const kids = tree[2].children!;
+    expect(kids.map((k) => k.id)).toEqual(["backup:fresh-stamp", "backup:garbage-stamp"]);
+    expect(kids[1].label).toBe("not-a-date 手动"); // raw ISO passthrough, no NaN
+  });
+
+  it("backup with an unknown reason falls back to the raw reason text", () => {
+    const weird = makeBackup(
+      { reason: "pre-migrate" as BackupEntry["manifest"]["reason"], createdAt: "2026-08-20T10:00:00.000Z" },
+      { dirName: "weird-reason", dir: "/cfg/backups/weird-reason" },
+    );
+    const tree = buildConfigTree(makeDiscovered(), [], null, [weird], new Map());
+    expect(tree[2].children![0].label).toBe("2026-08-20 10:00 pre-migrate");
+  });
+
+  it("model section with empty or missing models contains only the add action", () => {
+    for (const models of [[] as ModelEntry[], undefined]) {
+      const tree = buildConfigTree(makeDiscovered(), [], null, [], new Map(), undefined, models);
+      const kids = tree[3].children!;
+      expect(kids).toHaveLength(1);
+      expect(kids[0]).toMatchObject({ kind: "modelAddAction", label: "➕ 添加模型…", command: "opencode.addModel" });
+    }
   });
 });
 
@@ -682,14 +745,15 @@ describe("buildConfigTree — id uniqueness", () => {
   it("has no duplicate ids anywhere (recursive)", () => {
     const roots = buildConfigTree(
       makeDiscovered({
-      opencodeJson: "",
-      ohMyOpencodeJson: "",
-      agentConfig: { kind: "legacy", path: "", sectionPath: [], reasoningKey: "variant", exists: false },
-    }),
+        opencodeJson: "",
+        agentConfig: { kind: "legacy", path: "", sectionPath: [], reasoningKey: "variant", exists: false },
+      }),
       PRESETS,
       "deep-work",
       BACKUPS,
-      new Map<string, JsoncError[]>([["/cfg/oh-my-opencode.json", [{ offset: 7, length: 1, message: "Invalid symbol" }]]]),
+      new Map<string, JsoncError[]>([
+        ["/cfg/oh-my-opencode.json", [{ offset: 7, length: 1, message: "Invalid symbol" }]],
+      ]),
       ASSIGNMENTS,
     );
     const ids = collectIds(roots);
@@ -739,7 +803,17 @@ describe("ConfigTreeDataProvider", () => {
   it("getTreeItem maps a preset node: collapsibleState None, edit command, pin icon for current", () => {
     const snap = makeSnapshot();
     const provider = new ConfigTreeDataProvider(() => snap);
-    const deep = find(buildConfigTree(snap.discovered, snap.presets, snap.currentPreset, snap.backups, snap.parseErrors, snap.assignments)[1].children!, "preset:deep-work");
+    const deep = find(
+      buildConfigTree(
+        snap.discovered,
+        snap.presets,
+        snap.currentPreset,
+        snap.backups,
+        snap.parseErrors,
+        snap.assignments,
+      )[1].children!,
+      "preset:deep-work",
+    );
 
     const item = provider.getTreeItem(deep);
     expect(item.collapsibleState).toBe(0); // TreeItemCollapsibleState.None
@@ -791,14 +865,27 @@ describe("ConfigTreeDataProvider", () => {
   it("maps collapsibleState strings to None/Collapsed/Expanded and guide gets info icon", () => {
     const snap = makeSnapshot({ backups: [] });
     const provider = new ConfigTreeDataProvider(() => snap);
-    const guide = buildConfigTree(snap.discovered, snap.presets, snap.currentPreset, [], snap.parseErrors)[2].children![0];
+    const guide = buildConfigTree(snap.discovered, snap.presets, snap.currentPreset, [], snap.parseErrors)[2]
+      .children![0];
     const item = provider.getTreeItem(guide);
     expect(item.collapsibleState).toBe(0);
     expect((item.iconPath as unknown as { id: string }).id).toBe("info");
 
-    const expanded = provider.getTreeItem({ kind: "configRoot", id: "x", label: "x", contextValue: "configRoot", collapsibleState: "expanded" });
+    const expanded = provider.getTreeItem({
+      kind: "configRoot",
+      id: "x",
+      label: "x",
+      contextValue: "configRoot",
+      collapsibleState: "expanded",
+    });
     expect(expanded.collapsibleState).toBe(2); // Expanded
-    const collapsed = provider.getTreeItem({ kind: "parseError", id: "y", label: "y", contextValue: "parseError", collapsibleState: "collapsed" });
+    const collapsed = provider.getTreeItem({
+      kind: "parseError",
+      id: "y",
+      label: "y",
+      contextValue: "parseError",
+      collapsibleState: "collapsed",
+    });
     expect(collapsed.collapsibleState).toBe(1); // Collapsed
   });
 

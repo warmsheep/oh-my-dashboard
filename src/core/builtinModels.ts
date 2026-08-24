@@ -1,6 +1,8 @@
 import * as defaultFs from "node:fs";
 import * as path from "node:path";
+
 import { writeFileAtomic } from "./atomicFile";
+import { parseSafe } from "./jsoncEditor";
 import type { ModelOption } from "./types";
 
 export const LOCAL_MODELS_FILE = "models.json";
@@ -15,30 +17,105 @@ export const LOCAL_MODELS_FILE = "models.json";
 export const BUILTIN_MODELS: readonly ModelOption[] = [
   { id: "zhipuai-coding-plan/glm-5.3", provider: "zhipuai-coding-plan", model: "glm-5.3", label: "GLM-5.3" },
   { id: "zhipuai-coding-plan/glm-5.2", provider: "zhipuai-coding-plan", model: "glm-5.2", label: "GLM-5.2" },
-  { id: "zhipuai-coding-plan/glm-5.2-highspeed", provider: "zhipuai-coding-plan", model: "glm-5.2-highspeed", label: "GLM-5.2 高速" },
+  {
+    id: "zhipuai-coding-plan/glm-5.2-highspeed",
+    provider: "zhipuai-coding-plan",
+    model: "glm-5.2-highspeed",
+    label: "GLM-5.2 高速",
+  },
   { id: "zhipuai-coding-plan/glm-5.1", provider: "zhipuai-coding-plan", model: "glm-5.1", label: "GLM-5.1" },
-  { id: "zhipuai-coding-plan/glm-5-turbo", provider: "zhipuai-coding-plan", model: "glm-5-turbo", label: "GLM-5 Turbo" },
-  { id: "zhipuai-coding-plan/glm-5v-turbo", provider: "zhipuai-coding-plan", model: "glm-5v-turbo", label: "GLM-5V Turbo（视觉）" },
+  {
+    id: "zhipuai-coding-plan/glm-5-turbo",
+    provider: "zhipuai-coding-plan",
+    model: "glm-5-turbo",
+    label: "GLM-5 Turbo",
+  },
+  {
+    id: "zhipuai-coding-plan/glm-5v-turbo",
+    provider: "zhipuai-coding-plan",
+    model: "glm-5v-turbo",
+    label: "GLM-5V Turbo（视觉）",
+  },
   { id: "zhipuai-coding-plan/glm-4.7", provider: "zhipuai-coding-plan", model: "glm-4.7", label: "GLM-4.7" },
   { id: "zhipuai-coding-plan/glm-4.6v", provider: "zhipuai-coding-plan", model: "glm-4.6v", label: "GLM-4.6V（视觉）" },
   { id: "kimi-for-coding/k3", provider: "kimi-for-coding", model: "k3", label: "Kimi K3" },
   { id: "kimi-for-coding/k3-256k", provider: "kimi-for-coding", model: "k3-256k", label: "Kimi K3 256K" },
-  { id: "kimi-for-coding/kimi-for-coding-highspeed", provider: "kimi-for-coding", model: "kimi-for-coding-highspeed", label: "Kimi For Coding 高速" },
-  { id: "kimi-for-coding/kimi-for-coding", provider: "kimi-for-coding", model: "kimi-for-coding", label: "Kimi For Coding" },
-  { id: "minimax-cn-coding-plan/MiniMax-M3", provider: "minimax-cn-coding-plan", model: "MiniMax-M3", label: "MiniMax M3" },
-  { id: "minimax-cn-coding-plan/MiniMax-M2.7", provider: "minimax-cn-coding-plan", model: "MiniMax-M2.7", label: "MiniMax M2.7" },
-  { id: "minimax-cn-coding-plan/MiniMax-M2.7-highspeed", provider: "minimax-cn-coding-plan", model: "MiniMax-M2.7-highspeed", label: "MiniMax M2.7 高速" },
-  { id: "minimax-cn-coding-plan/MiniMax-M2.5", provider: "minimax-cn-coding-plan", model: "MiniMax-M2.5", label: "MiniMax M2.5" },
-  { id: "minimax-cn-coding-plan/MiniMax-M2.5-highspeed", provider: "minimax-cn-coding-plan", model: "MiniMax-M2.5-highspeed", label: "MiniMax M2.5 高速" },
-  { id: "minimax-cn-coding-plan/MiniMax-M2.1", provider: "minimax-cn-coding-plan", model: "MiniMax-M2.1", label: "MiniMax M2.1" },
-  { id: "minimax-cn-coding-plan/MiniMax-M2", provider: "minimax-cn-coding-plan", model: "MiniMax-M2", label: "MiniMax M2" },
-  { id: "xiaomi-token-plan-cn/mimo-v2.5-pro", provider: "xiaomi-token-plan-cn", model: "mimo-v2.5-pro", label: "MiMo v2.5 Pro" },
+  {
+    id: "kimi-for-coding/kimi-for-coding-highspeed",
+    provider: "kimi-for-coding",
+    model: "kimi-for-coding-highspeed",
+    label: "Kimi For Coding 高速",
+  },
+  {
+    id: "kimi-for-coding/kimi-for-coding",
+    provider: "kimi-for-coding",
+    model: "kimi-for-coding",
+    label: "Kimi For Coding",
+  },
+  {
+    id: "minimax-cn-coding-plan/MiniMax-M3",
+    provider: "minimax-cn-coding-plan",
+    model: "MiniMax-M3",
+    label: "MiniMax M3",
+  },
+  {
+    id: "minimax-cn-coding-plan/MiniMax-M2.7",
+    provider: "minimax-cn-coding-plan",
+    model: "MiniMax-M2.7",
+    label: "MiniMax M2.7",
+  },
+  {
+    id: "minimax-cn-coding-plan/MiniMax-M2.7-highspeed",
+    provider: "minimax-cn-coding-plan",
+    model: "MiniMax-M2.7-highspeed",
+    label: "MiniMax M2.7 高速",
+  },
+  {
+    id: "minimax-cn-coding-plan/MiniMax-M2.5",
+    provider: "minimax-cn-coding-plan",
+    model: "MiniMax-M2.5",
+    label: "MiniMax M2.5",
+  },
+  {
+    id: "minimax-cn-coding-plan/MiniMax-M2.5-highspeed",
+    provider: "minimax-cn-coding-plan",
+    model: "MiniMax-M2.5-highspeed",
+    label: "MiniMax M2.5 高速",
+  },
+  {
+    id: "minimax-cn-coding-plan/MiniMax-M2.1",
+    provider: "minimax-cn-coding-plan",
+    model: "MiniMax-M2.1",
+    label: "MiniMax M2.1",
+  },
+  {
+    id: "minimax-cn-coding-plan/MiniMax-M2",
+    provider: "minimax-cn-coding-plan",
+    model: "MiniMax-M2",
+    label: "MiniMax M2",
+  },
+  {
+    id: "xiaomi-token-plan-cn/mimo-v2.5-pro",
+    provider: "xiaomi-token-plan-cn",
+    model: "mimo-v2.5-pro",
+    label: "MiMo v2.5 Pro",
+  },
   { id: "xiaomi-token-plan-cn/mimo-v2.5", provider: "xiaomi-token-plan-cn", model: "mimo-v2.5", label: "MiMo v2.5" },
-  { id: "opencode/mimo-v2.5-free", provider: "opencode", model: "mimo-v2.5-free", label: "MiMo v2.5 Free（opencode 免费）" },
+  {
+    id: "opencode/mimo-v2.5-free",
+    provider: "opencode",
+    model: "mimo-v2.5-free",
+    label: "MiMo v2.5 Free（opencode 免费）",
+  },
   { id: "deepseek/deepseek-v4-pro", provider: "deepseek", model: "deepseek-v4-pro", label: "DeepSeek V4 Pro" },
   { id: "deepseek/deepseek-v4-flash", provider: "deepseek", model: "deepseek-v4-flash", label: "DeepSeek V4 Flash" },
   { id: "deepseek/deepseek-chat", provider: "deepseek", model: "deepseek-chat", label: "DeepSeek Chat" },
-  { id: "deepseek/deepseek-reasoner", provider: "deepseek", model: "deepseek-reasoner", label: "DeepSeek Reasoner（推理）" },
+  {
+    id: "deepseek/deepseek-reasoner",
+    provider: "deepseek",
+    model: "deepseek-reasoner",
+    label: "DeepSeek Reasoner（推理）",
+  },
   { id: "openai/gpt-5.6", provider: "openai", model: "gpt-5.6", label: "GPT-5.6" },
   { id: "openai/gpt-5.6-sol", provider: "openai", model: "gpt-5.6-sol", label: "GPT-5.6 Sol" },
   { id: "openai/gpt-5.6-sol-fast", provider: "openai", model: "gpt-5.6-sol-fast", label: "GPT-5.6 Sol Fast" },
@@ -54,11 +131,21 @@ export const BUILTIN_MODELS: readonly ModelOption[] = [
   { id: "openai/gpt-5.4-mini", provider: "openai", model: "gpt-5.4-mini", label: "GPT-5.4 Mini" },
   { id: "openai/gpt-5.4-mini-fast", provider: "openai", model: "gpt-5.4-mini-fast", label: "GPT-5.4 Mini Fast" },
   { id: "openai/gpt-5.3-codex", provider: "openai", model: "gpt-5.3-codex", label: "GPT-5.3 Codex（代码）" },
-  { id: "openai/gpt-5.3-codex-spark", provider: "openai", model: "gpt-5.3-codex-spark", label: "GPT-5.3 Codex Spark（代码）" },
+  {
+    id: "openai/gpt-5.3-codex-spark",
+    provider: "openai",
+    model: "gpt-5.3-codex-spark",
+    label: "GPT-5.3 Codex Spark（代码）",
+  },
   { id: "anthropic/claude-opus-5", provider: "anthropic", model: "claude-opus-5", label: "Claude Opus 5" },
   { id: "anthropic/claude-sonnet-5", provider: "anthropic", model: "claude-sonnet-5", label: "Claude Sonnet 5" },
   { id: "anthropic/claude-opus-4-8", provider: "anthropic", model: "claude-opus-4-8", label: "Claude Opus 4.8" },
-  { id: "anthropic/claude-haiku-4-5", provider: "anthropic", model: "claude-haiku-4-5", label: "Claude Haiku 4.5（快速）" },
+  {
+    id: "anthropic/claude-haiku-4-5",
+    provider: "anthropic",
+    model: "claude-haiku-4-5",
+    label: "Claude Haiku 4.5（快速）",
+  },
   { id: "xai/grok-4.6", provider: "xai", model: "grok-4.6", label: "Grok 4.6" },
   { id: "xai/grok-4.5", provider: "xai", model: "grok-4.5", label: "Grok 4.5" },
   { id: "xai/grok-4.3", provider: "xai", model: "grok-4.3", label: "Grok 4.3" },
@@ -99,13 +186,15 @@ function serialize(models: readonly ModelOption[]): string {
 }
 
 function parseLocalModels(text: string): ModelOption[] {
-  try {
-    const parsed = JSON.parse(text) as { models?: unknown };
-    const models = Array.isArray(parsed?.models) ? parsed.models.map(normalize).filter((m): m is ModelOption => m !== null) : [];
-    return models;
-  } catch {
+  // models.json is hand-editable: tolerate comments/trailing commas (jsonc parse)
+  // so a hand edit never triggers the self-heal rewrite. Self-heal triggers only
+  // on a broken SHAPE (value not an object / models not an array), not on syntax.
+  const { value } = parseSafe<{ models?: unknown }>(text);
+  if (typeof value !== "object" || value === null) {
     return [];
   }
+  const models = Array.isArray(value.models) ? value.models : [];
+  return models.map(normalize).filter((m): m is ModelOption => m !== null);
 }
 
 /**
@@ -113,12 +202,12 @@ function parseLocalModels(text: string): ModelOption[] {
  * BUILTIN_MODELS when missing or unreadable (self-healing: the file is a
  * regenerable cache that users may also hand-edit).
  */
-export function ensureLocalModelsFile(configDir: string, fs: typeof defaultFs = defaultFs): ModelOption[] {
+export function ensureLocalModelsFile(configDir: string, fsMod: typeof defaultFs = defaultFs): ModelOption[] {
   const file = path.join(configDir, LOCAL_MODELS_FILE);
-  if (fs.existsSync(file)) {
+  if (fsMod.existsSync(file)) {
     let models: ModelOption[];
     try {
-      models = parseLocalModels(fs.readFileSync(file, "utf8"));
+      models = parseLocalModels(fsMod.readFileSync(file, "utf8"));
     } catch {
       // Exists but unreadable (permissions/AV lock): degrade read-only — a rewrite
       // would hit the same permission wall, and the built-in catalog keeps things working.
@@ -130,13 +219,20 @@ export function ensureLocalModelsFile(configDir: string, fs: typeof defaultFs = 
     // Self-heal below rewrites the file wholesale — keep the user's (broken) edit as
     // models.json.bak so custom entries are recoverable.
     try {
-      fs.copyFileSync(file, `${file}.bak`);
+      fsMod.copyFileSync(file, `${file}.bak`);
     } catch {
       // best-effort backup; healing proceeds regardless
     }
   }
-  fs.mkdirSync(configDir, { recursive: true });
-  writeFileAtomic(file, serialize(BUILTIN_MODELS), fs);
+  try {
+    fsMod.mkdirSync(configDir, { recursive: true });
+    writeFileAtomic(file, serialize(BUILTIN_MODELS), fsMod);
+  } catch {
+    // Seeding is a write side effect on a READ path: a read-only dir or a full
+    // disk must not kill the tree/commands — degrade to the in-memory builtin
+    // catalog this round (same as the unreadable-file branch above); next use retries.
+    return BUILTIN_MODELS.map((m) => ({ ...m }));
+  }
   return BUILTIN_MODELS.map((m) => ({ ...m }));
 }
 
@@ -162,14 +258,19 @@ export interface LocalModelInput {
   label?: string;
 }
 
-function writeLocalModels(configDir: string, models: ModelOption[], fs: typeof defaultFs = defaultFs): void {
+function writeLocalModels(configDir: string, models: ModelOption[], fsMod: typeof defaultFs = defaultFs): void {
   const file = path.join(configDir, LOCAL_MODELS_FILE);
-  fs.mkdirSync(configDir, { recursive: true });
-  writeFileAtomic(file, serialize(models), fs);
+  fsMod.mkdirSync(configDir, { recursive: true });
+  writeFileAtomic(file, serialize(models), fsMod);
 }
 
-export function addLocalModel(configDir: string, input: LocalModelInput, fs: typeof defaultFs = defaultFs): ModelOption {
-  const models = ensureLocalModelsFile(configDir, fs);
+/** Add (or replace by id) an entry in the local catalog and persist models.json atomically. */
+export function addLocalModel(
+  configDir: string,
+  input: LocalModelInput,
+  fsMod: typeof defaultFs = defaultFs,
+): ModelOption {
+  const models = ensureLocalModelsFile(configDir, fsMod);
   const entry: ModelOption = {
     id: `${input.provider}/${input.model}`,
     provider: input.provider,
@@ -182,16 +283,27 @@ export function addLocalModel(configDir: string, input: LocalModelInput, fs: typ
   } else {
     models.push(entry);
   }
-  writeLocalModels(configDir, models, fs);
+  writeLocalModels(configDir, models, fsMod);
   return entry;
 }
 
-export function removeLocalModel(configDir: string, id: string, fs: typeof defaultFs = defaultFs): boolean {
-  const models = ensureLocalModelsFile(configDir, fs);
+/**
+ * Remove a model by id from the local catalog. Removing the last entry deletes models.json
+ * (an empty catalog would self-heal back to the builtins); returns false for unknown ids.
+ */
+export function removeLocalModel(configDir: string, id: string, fsMod: typeof defaultFs = defaultFs): boolean {
+  const models = ensureLocalModelsFile(configDir, fsMod);
   const next = models.filter((m) => m.id !== id);
   if (next.length === models.length) {
     return false;
   }
-  writeLocalModels(configDir, next, fs);
+  if (next.length === 0) {
+    // Writing {"models":[]} would make ensureLocalModelsFile treat the file as
+    // corrupted and resurrect the builtins (+ a .bak). Delete instead; first
+    // use re-seeds a clean file.
+    fsMod.rmSync(path.join(configDir, LOCAL_MODELS_FILE), { force: true });
+    return true;
+  }
+  writeLocalModels(configDir, next, fsMod);
   return true;
 }
