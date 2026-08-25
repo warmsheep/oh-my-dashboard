@@ -5,21 +5,20 @@ import { rewriteWebviewAssets } from "../../src/webview/assetRewrite";
 /** Deterministic stand-in for the vscode-dependent webview URI mapping. */
 const assetUri = (reference: string): string => `webview://dist/${reference}`;
 
-const CSP =
-  "default-src 'none'; style-src https://webview 'unsafe-inline'; script-src https://webview 'nonce-testnonce';";
+const CSP = "default-src 'none'; style-src https://webview 'unsafe-inline'; script-src https://webview;";
 
 function rewrite(html: string): string {
-  return rewriteWebviewAssets(html, { cspSource: "https://webview", nonce: "testnonce", assetUri });
+  return rewriteWebviewAssets(html, { cspSource: "https://webview", assetUri });
 }
 
 describe("rewriteWebviewAssets — script tags", () => {
-  it("rewrites every module script src to the webview asset URI and stamps the nonce", () => {
+  it("rewrites every module script src to the webview asset URI", () => {
     const out = rewrite(
       `<head><script type="module" crossorigin src="./index.js"></script>` +
         `<script type="module" crossorigin src="./quota.js"></script></head>`,
     );
-    expect(out).toContain('<script type="module" crossorigin src="webview://dist/index.js" nonce="testnonce">');
-    expect(out).toContain('<script type="module" crossorigin src="webview://dist/quota.js" nonce="testnonce">');
+    expect(out).toContain('<script type="module" crossorigin src="webview://dist/index.js">');
+    expect(out).toContain('<script type="module" crossorigin src="webview://dist/quota.js">');
   });
 
   it("collapses traversal, absolute and external references to a flat local basename (no localResourceRoots escape)", () => {
@@ -27,9 +26,9 @@ describe("rewriteWebviewAssets — script tags", () => {
       `<script src="../../evil.js"></script><script src="/abs/x.js"></script>` +
         `<script src="https://cdn.example.com/payload.js"></script>`,
     );
-    expect(out).toContain('src="webview://dist/evil.js" nonce="testnonce"');
-    expect(out).toContain('src="webview://dist/x.js" nonce="testnonce"');
-    expect(out).toContain('src="webview://dist/payload.js" nonce="testnonce"');
+    expect(out).toContain('src="webview://dist/evil.js"');
+    expect(out).toContain('src="webview://dist/x.js"');
+    expect(out).toContain('src="webview://dist/payload.js"');
     expect(out).not.toContain("..");
     expect(out).not.toContain("https://cdn.example.com");
   });
@@ -42,7 +41,6 @@ describe("rewriteWebviewAssets — script tags", () => {
   it("leaves inline scripts untouched (CSP still blocks them)", () => {
     const out = rewrite(`<script>window.alert(1)</script>`);
     expect(out).toContain(`<script>window.alert(1)</script>`);
-    expect(out).not.toMatch(/<script[^>]*nonce/);
   });
 });
 
@@ -74,5 +72,10 @@ describe("rewriteWebviewAssets — CSP injection", () => {
   it("prepends the CSP meta when the document has no <head>", () => {
     const out = rewrite(`<body></body>`);
     expect(out.startsWith(`<meta http-equiv="Content-Security-Policy" content="${CSP}">`)).toBe(true);
+  });
+
+  it("keeps script-src a bare source allowlist — no nonce (nonces break ES-module imports on code-server)", () => {
+    const out = rewrite(`<head><script type="module" src="./quota.js"></script></head>`);
+    expect(out).not.toMatch(/nonce/i);
   });
 });

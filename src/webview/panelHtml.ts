@@ -1,4 +1,3 @@
-import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
@@ -37,7 +36,6 @@ export function readWebviewHtml(
 export function buildWebviewHtml(webview: vscode.Webview, html: string, distWebviewUri: vscode.Uri): string {
   return rewriteWebviewAssets(html, {
     cspSource: webview.cspSource,
-    nonce: crypto.randomBytes(16).toString("hex"),
     assetUri: (basename) => webview.asWebviewUri(vscode.Uri.joinPath(distWebviewUri, basename)).toString(),
   });
 }

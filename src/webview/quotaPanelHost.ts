@@ -103,7 +103,15 @@ export async function openQuotaPanel(
     resolveReady = () => settle(resolve);
     rejectReady = (error: Error) => settle(() => reject(error));
   });
-  readyTimer = setTimeout(() => rejectReady(new Error("额度面板初始化超时")), 20_000);
+  // Timeout disposes the blank panel and clears the singleton (via onDidDispose):
+  // a webview that never booted must not squat on openPanel — later clicks would
+  // only reveal a dead tab forever. The user can simply click again to retry.
+  readyTimer = setTimeout(() => {
+    // settle() clears this timer, so firing here means the promise was unsettled —
+    // rejectReady settles it and the dispose below reaches the cleanup path.
+    rejectReady(new Error("额度面板初始化超时"));
+    panel.dispose();
+  }, 20_000);
 
   const post = (message: unknown): void => {
     void panel.webview.postMessage(message);
