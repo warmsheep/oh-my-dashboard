@@ -1,0 +1,178 @@
+/* Quota settings page — shares main.css (theme tokens, .ctl/.btn/.banner/.toast) and
+   adds provider group cards, window progress rows and color tones. */
+
+.tone-green {
+  color: var(--vscode-charts-green, #4cc38a);
+}
+
+.tone-yellow {
+  color: var(--vscode-charts-yellow, #e0a426);
+}
+
+.tone-red {
+  color: var(--vscode-charts-red, #e05252);
+}
+
+.quota-page {
+  max-width: 860px;
+}
+
+.qgroup {
+  margin-top: 14px;
+  border: 1px solid var(--hairline);
+  border-radius: 2px;
+}
+
+.qgroup-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  background: var(--section-bg);
+  border-bottom: 1px solid var(--hairline);
+}
+
+.qgroup-head h2 {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.qplan {
+  font-size: 10px;
+  color: var(--desc);
+  border: 1px solid var(--hairline);
+  border-radius: 2px;
+  padding: 0 6px;
+  line-height: 16px;
+}
+
+.qbadge {
+  margin-left: auto;
+  font-size: 10px;
+  color: var(--desc);
+}
+
+.qbadge.on {
+  color: var(--ok);
+}
+
+/* Header credential hint: fills the space between title and badge; narrow panes
+   ellipsize it (the span carries the full text in its title attribute). */
+.qcred-hint {
+  flex: 1;
+  min-width: 0;
+  font-size: 11px;
+  color: var(--desc);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.qrefresh {
+  height: 22px;
+  padding: 0 10px;
+  font-size: 11px;
+}
+
+.qgroup-body {
+  padding: 4px 12px 10px;
+}
+
+.qgroup-body .banner-error {
+  margin: 6px 0;
+}
+
+.qrow {
+  display: grid;
+  grid-template-columns: 72px minmax(80px, 1fr) 110px minmax(0, 1.4fr);
+  gap: 12px;
+  align-items: center;
+  min-height: 30px;
+  border-bottom: 1px solid var(--hairline);
+}
+
+.qrow:last-of-type {
+  border-bottom: none;
+}
+
+.qrow-label {
+  font-size: 12px;
+  color: var(--desc);
+}
+
+.qbar {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--inp-bg);
+  border: 1px solid var(--hairline);
+  overflow: hidden;
+}
+
+.qbar-fill {
+  height: 100%;
+  border-radius: 2px;
+  transition: width 0.25s ease;
+}
+
+.qbar-fill.tone-green {
+  background: var(--vscode-charts-green, #4cc38a);
+}
+
+.qbar-fill.tone-yellow {
+  background: var(--vscode-charts-yellow, #e0a426);
+}
+
+.qbar-fill.tone-red {
+  background: var(--vscode-charts-red, #e05252);
+}
+
+.qpct {
+  font-size: 12px;
+  font-weight: 600;
+  text-align: right;
+}
+
+.qdetail {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  font-size: 11px;
+  color: var(--desc);
+}
+
+.qconfig {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--hairline);
+}
+
+.qconfig-row {
+  display: grid;
+  grid-template-columns: 110px minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+}
+
+.qconfig-row label {
+  font-size: 12px;
+  color: var(--desc);
+  text-align: right;
+}
+
+.qconfig-row .ctl {
+  width: 100%;
+}
+
+.qhint {
+  margin: 4px 0 0;
+  font-size: 11px;
+  color: var(--desc);
+}
+
+.qfooter {
+  display: flex;
+  justify-content: center;
+  padding: 22px 0 8px;
+}

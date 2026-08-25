@@ -7,12 +7,14 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   deriveRemainingPercent,
   formatQuotaBar,
+  mergeProviderSnapshot,
   NETWORK_TIMEOUT_MESSAGE,
   NETWORK_UNAVAILABLE_MESSAGE,
   normalizeMimoCookie,
   quotaCycleFailed,
   quotaRetryDelayMs,
   QuotaService,
+  type ProviderQuota,
   type QuotaSnapshot,
   type QuotaWindow,
 } from "../../src/core/quotaService";
@@ -1269,5 +1271,140 @@ describe("deriveRemainingPercent", () => {
 
   it("returns null when both percents are unknown", () => {
     expect(deriveRemainingPercent(window({}))).toBeNull();
+  });
+});
+
+describe("QuotaService.fetchProvider", () => {
+  function providerBase(id: ProviderQuota["providerId"], label: string): ProviderQuota {
+    return { providerId: id, label, plan: null, windows: [], balances: null, configured: false, error: null };
+  }
+
+  it("refreshes a single provider from its credential and touches only its endpoint", async () => {
+    const dir = tmpDir();
+    fs.writeFileSync(
+      path.join(dir, "auth.json"),
+      JSON.stringify({
+        "kimi-for-coding": { type: "api", key: "sk-kimi" },
+        "zhipuai-coding-plan": { type: "api", key: "sk-glm" },
+      }),
+    );
+    const urls: string[] = [];
+    const fetchFn = async (url: string | URL | Request): Promise<Response> => {
+      urls.push(String(url));
+      return jsonRes(KIMI_PAYLOAD);
+    };
+    const svc = new QuotaService({
+      authFilePath: path.join(dir, "auth.json"),
+      quotaConfigPath: path.join(dir, "quota.json"),
+      fetchFn,
+    });
+
+    const kimi = await svc.fetchProvider("kimi");
+
+    expect(urls).toEqual(["https://api.kimi.com/coding/v1/usages"]);
+    expect(kimi.configured).toBe(true);
+    expect(kimi.plan).toBe("Allegretto");
+  });
+
+  it("reports an unconfigured provider without any network request", async () => {
+    const dir = tmpDir();
+    fs.writeFileSync(path.join(dir, "auth.json"), JSON.stringify({ "kimi-for-coding": { type: "api", key: "k" } }));
+    let calls = 0;
+    const fetchFn = async (): Promise<Response> => {
+      calls += 1;
+      return jsonRes({});
+    };
+    const svc = new QuotaService({
+      authFilePath: path.join(dir, "auth.json"),
+      quotaConfigPath: path.join(dir, "quota.json"),
+      fetchFn,
+    });
+
+    const deepseek = await svc.fetchProvider("deepseek");
+
+    expect(calls).toBe(0);
+    expect(deepseek).toEqual(providerBase("deepseek", "DeepSeek"));
+  });
+
+  it("reads the MiMo cookie from quota.json for a mimo refresh", async () => {
+    const dir = tmpDir();
+    fs.writeFileSync(
+      path.join(dir, "quota.json"),
+      JSON.stringify({ mimo: { cookie: "api-platform_serviceToken=abc; userId=42" } }),
+    );
+    const urls: string[] = [];
+    const fetchFn = async (url: string | URL | Request): Promise<Response> => {
+      const href = String(url);
+      urls.push(href);
+      if (href.endsWith("/balance")) {
+        return jsonRes(MIMO_BALANCE);
+      }
+      if (href.endsWith("/tokenPlan/detail")) {
+        return jsonRes(MIMO_DETAIL);
+      }
+      return jsonRes(MIMO_USAGE);
+    };
+    const svc = new QuotaService({
+      authFilePath: path.join(dir, "auth.json"),
+      quotaConfigPath: path.join(dir, "quota.json"),
+      fetchFn,
+    });
+
+    const mimo = await svc.fetchProvider("mimo");
+
+    expect(urls).toEqual([
+      "https://platform.xiaomimimo.com/api/v1/balance",
+      "https://platform.xiaomimimo.com/api/v1/tokenPlan/detail",
+      "https://platform.xiaomimimo.com/api/v1/tokenPlan/usage",
+    ]);
+    expect(mimo.configured).toBe(true);
+    expect(mimo.plan).toBe("lite");
+    expect(mimo.balances).toEqual({ total: 12.34, currency: "CNY" });
+  });
+
+  it("maps transport failures to the friendly message for a single provider too", async () => {
+    const dir = tmpDir();
+    fs.writeFileSync(path.join(dir, "auth.json"), JSON.stringify({ deepseek: { type: "api", key: "k" } }));
+    const fetchFn = async (): Promise<Response> => {
+      throw new TypeError("fetch failed");
+    };
+    const svc = new QuotaService({
+      authFilePath: path.join(dir, "auth.json"),
+      quotaConfigPath: path.join(dir, "quota.json"),
+      fetchFn,
+    });
+
+    const deepseek = await svc.fetchProvider("deepseek");
+
+    expect(deepseek.configured).toBe(true);
+    expect(deepseek.error).toBe(NETWORK_UNAVAILABLE_MESSAGE);
+  });
+});
+
+describe("mergeProviderSnapshot", () => {
+  function provider(id: ProviderQuota["providerId"], configured = true): ProviderQuota {
+    return { providerId: id, label: id, plan: null, windows: [], balances: null, configured, error: null };
+  }
+
+  it("replaces the matching provider in place, preserving order and siblings", () => {
+    const snapshot: QuotaSnapshot = {
+      providers: [provider("kimi"), provider("glm"), provider("mimo"), provider("deepseek")],
+      fetchedAt: "2026-08-25T00:00:00.000Z",
+    };
+    const fresh = { ...provider("glm"), plan: "pro" };
+
+    const merged = mergeProviderSnapshot(snapshot, fresh, "2026-08-25T01:00:00.000Z");
+
+    expect(merged.providers.map((p) => p.providerId)).toEqual(["kimi", "glm", "mimo", "deepseek"]);
+    expect(merged.providers[1].plan).toBe("pro");
+    expect(merged.fetchedAt).toBe("2026-08-25T01:00:00.000Z");
+  });
+
+  it("inserts an unknown provider at its canonical-order position", () => {
+    const snapshot: QuotaSnapshot = { providers: [provider("kimi")], fetchedAt: "2026-08-25T00:00:00.000Z" };
+
+    const merged = mergeProviderSnapshot(snapshot, provider("glm"), "2026-08-25T02:00:00.000Z");
+
+    expect(merged.providers.map((p) => p.providerId)).toEqual(["kimi", "glm"]);
   });
 });

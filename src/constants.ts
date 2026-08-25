@@ -38,6 +38,7 @@ export const VIEW = {
 /** Test-bridge command IDs — registered only under ExtensionMode.Test, never in package.json contributes. */
 export const TEST_BRIDGE = {
   presetEditorPostMessage: "opencode._test.presetEditorPostMessage",
+  quotaPanelPostMessage: "opencode._test.quotaPanelPostMessage",
   statusBarText: "opencode._test.statusBarText",
 } as const;
 
@@ -60,6 +61,9 @@ export const CONFIG_LEAF = {
 } as const;
 
 export const PRESET_EDITOR_VIEW_TYPE = "opencode.presetEditor";
+
+/** Webview panel view type of the quota settings page (quota.html bundle). */
+export const QUOTA_PANEL_VIEW_TYPE = "opencode.quotaPanel";
 
 /**
  * Preset name validation is owned by src/core/pathSafety.ts (single source for the

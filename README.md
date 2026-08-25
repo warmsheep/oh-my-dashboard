@@ -15,9 +15,10 @@ VSCode 扩展：管理 [opencode](https://opencode.ai) 与 [oh-my-opencode](http
   - **导入/导出**：备份可导出为 zip（跨平台纯 JS 实现三平台通用，含中文名时置 UTF-8 标志位）；导入时校验 manifest、防目录遍历/zip 炸弹（解压前按头部声明尺寸限流），同名已存在时自动加 `-import-N` 后缀
 - **状态栏**：显示当前模板，点击快速切换（`Ctrl+Alt+P`）
 - **Coding Plan 额度**（状态栏右侧）：实时显示 Kimi / GLM / MiMo / DeepSeek 剩余额度（5 小时额度、周额度；MiMo 为月额度+余额；DeepSeek 为按量计费余额）
-  - Kimi / GLM / DeepSeek 自动读取 opencode 凭据（`~/.local/share/opencode/auth.json`），无需额外配置；DeepSeek 官方仅提供余额接口，状态栏显示 `DeepSeek ¥余额`，点击查看币种明细
-  - MiMo 官方仅提供 Dashboard API：执行「Coding Plan 额度：配置 MiMo Cookie…」粘贴 `platform.xiaomimimo.com` 的浏览器 Cookie（存入 `quota.json`）
-  - 点击查看各窗口详情与重置时间；网络故障时自动指数退避（30s → 最长 2 分钟），恢复后回到正常间隔，详情中可随时「刷新」立即重试
+  - 点击打开**额度面板**（类设置页的编辑器窗口）：按供应商分组展示各窗口进度条、剩余百分比与重置时间，每组可单独「刷新」，底部「刷新全部」；面板打开期间跟随自动刷新实时更新
+  - Kimi / GLM / DeepSeek 自动读取 opencode 凭据（`~/.local/share/opencode/auth.json`），面板内只读显示检测状态，更换请运行 `opencode auth login`；DeepSeek 官方仅提供余额接口，显示 `¥余额` 与币种
+  - MiMo 官方仅提供 Dashboard API：在其分组内粘贴 `platform.xiaomimimo.com` 的浏览器 Cookie 保存（存入 `quota.json`，留空不改动；也可经「Coding Plan 额度：配置 MiMo Cookie…」直达该分组）
+  - 网络故障时自动指数退避（30s → 最长 2 分钟），恢复后回到正常间隔，面板内可随时手动重试
   - 请求失败显示友好中文提示，不泄漏原始英文错误；各窗口按剩余量独立着色（≥60% 绿 / 20%–60% 黄 / <20% 红，跟随 VSCode 主题；DeepSeek 余额按绝对值着色）
 
 ## 安装
@@ -61,8 +62,8 @@ src/core/      纯逻辑（无 vscode 依赖，vitest 单测）
   atomicFile / pathSafety / errors / watchManager  基础设施
 src/tree/      树节点纯构建器 + 单一分区 Explorer
 src/ui/        命令 / QuickPick / 状态栏（模板 + 额度）/ 保存守护
-src/webview/   模板编辑器宿主（CSP + nonce + postMessage 协议）
-webview-ui/    React 矩阵表单（Vite 单 bundle，VSCode CSS 变量主题）
+src/webview/   Webview 宿主（模板编辑器 + 额度面板；CSP + nonce + postMessage 协议）
+webview-ui/    React 前端（Vite 多入口：模板矩阵表单 + 额度设置页，VSCode CSS 变量主题）
 ```
 
 数据位置：模板 `~/.config/opencode/presets/*.json`；备份 `~/.config/opencode/backups/<ISO时间戳>-manual/`（含 `manifest.json` 与展示名称，覆盖检测到的实际配置文件与 `~/.agents/skills`）。模板应用/捕获的写入目标由本机检测结果决定（`~/.omo/omo.jsonc` 或旧版 `oh-my-opencode.json[c]`）。
@@ -74,4 +75,4 @@ npm test              # vitest：根套件（单元+集成，纯 Node）+ webvie
 ./scripts/e2e.sh      # @vscode/test-electron e2e（Linux headless 自动套 xvfb）
 ```
 
-设计文档：`docs/plans/2026-08-21-vscode-opencode-config-manager-design.md`（立项时的历史设计记录）；开发约定见 `AGENTS.md`，版本历史见 `CHANGELOG.md`。
+设计文档：`docs/plans/2026-08-21-vscode-opencode-config-manager-design.md`（立项历史）、`docs/plans/2026-08-25-quota-webview-panel-design.md`（额度面板）；开发约定见 `AGENTS.md`，版本历史见 `CHANGELOG.md`。

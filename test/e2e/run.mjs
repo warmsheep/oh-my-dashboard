@@ -29,11 +29,13 @@ function fail(message) {
   process.exit(1);
 }
 
-/** Ensure dist-webview/ holds the built webview assets (presetEditorHost reads
- *  <extensionRoot>/dist-webview/index.html and rewrites ./index.js + ./main.css). */
+/** Ensure dist-webview/ holds the built webview assets (panel hosts read
+ * <extensionRoot>/dist-webview/*.html and rewrite every local asset reference). */
 function prepareWebviewAssets() {
   const buildDir = path.join(repoRoot, "webview-ui", "build");
-  if (!fs.existsSync(path.join(buildDir, "index.html"))) {
+  // Check EVERY page entry — a partial build (index.html without quota.html) must
+  // trigger a rebuild, not fail later with a missing-asset error.
+  if (!["index.html", "quota.html"].every((page) => fs.existsSync(path.join(buildDir, page)))) {
     console.log("[e2e:runner] webview-ui/build missing — running npm run build:webview");
     const result = spawnSync("npm", ["run", "build:webview"], {
       cwd: repoRoot,
@@ -47,12 +49,10 @@ function prepareWebviewAssets() {
   const distWebview = path.join(repoRoot, "dist-webview");
   fs.rmSync(distWebview, { recursive: true, force: true });
   fs.mkdirSync(distWebview, { recursive: true });
-  for (const file of ["index.html", "index.js", "main.css"]) {
-    const src = path.join(buildDir, file);
-    if (!fs.existsSync(src)) {
-      fail(`webview asset missing: ${src}`);
-    }
-    fs.copyFileSync(src, path.join(distWebview, file));
+  // Multi-entry builds carry shared chunks (vendor.js, vscode.js/css) next to the
+  // per-page files — copy the whole build dir instead of a hardcoded asset list.
+  for (const entry of fs.readdirSync(buildDir)) {
+    fs.copyFileSync(path.join(buildDir, entry), path.join(distWebview, entry));
   }
   console.log(`[e2e:runner] dist-webview seeded from webview-ui/build (${distWebview})`);
 }

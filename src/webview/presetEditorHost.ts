@@ -1,7 +1,3 @@
-import * as crypto from "node:crypto";
-import * as fs from "node:fs";
-import * as path from "node:path";
-
 import * as vscode from "vscode";
 
 import { PRESET_EDITOR_VIEW_TYPE, presetDraftKey, presetNameError } from "../constants";
@@ -11,6 +7,7 @@ import type { PresetService } from "../core/presetService";
 import { KNOWN_AGENTS, KNOWN_CATEGORIES } from "../core/types";
 import type { ModelOption, ModelSetting, Preset } from "../core/types";
 import type { PresetRow, WebviewInitPayload } from "../shared/protocol";
+import { buildWebviewHtml, readWebviewHtml } from "./panelHtml";
 
 export interface PresetEditorDeps {
   configStore: ConfigStore;
@@ -64,7 +61,7 @@ export async function openPresetEditor(
     return;
   }
 
-  const html = readWebviewHtml(ctx, deps);
+  const html = readWebviewHtml(ctx, "index.html", deps.log);
   if (html === undefined) {
     void vscode.window.showErrorMessage(
       "模板编辑器前端资源缺失（dist-webview/index.html），请先运行 npm run build:webview",
@@ -262,35 +259,8 @@ export async function openPresetEditor(
     resolveReady(); // unblock a caller still awaiting the ready handshake
   });
 
-  panel.webview.html = buildHtml(panel, html, distWebviewUri);
+  panel.webview.html = buildWebviewHtml(panel.webview, html, distWebviewUri);
   await ready;
-}
-
-function buildHtml(panel: vscode.WebviewPanel, html: string, distWebviewUri: vscode.Uri): string {
-  const nonce = crypto.randomBytes(16).toString("hex");
-  const jsUri = panel.webview.asWebviewUri(vscode.Uri.joinPath(distWebviewUri, "index.js"));
-  const cssUri = panel.webview.asWebviewUri(vscode.Uri.joinPath(distWebviewUri, "main.css"));
-  // CSP: no remote origins, no inline scripts; inline styles allowed for VSCode CSS variables.
-  const csp = `default-src 'none'; style-src ${panel.webview.cspSource} 'unsafe-inline'; script-src ${panel.webview.cspSource};`;
-  let out = html.replace(/(<script[^>]*?)\ssrc=["'][^"']*\/index\.js["']/i, `$1 src="${jsUri}" nonce="${nonce}"`);
-  out = out.replace(/(<link[^>]*?)\shref=["'][^"']*\/main\.css["']/i, `$1 href="${cssUri}"`);
-  const meta = `<meta http-equiv="Content-Security-Policy" content="${csp}">`;
-  if (/<head[^>]*>/i.test(out)) {
-    out = out.replace(/<head([^>]*)>/i, `<head$1>\n    ${meta}`);
-  } else {
-    out = `${meta}\n${out}`;
-  }
-  return out;
-}
-
-function readWebviewHtml(ctx: vscode.ExtensionContext, deps: PresetEditorDeps): string | undefined {
-  const htmlPath = ctx.asAbsolutePath(path.join("dist-webview", "index.html"));
-  try {
-    return fs.readFileSync(htmlPath, "utf8");
-  } catch (error) {
-    deps.log(`presetEditor: 无法读取 ${htmlPath}: ${errorMessage(error)}`);
-    return undefined;
-  }
 }
 
 function unionRows(

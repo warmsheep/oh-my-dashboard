@@ -192,25 +192,6 @@ function patchShowQuickPick(respond: (items: readonly unknown[]) => unknown): Wi
   };
 }
 
-/** Answer every showInputBox with a fixed value (undefined = cancel). */
-function patchShowInputBox(value: string | undefined): WindowPatch {
-  const windowApi = vscode.window as unknown as {
-    showInputBox: (...args: unknown[]) => Thenable<string | undefined>;
-  };
-  const original = windowApi.showInputBox;
-  let engaged = false;
-  windowApi.showInputBox = () => {
-    engaged = true;
-    return Promise.resolve(value);
-  };
-  return {
-    engaged: () => engaged,
-    restore(): void {
-      windowApi.showInputBox = original;
-    },
-  };
-}
-
 /**
  * Capture (not answer) showErrorMessage calls — non-modal, so a plain side-channel
  * recorder suffices; there is no headless hang to guard against. Restored by caller.
@@ -431,6 +412,89 @@ function deliverSave(
   payload: { name: string; apply: boolean; rows: SaveRow[]; description?: string },
 ): void {
   bridge.deliver({ type: "save", payload });
+}
+
+// ---------------------------------------------------------------------------
+// Quota panel webview bridge — same capture technique as the preset editor,
+// driven by the singleton quota panel (quotaRefresh / quotaConfigureMimo).
+// ---------------------------------------------------------------------------
+
+let quotaBridge: PanelBridge | undefined;
+
+interface QuotaSnapshotMessage {
+  snapshot: {
+    providers: { providerId: string; configured: boolean; error: string | null; windows: unknown[] }[];
+    fetchedAt: string;
+  };
+}
+
+function quotaSnapshots(bridge: PanelBridge): QuotaSnapshotMessage[] {
+  return bridge.outbound
+    .filter(
+      (message): message is PanelMessage & { payload: QuotaSnapshotMessage } =>
+        (message.type === "quotaSnapshot" || message.type === "quotaInit") &&
+        typeof message.payload === "object" &&
+        message.payload !== null &&
+        Array.isArray((message.payload as QuotaSnapshotMessage).snapshot?.providers),
+    )
+    .map((message) => message.payload);
+}
+
+/** Open (or reveal) the quota panel while capturing its bridge; asserts the boot handshake. */
+async function openQuotaPanelCaptured(commandId: string, arg?: unknown): Promise<PanelBridge> {
+  const windowApi = vscode.window as unknown as {
+    createWebviewPanel: (...args: unknown[]) => vscode.WebviewPanel;
+  };
+  const original = windowApi.createWebviewPanel;
+  let bridge: PanelBridge | undefined;
+  windowApi.createWebviewPanel = (...args: unknown[]) => {
+    const panel = original.apply(windowApi, args);
+    const webview = panel.webview as unknown as {
+      onDidReceiveMessage: (listener: (raw: unknown) => void, ...rest: unknown[]) => vscode.Disposable;
+      postMessage: (message: unknown) => Thenable<boolean>;
+    };
+    const capture: PanelBridge = {
+      deliver: (): void => {
+        throw new Error("onDidReceiveMessage listener was never registered for the captured quota panel");
+      },
+      outbound: [],
+    };
+    const originalOnDid = webview.onDidReceiveMessage;
+    webview.onDidReceiveMessage = (listener: (raw: unknown) => void, ...rest: unknown[]) => {
+      capture.deliver = (raw: unknown): void => {
+        listener(raw);
+      };
+      return originalOnDid.call(webview, listener, ...rest);
+    };
+    const originalPost = webview.postMessage.bind(webview);
+    webview.postMessage = (message: unknown) => {
+      capture.outbound.push(message as PanelMessage);
+      return originalPost(message);
+    };
+    bridge = capture;
+    return panel;
+  };
+  try {
+    await withTimeout(
+      Promise.resolve(vscode.commands.executeCommand(commandId, arg)),
+      20_000,
+      `${commandId} must resolve once the quota panel webview is ready`,
+    );
+  } finally {
+    windowApi.createWebviewPanel = original;
+  }
+  // Reveal of an ALREADY-open singleton panel never calls createWebviewPanel — reuse
+  // the held bridge instead (quotaInit lands there).
+  if (bridge === undefined) {
+    assert.ok(quotaBridge, "quota panel reveal must reuse the previously captured bridge");
+    return quotaBridge;
+  }
+  assert.ok(
+    bridge.outbound.some((message) => message.type === "quotaInit"),
+    "captured quota panel must have received the quotaInit message",
+  );
+  quotaBridge = bridge;
+  return bridge;
 }
 
 // ---------------------------------------------------------------------------
@@ -1320,73 +1384,124 @@ function tests(): TestCase[] {
       },
     },
     {
-      name: "quotaRefresh (no credentials): 4 unconfigured providers, no auth.json created",
+      name: "quotaRefresh opens the quota panel: 4 unconfigured groups, no auth.json created",
       fn: async () => {
         const dataHome = process.env.XDG_DATA_HOME ?? "";
         const authFile = path.join(dataHome, "opencode", "auth.json");
         assert.equal(fs.existsSync(authFile), false, "fake HOME must not carry opencode credentials");
 
-        let offered: readonly unknown[] = [];
-        const patch = patchShowQuickPick((items) => {
-          offered = items;
-          return undefined; // cancel the detail view
-        });
-        try {
-          await withTimeout(
-            Promise.resolve(vscode.commands.executeCommand(CMD.quotaRefresh)),
-            15_000,
-            "quotaRefresh should resolve without credentials",
-          );
-        } finally {
-          patch.restore();
-        }
-        assert.equal(patch.engaged(), true, "quotaRefresh must have opened the detail QuickPick");
+        const bridge = await openQuotaPanelCaptured(CMD.quotaRefresh);
 
-        const items = offered as { label: string; description?: string }[];
-        for (const provider of ["Kimi", "GLM", "MiMo", "DeepSeek"]) {
-          assert.ok(
-            items.some((item) => item.label.includes(provider)),
-            `QuickPick must offer ${provider}, got: ${items.map((item) => item.label).join(", ")}`,
-          );
-        }
-        const unconfigured = items.filter((item) => item.description === "opencode 未登录该供应商");
-        assert.equal(unconfigured.length, 3, "Kimi/GLM/DeepSeek report as not signed in");
-        assert.ok(
-          items.some((item) => item.label.includes("MiMo") && item.description === "需要配置 Dashboard Cookie"),
-          "MiMo must ask for its dashboard cookie",
+        // Boot pushes a full-refresh snapshot even without credentials (all unconfigured,
+        // zero network requests).
+        await pollUntil(
+          () => quotaSnapshots(bridge).some((message) => message.snapshot.providers.length === 4),
+          15_000,
+          "quota panel boot must push a 4-provider snapshot",
         );
+        const boot = quotaSnapshots(bridge)[0];
+        for (const provider of boot.snapshot.providers) {
+          assert.equal(provider.configured, false, `${provider.providerId} must report unconfigured`);
+          assert.equal(provider.error, null, `${provider.providerId} must carry no error`);
+        }
         assert.equal(fs.existsSync(authFile), false, "no credentials may be created by a credential-free refresh");
+
+        // Solo refresh of one provider through the panel protocol.
+        bridge.deliver({ type: "quotaRefresh", payload: { providerId: "kimi" } });
+        await pollUntil(
+          () => quotaSnapshots(bridge).length >= 2,
+          15_000,
+          "solo kimi refresh must push an updated snapshot",
+        );
+        const solo = quotaSnapshots(bridge)[quotaSnapshots(bridge).length - 1];
+        assert.ok(
+          solo.snapshot.providers.some((provider) => provider.providerId === "kimi" && !provider.configured),
+          "solo refresh must keep unconfigured kimi without credentials",
+        );
+        assert.equal(fs.existsSync(authFile), false, "solo refresh must not create credentials either");
       },
     },
     {
-      name: "quotaConfigureMimo with invalid/cancelled input: nothing persisted",
+      name: "quotaSaveMimoCookie roundtrip: invalid rejected, valid persisted + mimo refresh",
       fn: async () => {
+        assert.ok(quotaBridge, "quota panel must still be open from the previous step");
+        const bridge = quotaBridge;
         const quotaJson = path.join(configDir, "quota.json");
-        // "garbage" fails normalizeMimoCookie → MIMO_COOKIE_INVALID → friendly error, resolve.
-        const garbage = patchShowInputBox("garbage");
-        try {
-          await withTimeout(
-            Promise.resolve(vscode.commands.executeCommand(CMD.quotaConfigureMimo)),
-            10_000,
-            "quotaConfigureMimo (garbage) should resolve",
-          );
-        } finally {
-          garbage.restore();
-        }
-        assert.equal(garbage.engaged(), true, "the input box must have been opened");
+
+        // "garbage" fails normalizeMimoCookie → MIMO_COOKIE_INVALID → friendly Chinese error.
+        bridge.deliver({ type: "quotaSaveMimoCookie", payload: { cookie: "garbage" } });
+        await pollUntil(
+          () =>
+            bridge.outbound.some(
+              (message) =>
+                message.type === "quotaConfigSaved" &&
+                typeof message.payload === "object" &&
+                message.payload !== null &&
+                (message.payload as { ok?: unknown }).ok === false,
+            ),
+          10_000,
+          "invalid cookie must produce a quotaConfigSaved(ok:false) reply",
+        );
+        const rejected = bridge.outbound
+          .filter((message) => message.type === "quotaConfigSaved")
+          .map((message) => message.payload as { ok: boolean; error?: string })
+          .pop();
+        assert.match(rejected?.error ?? "", /格式无法识别/, "the rejection must carry the friendly Chinese message");
         assert.equal(fs.existsSync(quotaJson), false, "an invalid cookie must not be persisted");
 
-        const cancelled = patchShowInputBox(undefined);
-        try {
-          await withTimeout(
-            Promise.resolve(vscode.commands.executeCommand(CMD.quotaConfigureMimo)),
-            10_000,
-            "quotaConfigureMimo (cancelled) should resolve",
-          );
-        } finally {
-          cancelled.restore();
-        }
-        assert.equal(fs.existsSync(quotaJson), false, "a cancelled input must not create quota.json");
+        // A well-formed cookie persists normalized and triggers a mimo-only refresh.
+        bridge.deliver({
+          type: "quotaSaveMimoCookie",
+          payload: { cookie: "Cookie: junk=1; api-platform_serviceToken=abc; userId=42" },
+        });
+        await pollUntil(
+          () =>
+            bridge.outbound.some(
+              (message) =>
+                message.type === "quotaConfigSaved" &&
+                typeof message.payload === "object" &&
+                message.payload !== null &&
+                (message.payload as { ok?: unknown }).ok === true,
+            ),
+          10_000,
+          "valid cookie must produce a quotaConfigSaved(ok:true) reply",
+        );
+        assert.ok(fs.existsSync(quotaJson), "valid cookie must persist quota.json");
+        const saved = JSON.parse(fs.readFileSync(quotaJson, "utf8")) as { mimo?: { cookie?: string } };
+        assert.equal(saved.mimo?.cookie, "api-platform_serviceToken=abc; userId=42");
+
+        // The post-save mimo refresh marks the provider configured (network result may be
+        // an error in the sandbox, but configured must flip to true).
+        const snapshotsBefore = quotaSnapshots(bridge).length;
+        await pollUntil(
+          () =>
+            quotaSnapshots(bridge)
+              .slice(snapshotsBefore)
+              .some((message) =>
+                message.snapshot.providers.some((provider) => provider.providerId === "mimo" && provider.configured),
+              ),
+          25_000,
+          "post-save mimo refresh must report MiMo as configured",
+        );
+      },
+    },
+    {
+      name: "quotaConfigureMimo reveals the panel focused on the MiMo group",
+      fn: async () => {
+        assert.ok(quotaBridge, "quota panel must still be open from the previous step");
+        const bridge = await openQuotaPanelCaptured(CMD.quotaConfigureMimo);
+        await pollUntil(
+          () =>
+            bridge.outbound.some(
+              (message) =>
+                message.type === "quotaInit" &&
+                typeof message.payload === "object" &&
+                message.payload !== null &&
+                (message.payload as { focusProvider?: unknown }).focusProvider === "mimo",
+            ),
+          10_000,
+          "quotaConfigureMimo must re-init the panel focused on MiMo",
+        );
       },
     },
     {

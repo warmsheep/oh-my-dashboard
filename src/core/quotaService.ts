@@ -2,35 +2,37 @@ import * as defaultFs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
+import {
+  balanceColor,
+  deriveRemainingPercent,
+  QUOTA_PROVIDER_IDS,
+  QUOTA_WINDOW_ORDER,
+  quotaCurrencySymbol,
+  quotaProviderLabel,
+  remainingColor,
+} from "../shared/protocol";
+import type {
+  ProviderQuota,
+  QuotaProviderId,
+  QuotaSegmentColor,
+  QuotaSnapshot,
+  QuotaWindow,
+  QuotaWindowKind,
+} from "../shared/protocol";
 import { writeFileAtomic } from "./atomicFile";
 
-export type QuotaProviderId = "kimi" | "glm" | "mimo" | "deepseek";
-export type QuotaWindowKind = "5h" | "weekly" | "monthly";
-
-export interface QuotaWindow {
-  kind: QuotaWindowKind;
-  usedPercent: number | null;
-  remainingPercent: number | null;
-  used: number | null;
-  limit: number | null;
-  remaining: number | null;
-  resetAt: string | null;
-}
-
-export interface ProviderQuota {
-  providerId: QuotaProviderId;
-  label: string;
-  plan: string | null;
-  windows: QuotaWindow[];
-  balances: { total: number | null; currency: string | null } | null;
-  configured: boolean;
-  error: string | null;
-}
-
-export interface QuotaSnapshot {
-  providers: ProviderQuota[];
-  fetchedAt: string;
-}
+// Quota data shapes + shared display helpers live in shared/protocol.ts (single source,
+// also consumed by the quota webview bundle); re-exported here so existing imports
+// from core/quotaService keep working unchanged.
+export type {
+  ProviderQuota,
+  QuotaProviderId,
+  QuotaSegmentColor,
+  QuotaSnapshot,
+  QuotaWindow,
+  QuotaWindowKind,
+} from "../shared/protocol";
+export { balanceColor, deriveRemainingPercent, remainingColor } from "../shared/protocol";
 
 export interface QuotaServiceOptions {
   /** opencode credential store; defaults to $XDG_DATA_HOME/opencode/auth.json (~/.local/share/opencode/auth.json). */
@@ -293,9 +295,6 @@ export function quotaRetryDelayMs(baseSeconds: number, streak: number): number {
 }
 
 const WINDOW_SHORT_LABELS: Record<QuotaWindowKind, string> = { "5h": "5h", weekly: "7d", monthly: "30d" };
-const WINDOW_DISPLAY_ORDER: readonly QuotaWindowKind[] = ["5h", "weekly", "monthly"];
-
-export type QuotaSegmentColor = "green" | "yellow" | "red" | "neutral";
 
 export interface QuotaBarSegment {
   text: string;
@@ -306,39 +305,10 @@ export interface QuotaBar {
   segments: QuotaBarSegment[];
 }
 
-/** Color band by remaining percent: ≥60 green, 20–60 yellow, <20 red. */
-export function remainingColor(remaining: number): QuotaSegmentColor {
-  if (remaining >= 60) {
-    return "green";
-  }
-  return remaining >= 20 ? "yellow" : "red";
-}
-
-/** Color band for balance-only segments (absolute amount): >100 green, 20–100 yellow, <20 red. */
-export function balanceColor(total: number): QuotaSegmentColor {
-  if (total > 100) {
-    return "green";
-  }
-  return total >= 20 ? "yellow" : "red";
-}
-
-/** Balance-only providers (pay-as-you-go, e.g. DeepSeek) render one neutral currency segment. */
-const CURRENCY_SYMBOLS: Record<string, string> = { CNY: "¥", USD: "$" };
-
 function balanceSegmentText(label: string, total: number, currency: string): string {
-  const symbol = CURRENCY_SYMBOLS[currency] ?? `${currency} `;
+  const symbol = quotaCurrencySymbol(currency);
   const trimmed = Math.round(total * 100) / 100;
   return `${label} ${symbol}${trimmed}`;
-}
-
-/**
- * Remaining percent for display: prefer the API-provided value, else derive 100 − usedPercent
- * (one decimal); null when both are unknown (no data — never a fabricated number).
- */
-export function deriveRemainingPercent(window: QuotaWindow): number | null {
-  return (
-    window.remainingPercent ?? (window.usedPercent !== null ? Math.round((100 - window.usedPercent) * 10) / 10 : null)
-  );
 }
 
 /**
@@ -355,7 +325,7 @@ export function formatQuotaBar(snapshot: QuotaSnapshot): QuotaBar {
       continue;
     }
     let first = true;
-    for (const kind of WINDOW_DISPLAY_ORDER) {
+    for (const kind of QUOTA_WINDOW_ORDER) {
       const window = provider.windows.find((w) => w.kind === kind);
       if (!window) {
         continue;
@@ -380,6 +350,33 @@ export function formatQuotaBar(snapshot: QuotaSnapshot): QuotaBar {
   return { segments };
 }
 
+/**
+ * Pure merge for single-provider refreshes: replace the matching provider in place
+ * (canonical order preserved); a provider missing from the snapshot is inserted at
+ * its QUOTA_PROVIDER_IDS position. `fetchedAt` is caller-supplied so the function
+ * stays pure/testable.
+ */
+export function mergeProviderSnapshot(
+  snapshot: QuotaSnapshot,
+  provider: ProviderQuota,
+  fetchedAt: string,
+): QuotaSnapshot {
+  const index = snapshot.providers.findIndex((existing) => existing.providerId === provider.providerId);
+  if (index >= 0) {
+    const providers = [...snapshot.providers];
+    providers[index] = provider;
+    return { providers, fetchedAt };
+  }
+  const providers = [...snapshot.providers];
+  const insertAt = QUOTA_PROVIDER_IDS.indexOf(provider.providerId);
+  if (insertAt < 0 || insertAt >= providers.length) {
+    providers.push(provider);
+  } else {
+    providers.splice(insertAt, 0, provider);
+  }
+  return { providers, fetchedAt };
+}
+
 export class QuotaService {
   private readonly authFilePath: string;
   private readonly quotaConfigPath: string;
@@ -399,14 +396,28 @@ export class QuotaService {
   }
 
   async fetchAll(): Promise<QuotaSnapshot> {
+    // One auth.json read shared by all four providers (fetchProvider re-reads for solo runs).
     const entries = readAuthEntries(this.authFilePath, this.fsMod);
-    const providers = await Promise.all([
-      this.fetchKimi(bearerKey(entries["kimi-for-coding"])),
-      this.fetchGlm(bearerKey(entries["zhipuai-coding-plan"])),
-      this.fetchMimo(this.quotaConfigPath ? readMimoCookie(this.quotaConfigPath, this.fsMod) : null),
-      this.fetchDeepSeek(bearerKey(entries["deepseek"])),
-    ]);
+    const providers = await Promise.all(QUOTA_PROVIDER_IDS.map((id) => this.fetchProviderWith(id, entries)));
     return { providers, fetchedAt: this.now().toISOString() };
+  }
+
+  /** Refresh ONE provider (quota panel per-group refresh): reads its credential fresh and fetches only its endpoint. */
+  async fetchProvider(providerId: QuotaProviderId): Promise<ProviderQuota> {
+    return this.fetchProviderWith(providerId, readAuthEntries(this.authFilePath, this.fsMod));
+  }
+
+  private fetchProviderWith(providerId: QuotaProviderId, entries: Record<string, AuthEntry>): Promise<ProviderQuota> {
+    switch (providerId) {
+      case "kimi":
+        return this.fetchKimi(bearerKey(entries["kimi-for-coding"]));
+      case "glm":
+        return this.fetchGlm(bearerKey(entries["zhipuai-coding-plan"]));
+      case "mimo":
+        return this.fetchMimo(this.quotaConfigPath ? readMimoCookie(this.quotaConfigPath, this.fsMod) : null);
+      case "deepseek":
+        return this.fetchDeepSeek(bearerKey(entries["deepseek"]));
+    }
   }
 
   /**
@@ -415,7 +426,7 @@ export class QuotaService {
    * currency; CNY wins when present, otherwise the first entry.
    */
   async fetchDeepSeek(apiKey: string | null): Promise<ProviderQuota> {
-    const base = emptyProvider("deepseek", "DeepSeek");
+    const base = emptyProvider("deepseek", quotaProviderLabel("deepseek"));
     if (!apiKey) {
       return base;
     }
@@ -442,7 +453,7 @@ export class QuotaService {
   }
 
   async fetchKimi(apiKey: string | null): Promise<ProviderQuota> {
-    const base = emptyProvider("kimi", "Kimi");
+    const base = emptyProvider("kimi", quotaProviderLabel("kimi"));
     if (!apiKey) {
       return base;
     }
@@ -536,7 +547,7 @@ export class QuotaService {
   }
 
   async fetchGlm(apiKey: string | null): Promise<ProviderQuota> {
-    const base = emptyProvider("glm", "GLM");
+    const base = emptyProvider("glm", quotaProviderLabel("glm"));
     if (!apiKey) {
       return base;
     }
@@ -594,7 +605,7 @@ export class QuotaService {
   }
 
   async fetchMimo(cookie: string | null): Promise<ProviderQuota> {
-    const base = emptyProvider("mimo", "MiMo");
+    const base = emptyProvider("mimo", quotaProviderLabel("mimo"));
     if (!cookie) {
       return base;
     }

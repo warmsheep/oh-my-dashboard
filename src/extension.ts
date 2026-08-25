@@ -18,6 +18,7 @@ import { registerCommands } from "./ui/commands";
 import { createQuotaStatusBar } from "./ui/quotaStatusBar";
 import { createStatusBar } from "./ui/statusbar";
 import { notifyPresetEditorsModelsChanged, postMessageToPresetEditor } from "./webview/presetEditorHost";
+import { postMessageToQuotaPanel, registerQuotaPanel } from "./webview/quotaPanelHost";
 
 export function activate(ctx: vscode.ExtensionContext): void {
   const cfg = vscode.workspace.getConfiguration(CONFIG_SECTION);
@@ -94,7 +95,9 @@ export function activate(ctx: vscode.ExtensionContext): void {
   const quotaService = new QuotaService({
     quotaConfigPath: path.join(paths.configDir, "quota.json"),
   });
-  ctx.subscriptions.push(createQuotaStatusBar({ quotaService, log }));
+  const quotaStatusBar = createQuotaStatusBar({ quotaService, log });
+  ctx.subscriptions.push(quotaStatusBar);
+  registerQuotaPanel(ctx, { quotaService, statusBar: quotaStatusBar, log });
 
   // Watcher-driven refresh (debounced + content-deduped inside WatchManager). Kept separate
   // from `refreshAll` below so the watcher path does not re-open the explicit-refresh
@@ -203,6 +206,9 @@ export function activate(ctx: vscode.ExtensionContext): void {
     ctx.subscriptions.push(
       vscode.commands.registerCommand(TEST_BRIDGE.presetEditorPostMessage, (name: string, message: unknown): boolean =>
         postMessageToPresetEditor(name, message),
+      ),
+      vscode.commands.registerCommand(TEST_BRIDGE.quotaPanelPostMessage, (message: unknown): boolean =>
+        postMessageToQuotaPanel(message),
       ),
       vscode.commands.registerCommand(TEST_BRIDGE.statusBarText, (): string => statusbar.text()),
     );

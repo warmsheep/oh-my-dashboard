@@ -2,36 +2,26 @@ import * as vscode from "vscode";
 
 import { CMD, CONFIG_KEY, CONFIG_LEAF, CONFIG_SECTION } from "../constants";
 import { errorMessage } from "../core/errors";
-import {
-  deriveRemainingPercent,
-  formatQuotaBar,
-  normalizeMimoCookie,
-  quotaCycleFailed,
-  quotaRetryDelayMs,
-} from "../core/quotaService";
+import { formatQuotaBar, mergeProviderSnapshot, quotaCycleFailed, quotaRetryDelayMs } from "../core/quotaService";
 import type { QuotaSegmentColor, QuotaService, QuotaSnapshot, QuotaWindow } from "../core/quotaService";
+import { deriveRemainingPercent, quotaWindowLabel } from "../shared/protocol";
+import type { QuotaProviderId } from "../shared/protocol";
 
 export interface QuotaStatusBarDeps {
   quotaService: QuotaService;
   log(message: string): void;
 }
 
+/**
+ * Status-bar surface consumed by the quota panel host: cached snapshot access,
+ * single-flight refresh cycles, per-provider refresh with merge-back, and a
+ * snapshot event the panel subscribes to while visible.
+ */
 export interface QuotaStatusBar extends vscode.Disposable {
   refresh(): Promise<void>;
-}
-
-const WINDOW_LABELS: Record<QuotaWindow["kind"], string> = {
-  "5h": "5小时额度",
-  weekly: "周额度",
-  monthly: "月额度",
-};
-
-function formatReset(iso: string | null): string {
-  if (!iso) {
-    return "重置时间未知";
-  }
-  const date = new Date(iso);
-  return Number.isNaN(date.getTime()) ? "重置时间未知" : `重置于 ${date.toLocaleString("zh-CN", { hour12: false })}`;
+  getSnapshot(): QuotaSnapshot | null;
+  refreshProvider(providerId: QuotaProviderId): Promise<QuotaSnapshot | null>;
+  onSnapshot: vscode.Event<QuotaSnapshot>;
 }
 
 function describeWindow(window: QuotaWindow): string {
@@ -39,50 +29,6 @@ function describeWindow(window: QuotaWindow): string {
   const used = window.usedPercent !== null ? `已用 ${window.usedPercent}%` : "";
   const rest = remaining !== null ? `剩余 ${remaining}%` : "额度未知";
   return [rest, used].filter(Boolean).join(" · ");
-}
-
-function snapshotToItems(snap: QuotaSnapshot): vscode.QuickPickItem[] {
-  const items: vscode.QuickPickItem[] = [];
-  for (const provider of snap.providers) {
-    if (provider.error !== null) {
-      items.push({
-        label: `$(error) ${provider.label}`,
-        description: provider.error,
-        detail: provider.configured ? "查询失败" : "未配置凭据",
-      });
-      continue;
-    }
-    if (!provider.configured) {
-      items.push({
-        label: `$(circle-slash) ${provider.label}`,
-        description: provider.providerId === "mimo" ? "需要配置 Dashboard Cookie" : "opencode 未登录该供应商",
-      });
-      continue;
-    }
-    for (const window of provider.windows) {
-      items.push({
-        label: `$(meter) ${provider.label} · ${WINDOW_LABELS[window.kind]}`,
-        description: describeWindow(window),
-        detail: [
-          formatReset(window.resetAt),
-          provider.plan ? `套餐: ${provider.plan}` : "",
-          provider.balances?.total != null && provider.balances.currency
-            ? `余额: ${provider.balances.total} ${provider.balances.currency}`
-            : "",
-        ]
-          .filter(Boolean)
-          .join(" ｜ "),
-      });
-    }
-    if (provider.windows.length === 0 && provider.balances?.total != null && provider.balances.currency) {
-      items.push({
-        label: `$(credit-card) ${provider.label}`,
-        description: `余额: ${provider.balances.total} ${provider.balances.currency}`,
-        detail: "按量计费，无额度窗口",
-      });
-    }
-  }
-  return items;
 }
 
 function tooltipMarkdown(snap: QuotaSnapshot): vscode.MarkdownString {
@@ -96,7 +42,7 @@ function tooltipMarkdown(snap: QuotaSnapshot): vscode.MarkdownString {
       md.appendMarkdown(`\n`);
       continue;
     }
-    const windows = provider.windows.map((w) => `${WINDOW_LABELS[w.kind]} ${describeWindow(w)}`).join("；");
+    const windows = provider.windows.map((w) => `${quotaWindowLabel(w.kind)} ${describeWindow(w)}`).join("；");
     const balance =
       provider.balances?.total != null && provider.balances.currency
         ? `余额 ${provider.balances.total} ${provider.balances.currency}`
@@ -196,8 +142,8 @@ export function createQuotaStatusBar(deps: QuotaStatusBarDeps): QuotaStatusBar {
     });
   };
 
-  // Single-flight via a shared promise: concurrent triggers (timer tick, status-bar click,
-  // QuickPick refresh) all await the SAME in-flight cycle instead of silently returning early.
+  // Single-flight via a shared promise: concurrent triggers (timer tick, panel refresh-all,
+  // config change) all await the SAME in-flight cycle instead of silently returning early.
   const refresh = (): Promise<void> => {
     if (!refreshPromise) {
       refreshPromise = (async () => {
@@ -205,6 +151,7 @@ export function createQuotaStatusBar(deps: QuotaStatusBarDeps): QuotaStatusBar {
           snapshot = await deps.quotaService.fetchAll();
           failureStreak = quotaCycleFailed(snapshot) ? failureStreak + 1 : 0;
           render();
+          snapshotEmitter.fire(snapshot);
         } catch (error) {
           failureStreak += 1;
           deps.log(`quota: 刷新失败: ${errorMessage(error)}`);
@@ -252,59 +199,38 @@ export function createQuotaStatusBar(deps: QuotaStatusBarDeps): QuotaStatusBar {
     render();
   });
 
-  async function showQuotaDetail(): Promise<void> {
+  const snapshotEmitter = new vscode.EventEmitter<QuotaSnapshot>();
+
+  /**
+   * Refresh one provider and merge it into the cached snapshot (panel per-group refresh).
+   * With no cached snapshot yet, falls back to a full cycle so every group fills at once.
+   * Always fires onSnapshot when a snapshot exists — the panel relies on that single
+   * channel to settle its pending markers.
+   */
+  const refreshProvider = async (providerId: QuotaProviderId): Promise<QuotaSnapshot | null> => {
     if (!snapshot) {
       await refresh();
+      return snapshot;
     }
-    const snap = snapshot;
-    if (!snap) {
-      void vscode.window.showErrorMessage("额度查询失败，稍后重试");
-      return;
+    try {
+      const provider = await deps.quotaService.fetchProvider(providerId);
+      snapshot = mergeProviderSnapshot(snapshot, provider, new Date().toISOString());
+      render();
+    } catch (error) {
+      deps.log(`quota: 刷新 ${providerId} 失败: ${errorMessage(error)}`);
     }
-    const refreshAction: vscode.QuickPickItem = {
-      label: "刷新",
-      description: "立即重新查询",
-      iconPath: new vscode.ThemeIcon("refresh"),
-    };
-    const mimoAction: vscode.QuickPickItem = {
-      label: "配置 MiMo Cookie…",
-      description: "MiMo 额度需要 platform.xiaomimimo.com 的浏览器 Cookie",
-      iconPath: new vscode.ThemeIcon("key"),
-    };
-    const picked = await vscode.window.showQuickPick(
-      [...snapshotToItems(snap), { label: "", kind: vscode.QuickPickItemKind.Separator }, refreshAction, mimoAction],
-      { placeHolder: "Coding Plan 剩余额度（点击刷新或配置 MiMo）" },
-    );
-    if (picked === refreshAction) {
-      await refresh();
-      await showQuotaDetail();
-      return;
-    }
-    if (picked === mimoAction) {
-      await vscode.commands.executeCommand(CMD.quotaConfigureMimo);
-    }
-  }
-
-  const commandDisposables = [
-    vscode.commands.registerCommand(CMD.quotaRefresh, () => void showQuotaDetail()),
-    vscode.commands.registerCommand(CMD.quotaConfigureMimo, async () => {
-      try {
-        const saved = await configureMimoCookie({ quotaService: deps.quotaService, log: deps.log });
-        if (saved) {
-          void refresh();
-        }
-      } catch (error) {
-        deps.log(`quota: 配置 MiMo Cookie 失败: ${errorMessage(error)}`);
-        void vscode.window.showErrorMessage(`配置 MiMo Cookie 失败: ${errorMessage(error)}`);
-      }
-    }),
-  ];
+    snapshotEmitter.fire(snapshot);
+    return snapshot;
+  };
 
   render();
   void refresh();
 
   return {
     refresh,
+    getSnapshot: () => snapshot,
+    refreshProvider,
+    onSnapshot: snapshotEmitter.event,
     dispose(): void {
       disposed = true;
       if (timer !== undefined) {
@@ -315,35 +241,7 @@ export function createQuotaStatusBar(deps: QuotaStatusBarDeps): QuotaStatusBar {
       }
       configListener.dispose();
       themeListener.dispose();
-      for (const disposable of commandDisposables) {
-        disposable.dispose();
-      }
+      snapshotEmitter.dispose();
     },
   };
-}
-
-/** Prompt for a MiMo dashboard cookie and persist it via quotaService.saveMimoCookie (quota.json); returns false when the input box is cancelled. */
-export async function configureMimoCookie(deps: {
-  quotaService: QuotaService;
-  log(message: string): void;
-}): Promise<boolean> {
-  const input = await vscode.window.showInputBox({
-    title: "配置 MiMo Dashboard Cookie",
-    prompt: "登录 platform.xiaomimimo.com → F12 → Network → 任选 /api/v1/balance 请求 → 复制请求头里的 Cookie 值",
-    placeHolder: "api-platform_serviceToken=...; userId=...",
-    password: true,
-    ignoreFocusOut: true,
-    validateInput: (value) =>
-      normalizeMimoCookie(value) === null ? "必须同时包含 api-platform_serviceToken 与 userId" : undefined,
-  });
-  if (!input) {
-    return false;
-  }
-  // Core owns persistence: merge into quota.json (heal-on-corrupt), mkdir, atomic write and
-  // chmod 0600. Invalid cookies raise MIMO_COOKIE_INVALID, unreadable quota.json raises
-  // CONFIG_UNREADABLE — both mapped to Chinese by errorMessage() at the caller.
-  deps.quotaService.saveMimoCookie(input);
-  deps.log("quota: 已写入 MiMo Cookie（quota.json）");
-  void vscode.window.showInformationMessage("MiMo Cookie 已保存，正在刷新额度");
-  return true;
 }

@@ -18,17 +18,23 @@ export default defineConfig({
     outDir: "build",
     assetsDir: "./",
     rollupOptions: {
-      input: path.resolve(rootDir, "webview-ui/index.html"),
+      // Two standalone webview pages: the preset matrix editor and the quota panel.
+      input: {
+        index: path.resolve(rootDir, "webview-ui/index.html"),
+        quota: path.resolve(rootDir, "webview-ui/quota.html"),
+      },
       output: {
-        entryFileNames: "index.js",
+        entryFileNames: "[name].js",
         chunkFileNames: "[name].js",
         assetFileNames: (assetInfo) => {
           const isCss =
             assetInfo.names.some((n) => n.endsWith(".css")) ||
             assetInfo.originalFileNames.some((f) => f.endsWith(".css"));
-          return isCss ? "main.css" : "[name].[ext]";
+          return isCss ? "[name].css" : "[name].[ext]";
         },
-        inlineDynamicImports: true,
+        // react/react-dom shared by both entries land in one deterministic vendor chunk
+        // (auto-naming would still work but stays guesswork; this is stable).
+        manualChunks: (id) => (id.includes("node_modules") ? "vendor" : undefined),
       },
     },
   },

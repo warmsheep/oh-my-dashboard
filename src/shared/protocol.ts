@@ -74,10 +74,131 @@ export type ExtToWebview =
   /** Sent when building/sending the init payload failed (e.g. listModels threw): replaces the boot screen with the error. */
   | { type: "initFailed"; payload: { error: string } }
   | { type: "modelsUpdated"; payload: { models: ModelOption[] } }
-  | { type: "result"; payload: { action: "save" | "apply"; ok: boolean; error?: string } };
+  | { type: "result"; payload: { action: "save" | "apply"; ok: boolean; error?: string } }
+  /** Quota panel boot payload: cached snapshot (null before the first refresh cycle) + optional focus target. */
+  | { type: "quotaInit"; payload: QuotaInitPayload }
+  /** Fresh quota data — manual refresh results and auto-refresh cycle pushes share this channel. */
+  | { type: "quotaSnapshot"; payload: { snapshot: QuotaSnapshot } }
+  /** Reply to quotaSaveMimoCookie: ok carries no error, !ok carries the friendly Chinese message. */
+  | { type: "quotaConfigSaved"; payload: { ok: boolean; error?: string } };
 
 export type WebviewToExt =
   | { type: "ready" }
   | { type: "dirty"; payload: boolean }
   | { type: "cancel" }
-  | { type: "save"; payload: { name: string; description?: string; rows: PresetRow[]; apply: boolean } };
+  | { type: "save"; payload: { name: string; description?: string; rows: PresetRow[]; apply: boolean } }
+  /** Manual refresh from the quota panel; providerId omitted (or undefined) means refresh all providers. */
+  | { type: "quotaRefresh"; payload?: { providerId?: QuotaProviderId } }
+  | { type: "quotaSaveMimoCookie"; payload: { cookie: string } };
+
+// ---------------------------------------------------------------------------
+// Quota panel contract — data shapes consumed by BOTH the extension host
+// (quotaService) and the quota webview bundle (quota.html), so they live here
+// instead of core (which the webview must not pull in: node:fs dependencies).
+// ---------------------------------------------------------------------------
+
+export type QuotaProviderId = "kimi" | "glm" | "mimo" | "deepseek";
+export type QuotaWindowKind = "5h" | "weekly" | "monthly";
+
+export interface QuotaWindow {
+  kind: QuotaWindowKind;
+  usedPercent: number | null;
+  remainingPercent: number | null;
+  used: number | null;
+  limit: number | null;
+  remaining: number | null;
+  resetAt: string | null;
+}
+
+export interface ProviderQuota {
+  providerId: QuotaProviderId;
+  label: string;
+  plan: string | null;
+  windows: QuotaWindow[];
+  balances: { total: number | null; currency: string | null } | null;
+  configured: boolean;
+  error: string | null;
+}
+
+export interface QuotaSnapshot {
+  providers: ProviderQuota[];
+  fetchedAt: string;
+}
+
+/** Canonical provider order: fetchAll iteration and every quota UI group. */
+export const QUOTA_PROVIDER_IDS: readonly QuotaProviderId[] = ["kimi", "glm", "mimo", "deepseek"];
+
+/** Canonical quota-window display order (status-bar segments, panel rows): 5h → weekly → monthly. */
+export const QUOTA_WINDOW_ORDER: readonly QuotaWindowKind[] = ["5h", "weekly", "monthly"];
+
+const QUOTA_PROVIDER_LABELS: Record<QuotaProviderId, string> = {
+  kimi: "Kimi",
+  glm: "GLM",
+  mimo: "MiMo",
+  deepseek: "DeepSeek",
+};
+
+/** Display name of a provider — also the group title before any snapshot arrives. */
+export function quotaProviderLabel(id: QuotaProviderId): string {
+  return QUOTA_PROVIDER_LABELS[id];
+}
+
+/** Boot payload of the quota panel; focusProvider scrolls one group into view (MiMo config entry point). */
+export interface QuotaInitPayload {
+  snapshot: QuotaSnapshot | null;
+  focusProvider?: QuotaProviderId;
+}
+
+export type QuotaSegmentColor = "green" | "yellow" | "red" | "neutral";
+
+/** Remaining-percent color band shared by the status bar and the quota panel: ≥60 green, 20–60 yellow, <20 red. */
+export function remainingColor(remaining: number): QuotaSegmentColor {
+  if (remaining >= 60) {
+    return "green";
+  }
+  return remaining >= 20 ? "yellow" : "red";
+}
+
+/** Balance color band for absolute amounts (pay-as-you-go balances): >100 green, 20–100 yellow, <20 red. */
+export function balanceColor(total: number): QuotaSegmentColor {
+  if (total > 100) {
+    return "green";
+  }
+  return total >= 20 ? "yellow" : "red";
+}
+
+/**
+ * Remaining percent for display: prefer the API-provided value, else derive 100 − usedPercent
+ * (one decimal); null when both are unknown (no data — never a fabricated number).
+ */
+export function deriveRemainingPercent(window: QuotaWindow): number | null {
+  return (
+    window.remainingPercent ?? (window.usedPercent !== null ? Math.round((100 - window.usedPercent) * 10) / 10 : null)
+  );
+}
+
+const QUOTA_WINDOW_LABELS: Record<QuotaWindowKind, string> = {
+  "5h": "5小时额度",
+  weekly: "周额度",
+  monthly: "月额度",
+};
+
+/** Chinese display label of a quota window kind (tooltips, panel rows). */
+export function quotaWindowLabel(kind: QuotaWindowKind): string {
+  return QUOTA_WINDOW_LABELS[kind];
+}
+
+/** Currency symbol for balance display; unknown codes fall back to a prefixed ISO code. */
+export function quotaCurrencySymbol(currency: string): string {
+  const symbols: Record<string, string> = { CNY: "¥", USD: "$" };
+  return symbols[currency] ?? `${currency} `;
+}
+
+/** Reset-time line for display; null/garbage timestamps degrade to a fixed hint, never "Invalid Date". */
+export function formatQuotaResetTime(iso: string | null): string {
+  if (!iso) {
+    return "重置时间未知";
+  }
+  const date = new Date(iso);
+  return Number.isNaN(date.getTime()) ? "重置时间未知" : `重置于 ${date.toLocaleString("zh-CN", { hour12: false })}`;
+}

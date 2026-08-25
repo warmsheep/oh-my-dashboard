@@ -4,14 +4,32 @@ import * as path from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
+  balanceColor as CORE_BALANCE_COLOR,
+  deriveRemainingPercent as CORE_DERIVE_REMAINING,
+  remainingColor as CORE_REMAINING_COLOR,
+} from "../../src/core/quotaService";
+import {
   KNOWN_AGENTS as CORE_KNOWN_AGENTS,
   KNOWN_CATEGORIES as CORE_KNOWN_CATEGORIES,
   VARIANT_ORDER as CORE_VARIANT_ORDER,
   VARIANTS as CORE_VARIANTS,
 } from "../../src/core/types";
 import type { ModelOption as CoreModelOption } from "../../src/core/types";
-import { KNOWN_AGENTS, KNOWN_CATEGORIES, VARIANT_ORDER, VARIANTS } from "../../src/shared/protocol";
-import type { ModelOption, Variant } from "../../src/shared/protocol";
+import {
+  balanceColor,
+  deriveRemainingPercent,
+  formatQuotaResetTime,
+  KNOWN_AGENTS,
+  KNOWN_CATEGORIES,
+  QUOTA_PROVIDER_IDS,
+  QUOTA_WINDOW_ORDER,
+  quotaCurrencySymbol,
+  quotaWindowLabel,
+  remainingColor,
+  VARIANT_ORDER,
+  VARIANTS,
+} from "../../src/shared/protocol";
+import type { ModelOption, QuotaWindow, Variant } from "../../src/shared/protocol";
 
 const PROTOCOL_SRC = path.resolve(process.cwd(), "src/shared/protocol.ts");
 
@@ -67,5 +85,67 @@ describe("core/types re-exports the protocol canonicals (single source of truth)
   it("Variant values remain the classic five", () => {
     const variants: readonly Variant[] = ["low", "medium", "high", "xhigh", "max"];
     expect([...VARIANTS]).toEqual(variants);
+  });
+});
+
+describe("shared/protocol quota canon (single source of truth)", () => {
+  it("QUOTA_PROVIDER_IDS is the canonical four-provider order, duplicate-free", () => {
+    expect([...QUOTA_PROVIDER_IDS]).toEqual(["kimi", "glm", "mimo", "deepseek"]);
+    expect(new Set(QUOTA_PROVIDER_IDS).size).toBe(QUOTA_PROVIDER_IDS.length);
+  });
+
+  it("QUOTA_WINDOW_ORDER is the canonical 5h → weekly → monthly display order", () => {
+    expect([...QUOTA_WINDOW_ORDER]).toEqual(["5h", "weekly", "monthly"]);
+    expect(new Set(QUOTA_WINDOW_ORDER).size).toBe(QUOTA_WINDOW_ORDER.length);
+  });
+
+  it("quota display helpers re-exported from core are the same objects via both paths", () => {
+    expect(CORE_DERIVE_REMAINING).toBe(deriveRemainingPercent);
+    expect(CORE_REMAINING_COLOR).toBe(remainingColor);
+    expect(CORE_BALANCE_COLOR).toBe(balanceColor);
+  });
+
+  it("quotaWindowLabel maps the three window kinds to Chinese labels", () => {
+    expect(quotaWindowLabel("5h")).toBe("5小时额度");
+    expect(quotaWindowLabel("weekly")).toBe("周额度");
+    expect(quotaWindowLabel("monthly")).toBe("月额度");
+  });
+
+  it("quotaCurrencySymbol knows CNY/USD and prefixes unknown codes", () => {
+    expect(quotaCurrencySymbol("CNY")).toBe("¥");
+    expect(quotaCurrencySymbol("USD")).toBe("$");
+    expect(quotaCurrencySymbol("EUR")).toBe("EUR ");
+  });
+
+  it("formatQuotaResetTime renders a known timestamp and degrades for garbage", () => {
+    expect(formatQuotaResetTime("2026-08-25T10:00:00Z")).toMatch(/^重置于 \d{4}\/\d{1,2}\/\d{1,2}/);
+    expect(formatQuotaResetTime(null)).toBe("重置时间未知");
+    expect(formatQuotaResetTime("not-a-date")).toBe("重置时间未知");
+  });
+
+  it("remaining/balance color bands match the status-bar rules", () => {
+    expect(remainingColor(60)).toBe("green");
+    expect(remainingColor(59.9)).toBe("yellow");
+    expect(remainingColor(20)).toBe("yellow");
+    expect(remainingColor(19.9)).toBe("red");
+    expect(balanceColor(100)).toBe("yellow");
+    expect(balanceColor(100.01)).toBe("green");
+    expect(balanceColor(19.9)).toBe("red");
+  });
+
+  it("deriveRemainingPercent prefers remainingPercent and derives from usedPercent", () => {
+    const w = (partial: Partial<QuotaWindow>): QuotaWindow => ({
+      kind: "weekly",
+      usedPercent: null,
+      remainingPercent: null,
+      used: null,
+      limit: null,
+      remaining: null,
+      resetAt: null,
+      ...partial,
+    });
+    expect(deriveRemainingPercent(w({ remainingPercent: 72, usedPercent: 28 }))).toBe(72);
+    expect(deriveRemainingPercent(w({ usedPercent: 33.3 }))).toBe(66.7);
+    expect(deriveRemainingPercent(w({}))).toBeNull();
   });
 });
