@@ -4,6 +4,8 @@
 - 状态：已确认（用户逐节审批通过）
 - 项目名（暂定）：oh-my-config-manager（workspace: oh-my-dashboard）
 
+> **历史文档**：本文为 0.1.0 立项时的设计记录，部分决定已被后续版本取代 — 0.2.0 移除全部自动备份（pre-apply/pre-save/pre-restore）；路径解析改为与 opencode 一致的 xdg-basedir（三平台统一 `~/.config/opencode`，不再使用 macOS 平台默认目录）；四个树视图合并为单一分区 Explorer；「预设」已更名「模板」。现状以 `README.md`、`AGENTS.md` 与 `CHANGELOG.md` 为准，本文仅供追溯。
+
 ## 1. 背景与目标
 
 用户同时使用 opencode 与 oh-my-opencode（CLI bin 名 `oh-my-openagent`），配置分散在
