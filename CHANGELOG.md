@@ -2,6 +2,20 @@
 
 > 版本与日期以 git 历史为准；0.8.0–0.14.0、0.16.x、0.18.0 等中间版本为本地打包、版本号未入库，相关变更归并入下一个入库版本。
 
+## 0.22.2 (2026-08-25)
+
+- Kimi 月额度语义核实（行为无变化）：`coding/v1/usages` 顶层 usage 确认为周额度（每 7 天刷新，与官网 75% 月用量不对应）；会员月余额走 `GetSubscriptionStats`，需网页登录 token，Coding API Key 无权访问（后续可按 MiMo Cookie 模式做成可配置凭据）
+
+## 0.22.1 (2026-08-25)
+
+- 额度面板：凭据检测提示移入供应商分组标题栏（单行省略、悬停显示全文），不再占用分组正文空间
+
+## 0.22.0 (2026-08-25)
+
+- 额度展示重构为 Webview 设置页：状态栏点击/命令打开「Coding Plan 额度」面板（单例编辑器标签页），按供应商分组展示窗口进度条、剩余百分比与重置时间，支持分组单独刷新与底部「刷新全部」，面板打开期间跟随自动刷新实时更新
+- MiMo Cookie 配置收口到面板分组内（password 输入、留空保持不变、保存即刷新）；Kimi/GLM/DeepSeek 凭据只读显示检测状态并引导 `opencode auth login`；移除旧 QuickPick 详情弹窗与 InputBox 配置流
+- webview 构建改多入口（模板编辑器 index + 额度面板 quota，共享 vendor/vscode chunk）；额度数据形状与展示辅助函数收口 shared/protocol（core re-export）；core 新增 `fetchProvider` 单供应商刷新与 `mergeProviderSnapshot`；e2e 改用面板 capture-bridge 驱动 quota 协议
+
 ## 0.21.1 (2026-08-24)
 
 - 额度文案措辞统一（5小时窗口→5小时额度，月度额度→月额度）
