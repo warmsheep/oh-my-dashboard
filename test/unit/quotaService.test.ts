@@ -11,9 +11,11 @@ import {
   NETWORK_TIMEOUT_MESSAGE,
   NETWORK_UNAVAILABLE_MESSAGE,
   normalizeMimoCookie,
+  QUOTA_PAUSE_AFTER_STREAK,
   quotaCycleFailed,
   quotaRetryDelayMs,
   QuotaService,
+  quotaShouldPauseAutoRefresh,
   type ProviderQuota,
   type QuotaSnapshot,
   type QuotaWindow,
@@ -1406,5 +1408,125 @@ describe("mergeProviderSnapshot", () => {
     const merged = mergeProviderSnapshot(snapshot, provider("glm"), "2026-08-25T02:00:00.000Z");
 
     expect(merged.providers.map((p) => p.providerId)).toEqual(["kimi", "glm"]);
+  });
+});
+
+describe("QuotaService — request gate (libuv threadpool protection)", () => {
+  function allConfiguredDir(): string {
+    const dir = tmpDir();
+    fs.writeFileSync(
+      path.join(dir, "auth.json"),
+      JSON.stringify({
+        "kimi-for-coding": { type: "api", key: "k" },
+        "zhipuai-coding-plan": { type: "api", key: "g" },
+        deepseek: { type: "api", key: "d" },
+      }),
+    );
+    fs.writeFileSync(
+      path.join(dir, "quota.json"),
+      JSON.stringify({ mimo: { cookie: "api-platform_serviceToken=abc; userId=42" } }),
+    );
+    return dir;
+  }
+
+  function trackingFetch(delays: Record<string, number>) {
+    let active = 0;
+    let peak = 0;
+    const state = {
+      peak: 0,
+      fetchFn: async (url: string | URL | Request): Promise<Response> => {
+        active += 1;
+        peak = Math.max(peak, active);
+        state.peak = peak;
+        const href = String(url);
+        const delay =
+          delays[
+            href.endsWith("/usages")
+              ? "kimi"
+              : href.includes("bigmodel")
+                ? "glm"
+                : href.includes("xiaomimimo")
+                  ? "mimo"
+                  : "deepseek"
+          ] ?? 20;
+        await new Promise((resolve) => setTimeout(resolve, delay));
+        active -= 1;
+        if (href.endsWith("/usages")) {
+          return jsonRes(KIMI_PAYLOAD);
+        }
+        if (href.includes("bigmodel")) {
+          return jsonRes(GLM_PAYLOAD);
+        }
+        if (href.endsWith("/balance")) {
+          return jsonRes(MIMO_BALANCE);
+        }
+        if (href.endsWith("/tokenPlan/detail")) {
+          return jsonRes(MIMO_DETAIL);
+        }
+        if (href.endsWith("/tokenPlan/usage")) {
+          return jsonRes(MIMO_USAGE);
+        }
+        return jsonRes({ balance_infos: [{ currency: "CNY", total_balance: "5" }] });
+      },
+    };
+    return state;
+  }
+
+  it("fetchAll keeps at most 2 provider requests in flight by default", async () => {
+    const dir = allConfiguredDir();
+    const track = trackingFetch({ kimi: 40, glm: 40, mimo: 40, deepseek: 40 });
+    const svc = new QuotaService({
+      authFilePath: path.join(dir, "auth.json"),
+      quotaConfigPath: path.join(dir, "quota.json"),
+      fetchFn: track.fetchFn,
+    });
+
+    await svc.fetchAll();
+
+    expect(track.peak).toBeLessThanOrEqual(2);
+  });
+
+  it("maxConcurrentRequests:1 serializes provider requests completely", async () => {
+    const dir = allConfiguredDir();
+    const track = trackingFetch({ kimi: 30, glm: 30, mimo: 30, deepseek: 30 });
+    const svc = new QuotaService({
+      authFilePath: path.join(dir, "auth.json"),
+      quotaConfigPath: path.join(dir, "quota.json"),
+      fetchFn: track.fetchFn,
+      maxConcurrentRequests: 1,
+    });
+
+    const started = Date.now();
+    await svc.fetchAll();
+    const elapsed = Date.now() - started;
+
+    expect(track.peak).toBe(1);
+    // 6 requests total (kimi+glm+deepseek in parallel batches of 1, mimo 3 serial):
+    // strictly serialized wall time ≥ 6 × 30ms − scheduling slack.
+    expect(elapsed).toBeGreaterThanOrEqual(6 * 30 - 5);
+  });
+
+  it("manual fetchProvider shares the gate with an in-flight fetchAll", async () => {
+    const dir = allConfiguredDir();
+    const track = trackingFetch({ kimi: 60, glm: 20, mimo: 20, deepseek: 20 });
+    const svc = new QuotaService({
+      authFilePath: path.join(dir, "auth.json"),
+      quotaConfigPath: path.join(dir, "quota.json"),
+      fetchFn: track.fetchFn,
+    });
+
+    await Promise.all([svc.fetchAll(), svc.fetchProvider("deepseek")]);
+
+    expect(track.peak).toBeLessThanOrEqual(2);
+  });
+});
+
+describe("quotaShouldPauseAutoRefresh (circuit breaker)", () => {
+  it("pauses only after the configured consecutive transport-failure streak", () => {
+    expect(quotaShouldPauseAutoRefresh(0)).toBe(false);
+    expect(quotaShouldPauseAutoRefresh(1)).toBe(false);
+    expect(quotaShouldPauseAutoRefresh(2)).toBe(false);
+    expect(quotaShouldPauseAutoRefresh(QUOTA_PAUSE_AFTER_STREAK)).toBe(true);
+    expect(quotaShouldPauseAutoRefresh(QUOTA_PAUSE_AFTER_STREAK + 5)).toBe(true);
   });
 });

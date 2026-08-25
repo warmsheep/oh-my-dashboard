@@ -2,7 +2,13 @@ import * as vscode from "vscode";
 
 import { CMD, CONFIG_KEY, CONFIG_LEAF, CONFIG_SECTION } from "../constants";
 import { errorMessage } from "../core/errors";
-import { formatQuotaBar, mergeProviderSnapshot, quotaCycleFailed, quotaRetryDelayMs } from "../core/quotaService";
+import {
+  formatQuotaBar,
+  mergeProviderSnapshot,
+  quotaCycleFailed,
+  quotaRetryDelayMs,
+  quotaShouldPauseAutoRefresh,
+} from "../core/quotaService";
 import type { QuotaSegmentColor, QuotaService, QuotaSnapshot, QuotaWindow } from "../core/quotaService";
 import { deriveRemainingPercent, quotaWindowLabel } from "../shared/protocol";
 import type { QuotaProviderId } from "../shared/protocol";
@@ -145,13 +151,22 @@ export function createQuotaStatusBar(deps: QuotaStatusBarDeps): QuotaStatusBar {
   // Single-flight via a shared promise: concurrent triggers (timer tick, panel refresh-all,
   // config change) all await the SAME in-flight cycle instead of silently returning early.
   const refresh = (): Promise<void> => {
+    if (disposed) {
+      return Promise.resolve();
+    }
     if (!refreshPromise) {
       refreshPromise = (async () => {
         try {
           snapshot = await deps.quotaService.fetchAll();
-          failureStreak = quotaCycleFailed(snapshot) ? failureStreak + 1 : 0;
+          const failed = quotaCycleFailed(snapshot);
+          failureStreak = failed ? failureStreak + 1 : 0;
+          if (!failed) {
+            pausedLogged = false;
+          }
           render();
-          snapshotEmitter.fire(snapshot);
+          if (!disposed) {
+            snapshotEmitter.fire(snapshot);
+          }
         } catch (error) {
           failureStreak += 1;
           deps.log(`quota: 刷新失败: ${errorMessage(error)}`);
@@ -170,9 +185,11 @@ export function createQuotaStatusBar(deps: QuotaStatusBarDeps): QuotaStatusBar {
   };
 
   // Self-scheduling setTimeout chain (NOT setInterval): each next tick is armed only after the
-  // current cycle settles, with exponential backoff on network failures. Offline, undici's DNS
-  // lookups keep occupying libuv threadpool threads even after AbortSignal fires; retrying every
-  // 30s starves the shared pool and freezes async fs for every other extension in the host.
+  // current cycle settles, with exponential backoff on network failures, then a full circuit
+  // breaker — undici's DNS lookups park libuv threadpool threads even after AbortSignal fires
+  // (the pool is shared by EVERY extension's async fs), so persistent transport failures must
+  // stop the cycle entirely instead of poking the pool forever.
+  let pausedLogged = false;
   let timer: NodeJS.Timeout | undefined;
   const scheduleNext = (): void => {
     if (disposed) {
@@ -181,6 +198,13 @@ export function createQuotaStatusBar(deps: QuotaStatusBarDeps): QuotaStatusBar {
     if (timer !== undefined) {
       clearTimeout(timer);
       timer = undefined;
+    }
+    if (quotaShouldPauseAutoRefresh(failureStreak)) {
+      if (!pausedLogged) {
+        pausedLogged = true;
+        deps.log("quota: 连续网络失败已达上限，自动刷新已暂停（手动刷新成功或修改设置后恢复）");
+      }
+      return;
     }
     const delayMs = quotaRetryDelayMs(refreshSeconds(), failureStreak);
     if (delayMs > 0) {
@@ -191,6 +215,8 @@ export function createQuotaStatusBar(deps: QuotaStatusBarDeps): QuotaStatusBar {
   const configListener = vscode.workspace.onDidChangeConfiguration((event) => {
     if (event.affectsConfiguration(CONFIG_KEY.quotaRefreshSeconds)) {
       failureStreak = 0;
+      pausedLogged = false;
+      scheduleNext();
       void refresh();
     }
   });
@@ -204,10 +230,14 @@ export function createQuotaStatusBar(deps: QuotaStatusBarDeps): QuotaStatusBar {
   /**
    * Refresh one provider and merge it into the cached snapshot (panel per-group refresh).
    * With no cached snapshot yet, falls back to a full cycle so every group fills at once.
-   * Always fires onSnapshot when a snapshot exists — the panel relies on that single
-   * channel to settle its pending markers.
+   * A successful solo refresh also re-arms the auto-refresh cycle (the network is back —
+   * the breaker may have paused it) and always fires onSnapshot when a snapshot exists —
+   * the panel relies on that single channel to settle its pending markers.
    */
   const refreshProvider = async (providerId: QuotaProviderId): Promise<QuotaSnapshot | null> => {
+    if (disposed) {
+      return snapshot;
+    }
     if (!snapshot) {
       await refresh();
       return snapshot;
@@ -215,16 +245,24 @@ export function createQuotaStatusBar(deps: QuotaStatusBarDeps): QuotaStatusBar {
     try {
       const provider = await deps.quotaService.fetchProvider(providerId);
       snapshot = mergeProviderSnapshot(snapshot, provider, new Date().toISOString());
+      failureStreak = 0;
+      pausedLogged = false;
+      scheduleNext();
       render();
     } catch (error) {
       deps.log(`quota: 刷新 ${providerId} 失败: ${errorMessage(error)}`);
     }
-    snapshotEmitter.fire(snapshot);
+    if (!disposed) {
+      snapshotEmitter.fire(snapshot);
+    }
     return snapshot;
   };
 
   render();
-  void refresh();
+  // Delayed first cycle: activation overlaps other extensions' startup IO (language
+  // servers, git) — the gate already bounds concurrency, and a few seconds' delay
+  // keeps this extension out of that contention window entirely.
+  timer = setTimeout(() => void refresh(), 5_000);
 
   return {
     refresh,

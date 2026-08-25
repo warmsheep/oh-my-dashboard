@@ -43,6 +43,8 @@ export interface QuotaServiceOptions {
   now?: () => Date;
   timeoutMs?: number;
   fs?: typeof import("node:fs");
+  /** Max provider requests in flight at once (default 2, ≥1 enforced): bounds libuv threadpool occupation when DNS black-holes. */
+  maxConcurrentRequests?: number;
 }
 
 const KIMI_USAGE_URL = "https://api.kimi.com/coding/v1/usages";
@@ -377,6 +379,47 @@ export function mergeProviderSnapshot(
   return { providers, fetchedAt };
 }
 
+/**
+ * Circuit breaker: consecutive transport-failed cycles after which auto-refresh stops
+ * scheduling itself entirely (a manual refresh or settings change re-arms it). DNS
+ * black-holes park getaddrinfo on the SHARED libuv threadpool for every extension in
+ * the host — bounded backoff alone still keeps poking the pool forever.
+ */
+export const QUOTA_PAUSE_AFTER_STREAK = 3;
+
+/** True once `streak` consecutive transport-failed cycles reached the breaker threshold. */
+export function quotaShouldPauseAutoRefresh(streak: number): boolean {
+  return streak >= QUOTA_PAUSE_AFTER_STREAK;
+}
+
+/**
+ * Minimal async semaphore bounding in-flight provider requests. AbortSignal.timeout
+ * abandons the fetch PROMISE but cannot cancel a getaddrinfo already parked on the
+ * libuv threadpool (default 4 threads, shared by every extension's async fs), so the
+ * only real protection is never issuing more concurrent requests than the cap.
+ */
+class RequestGate {
+  private active = 0;
+  private readonly waiters: (() => void)[] = [];
+
+  constructor(private readonly limit: number) {}
+
+  async run<T>(task: () => Promise<T>): Promise<T> {
+    while (this.active >= this.limit) {
+      await new Promise<void>((resolve) => {
+        this.waiters.push(resolve);
+      });
+    }
+    this.active += 1;
+    try {
+      return await task();
+    } finally {
+      this.active -= 1;
+      this.waiters.shift()?.();
+    }
+  }
+}
+
 export class QuotaService {
   private readonly authFilePath: string;
   private readonly quotaConfigPath: string;
@@ -384,6 +427,7 @@ export class QuotaService {
   private readonly now: () => Date;
   private readonly timeoutMs: number;
   private readonly fsMod: typeof defaultFs;
+  private readonly gate: RequestGate;
 
   constructor(opts: QuotaServiceOptions = {}) {
     const dataHome = process.env.XDG_DATA_HOME?.trim() || path.join(os.homedir(), ".local", "share");
@@ -393,18 +437,26 @@ export class QuotaService {
     this.now = opts.now ?? (() => new Date());
     this.timeoutMs = opts.timeoutMs ?? 10_000;
     this.fsMod = opts.fs ?? defaultFs;
+    // Cap of 2 keeps at most 2 threadpool threads parked per cycle even when DNS
+    // black-holes; a single MiMo cycle (3 sequential requests) still holds 1 slot.
+    this.gate = new RequestGate(Math.max(1, opts.maxConcurrentRequests ?? 2));
   }
 
   async fetchAll(): Promise<QuotaSnapshot> {
     // One auth.json read shared by all four providers (fetchProvider re-reads for solo runs).
+    // Every provider fetch goes through the gate: at most `maxConcurrentRequests`
+    // requests exist at once, however many callers (timer cycle, panel buttons) fire.
     const entries = readAuthEntries(this.authFilePath, this.fsMod);
-    const providers = await Promise.all(QUOTA_PROVIDER_IDS.map((id) => this.fetchProviderWith(id, entries)));
+    const providers = await Promise.all(
+      QUOTA_PROVIDER_IDS.map((id) => this.gate.run(() => this.fetchProviderWith(id, entries))),
+    );
     return { providers, fetchedAt: this.now().toISOString() };
   }
 
   /** Refresh ONE provider (quota panel per-group refresh): reads its credential fresh and fetches only its endpoint. */
   async fetchProvider(providerId: QuotaProviderId): Promise<ProviderQuota> {
-    return this.fetchProviderWith(providerId, readAuthEntries(this.authFilePath, this.fsMod));
+    const entries = readAuthEntries(this.authFilePath, this.fsMod);
+    return this.gate.run(() => this.fetchProviderWith(providerId, entries));
   }
 
   private fetchProviderWith(providerId: QuotaProviderId, entries: Record<string, AuthEntry>): Promise<ProviderQuota> {
