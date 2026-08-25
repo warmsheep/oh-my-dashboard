@@ -7,7 +7,7 @@ import { writeFileAtomic } from "./atomicFile";
 import { ensureLocalModelsFile, mergeModelOptions } from "./builtinModels";
 import { applyEdits, getValue, JsoncSyntaxError, parseSafe } from "./jsoncEditor";
 import { declaredPluginSpecifiers, listDeclaredPlugins } from "./pluginResolver";
-import { readdirSafe, readDirTree, skillDirCandidates, skillNamesFromTree } from "./skillScanner";
+import { readdirSafe, readDirTree, skillDirCandidates, skillNamesFromTree, TREE_EXCLUDES } from "./skillScanner";
 import type {
   AgentConfigTarget,
   DiscoveredConfig,
@@ -192,8 +192,10 @@ export class ConfigStore {
 
     // Skill names derive from the SAME walk that builds the tree (one scan per dir,
     // not two): top-level entries that are dirs with a regular-file SKILL.md.
+    // TREE_EXCLUDES prunes .git/node_modules — a cloned skills repo must not put its
+    // VCS internals into every refresh walk.
     const skillLocations: SkillLocation[] = this.skillDirLocationsFor(workspaceFolders).map((candidate) => {
-      const tree = readDirTree(candidate.dir);
+      const tree = readDirTree(candidate.dir, 0, TREE_EXCLUDES);
       return { ...candidate, skillNames: skillNamesFromTree(tree), tree };
     });
 
@@ -205,7 +207,7 @@ export class ConfigStore {
       commandDir,
       commandFiles,
       skillLocations,
-      commandTree: readDirTree(commandDir),
+      commandTree: readDirTree(commandDir, 0, TREE_EXCLUDES),
       presetsDir: path.join(configDir, "presets"),
       backupsDir: path.join(configDir, "backups"),
     };

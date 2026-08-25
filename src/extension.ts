@@ -1,3 +1,4 @@
+import { realpathSync } from "node:fs";
 import * as path from "node:path";
 
 import * as vscode from "vscode";
@@ -169,12 +170,37 @@ export function activate(ctx: vscode.ExtensionContext): void {
     ...(pluginCacheDir !== configStore.configDir
       ? [{ dir: path.join(pluginCacheDir, "packages"), recursive: false }]
       : []),
-    ...MANAGED_SUBDIRS.map((name): WatchTarget => ({ dir: path.join(configStore.configDir, name), recursive: true })),
+    ...MANAGED_SUBDIRS.map((name): WatchTarget => {
+      // backups/ grows FOREVER (manual backups are never pruned) and each historical
+      // backup is a full tree — a recursive watch costs one inotify watch per subdir
+      // across ALL backups (Linux cap 8192, shared with every other extension and the
+      // workbench's own watcher). A flat watch on top-level entry churn (dir add/remove/
+      // rename = backup created/deleted/renamed) covers every UI-relevant change.
+      if (name === "backups") {
+        return { dir: path.join(configStore.configDir, name), recursive: false };
+      }
+      return { dir: path.join(configStore.configDir, name), recursive: true };
+    }),
     // Home-level skills dirs (~/.agents, ~/.claude, …) live outside configDir; watch each
     // discovered one recursively (a few dozen files each) so skill edits refresh the tree.
-    ...paths.skillLocations
-      .filter((location) => location.scope === "global" && location.dir !== path.join(configStore.configDir, "skills"))
-      .map((location): WatchTarget => ({ dir: location.dir, recursive: true })),
+    // realpath dedupes symlink aliases first: ~/.claude/skills is typically a link to
+    // ~/.agents/skills, and watching both doubles the event stream AND the inotify
+    // consumption of the same physical tree.
+    ...[
+      ...new Set(
+        paths.skillLocations
+          .filter(
+            (location) => location.scope === "global" && location.dir !== path.join(configStore.configDir, "skills"),
+          )
+          .map((location) => {
+            try {
+              return realpathSync(location.dir);
+            } catch {
+              return location.dir;
+            }
+          }),
+      ),
+    ].map((dir): WatchTarget => ({ dir, recursive: true })),
   ];
 
   const watchManager = new WatchManager({ targets: watchTargets, onRefresh: refreshViews, log });
@@ -195,7 +221,17 @@ export function activate(ctx: vscode.ExtensionContext): void {
 
   registerCommands(ctx, { configStore, backupService, presetService, refreshAll, log });
 
-  void provider.warmup();
+  // Warmup's full discover (skills/plugin trees, models seed write) runs synchronously
+  // on the shared exthost event loop — defer it past the activation IO storm other
+  // extensions produce (language servers, git), then mark the seed write as seen so
+  // its fs.watch echo doesn't pay a second full scan.
+  const warmupTimer = setTimeout(() => {
+    void provider.warmup().then(
+      () => watchManager.noteExternalRefresh(),
+      () => undefined,
+    );
+  }, 2_000);
+  ctx.subscriptions.push({ dispose: () => clearTimeout(warmupTimer) });
 
   // Hidden test-bridge commands for the e2e suite ONLY (IDs owned by TEST_BRIDGE in
   // constants.ts). Deliberately NOT in package.json contributes (never user-visible

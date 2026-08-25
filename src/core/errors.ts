@@ -21,6 +21,7 @@ export const FRIENDLY_ERRORS: Record<string, string> = {
   BACKUP_IMPORT_INVALID: "备份压缩包无效或已损坏",
   BACKUP_EXPORT_TOO_LARGE: "备份内容过大（超过 256MB 或 2 万条目上限），无法导出",
   BACKUP_CREATE_TOO_LARGE: "备份内容过大（超过 256MB、2 万条目或 16 层目录上限），已中止备份",
+  BACKUP_RESTORE_TOO_LARGE: "备份内容过大（超过 256MB 或 2 万条目上限），已中止恢复",
   CONFIG_UNREADABLE: "配置文件存在但无法读取（权限或被占用），已中止以防覆盖",
   MIMO_COOKIE_INVALID: "MiMo Cookie 格式无法识别，请粘贴完整的 Cookie 字符串",
 };

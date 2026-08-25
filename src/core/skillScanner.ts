@@ -51,33 +51,61 @@ function isDirEntry(entry: defaultFs.Dirent, entryPath: string): boolean {
 }
 
 /**
+ * Names never worth walking (nor watching) inside config/skills/plugin trees: VCS
+ * internals and dependency dirs are noise for display and can hold tens of thousands
+ * of entries (a fresh git clone's .git/objects alone) — walking them synchronously
+ * on every refresh freezes the shared extension-host event loop.
+ */
+export const TREE_EXCLUDES: ReadonlySet<string> = new Set(["node_modules", ".git"]);
+
+/** Default per-walk entry budget — a pathological tree truncates instead of freezing the host. */
+export const TREE_MAX_ENTRIES = 4000;
+
+/** Mutable walk budget shared across the recursion of one readDirTree call. */
+export interface TreeBudget {
+  remaining: number;
+}
+
+/**
  * Generic bounded directory-tree walk (shared by skills/command trees in configStore
- * and plugin file trees in pluginResolver). Depth-capped at 8; a realpath visited-set
- * kills symlink cycles and fan-out; dir-ness is computed once per entry so only
- * symlinks pay a statSync. Unreadable subdirs degrade to empty (readdirSafe).
+ * and plugin file trees in pluginResolver). Depth-capped at 8; a statSync-identity
+ * visited set (dev:ino — one syscall, vs realpath's per-path-component cost) kills
+ * symlink cycles and fan-out; dir-ness is computed once per entry so only symlinks
+ * pay a statSync; the entry budget truncates pathological trees. Unreadable subdirs
+ * degrade to empty (readdirSafe).
  */
 export function readDirTree(
   dir: string,
   depth = 0,
   exclude?: ReadonlySet<string>,
   visited: Set<string> = new Set(),
+  budget: TreeBudget = { remaining: TREE_MAX_ENTRIES },
 ): DirEntry[] {
   if (depth > 8 || !defaultFs.existsSync(dir)) {
     return [];
   }
   // Symlink cycles terminate via the depth cap, but k self-links still fan out k^8 —
-  // a visited set of real paths kills both cycles and fan-out.
-  let real: string;
+  // a visited set of stat identities (symlinks resolve to the target's dev:ino) kills
+  // both cycles and fan-out.
+  let identity: string;
   try {
-    real = defaultFs.realpathSync(dir);
+    const st = defaultFs.statSync(dir);
+    identity = `${st.dev}:${st.ino}`;
   } catch {
-    real = dir;
+    identity = dir;
   }
-  if (visited.has(real)) {
+  if (visited.has(identity)) {
     return [];
   }
-  visited.add(real);
-  const entries = readdirSafe(dir).filter((entry) => !exclude?.has(entry.name));
+  visited.add(identity);
+  if (budget.remaining <= 0) {
+    return [];
+  }
+  let entries = readdirSafe(dir).filter((entry) => !exclude?.has(entry.name));
+  if (entries.length > budget.remaining) {
+    entries = entries.slice(0, budget.remaining);
+  }
+  budget.remaining -= entries.length;
   // Dir-ness is computed ONCE per entry (Dirent.isDirectory() is free; only symlinks pay
   // one statSync) and shared by the sort comparator and the map phase below — a sort
   // comparator calling isDirEntry directly would stat O(n log n) times per directory.
@@ -96,7 +124,7 @@ export function readDirTree(
   return entries.map((entry) => {
     const entryPath = path.join(dir, entry.name);
     if (dirness.get(entry.name) ?? false) {
-      const children = readDirTree(entryPath, depth + 1, exclude, visited);
+      const children = readDirTree(entryPath, depth + 1, exclude, visited, budget);
       return {
         name: entry.name,
         path: entryPath,

@@ -59,6 +59,12 @@ export interface BackupServiceOptions {
    * NOT passed here — they live in the user's repo.
    */
   extraDirs?: readonly { label: string; src: string }[];
+  /**
+   * Overridable copy caps (tests). Defaults mirror the zip caps (20k entries / 256MB)
+   * and bound BOTH create() and restore(): a foreign oversized backup dir planted by
+   * hand must not translate restore into an unbounded synchronous main-thread copy.
+   */
+  caps?: { maxEntries?: number; maxTotalBytes?: number };
 }
 
 export const DEFAULT_RETENTION: Record<BackupReason, number | null> = {
@@ -119,6 +125,8 @@ export class BackupService {
   private readonly retention: Record<BackupReason, number | null>;
   private readonly managedFiles: readonly { label: string; src: string }[];
   private readonly extraDirs: readonly { label: string; src: string }[];
+  private readonly maxEntries: number;
+  private readonly maxTotalBytes: number;
   private readonly manifestCache = new Map<string, { mtimeMs: number; entry: BackupEntry | null }>();
 
   constructor(opts: BackupServiceOptions) {
@@ -132,6 +140,8 @@ export class BackupService {
       ? opts.managedFiles.map((src) => ({ label: path.basename(src), src }))
       : MANAGED_FILES.map((name) => ({ label: name, src: path.join(opts.configDir, name) }));
     this.extraDirs = opts.extraDirs ?? [];
+    this.maxEntries = opts.caps?.maxEntries ?? ZIP_MAX_ENTRIES;
+    this.maxTotalBytes = opts.caps?.maxTotalBytes ?? ZIP_MAX_TOTAL_BYTES;
   }
 
   create(reason: BackupReason, meta?: { preset?: string; name?: string }): BackupEntry {
@@ -216,6 +226,7 @@ export class BackupService {
     dest: string,
     budget: { files: number; bytes: number; entries: number } | undefined,
     depth: number,
+    exceedError = "BACKUP_CREATE_TOO_LARGE",
   ): void {
     const st = this.fsMod.lstatSync(src);
     if (st.isSymbolicLink()) {
@@ -223,42 +234,46 @@ export class BackupService {
     }
     if (st.isDirectory()) {
       if (depth >= MAX_COPY_DEPTH) {
-        throw new Error("BACKUP_CREATE_TOO_LARGE");
+        throw new Error(exceedError);
       }
       if (budget !== undefined) {
-        this.chargeDirEntry(budget);
+        this.chargeDirEntry(budget, exceedError);
       }
       this.fsMod.mkdirSync(dest, { recursive: true });
       for (const ent of this.fsMod.readdirSync(src, { withFileTypes: true })) {
-        this.copyTreeSafe(path.join(src, ent.name), path.join(dest, ent.name), budget, depth + 1);
+        this.copyTreeSafe(path.join(src, ent.name), path.join(dest, ent.name), budget, depth + 1, exceedError);
       }
       return;
     }
     if (st.isFile()) {
       if (budget !== undefined) {
-        this.chargeBudget(budget, st.size);
+        this.chargeBudget(budget, st.size, exceedError);
       }
       this.fsMod.copyFileSync(src, dest);
     }
     // Other node types (fifo/socket/device) are skipped.
   }
 
-  private chargeBudget(budget: { files: number; bytes: number; entries: number }, bytes: number): void {
+  private chargeBudget(
+    budget: { files: number; bytes: number; entries: number },
+    bytes: number,
+    exceedError = "BACKUP_CREATE_TOO_LARGE",
+  ): void {
     budget.files += 1;
     budget.entries += 1;
     budget.bytes += bytes;
-    this.assertWithinCaps(budget);
+    this.assertWithinCaps(budget, exceedError);
   }
 
   /** Directory entries consume the entry budget (export/import count them too) but not fileCount. */
-  private chargeDirEntry(budget: { files: number; bytes: number; entries: number }): void {
+  private chargeDirEntry(budget: { files: number; bytes: number; entries: number }, exceedError?: string): void {
     budget.entries += 1;
-    this.assertWithinCaps(budget);
+    this.assertWithinCaps(budget, exceedError);
   }
 
-  private assertWithinCaps(budget: { files: number; bytes: number; entries: number }): void {
-    if (budget.entries > ZIP_MAX_ENTRIES || budget.bytes > ZIP_MAX_TOTAL_BYTES) {
-      throw new Error("BACKUP_CREATE_TOO_LARGE");
+  private assertWithinCaps(budget: { files: number; bytes: number; entries: number }, exceedError?: string): void {
+    if (budget.entries > this.maxEntries || budget.bytes > this.maxTotalBytes) {
+      throw new Error(exceedError ?? "BACKUP_CREATE_TOO_LARGE");
     }
   }
 
@@ -332,6 +347,9 @@ export class BackupService {
         writeFileAtomic(src, this.fsMod.readFileSync(backup, "utf8"), this.fsMod);
       }
     }
+    // Foreign backup dirs (planted by hand, uncapped at create time) must not turn
+    // restore into an unbounded synchronous copy on the extension-host main thread.
+    const budget = { files: 0, bytes: 0, entries: 0 };
     for (const name of MANAGED_DIRS) {
       const src = path.join(srcDir, name);
       if (this.fsMod.existsSync(src)) {
@@ -339,7 +357,7 @@ export class BackupService {
         this.removeSymlinksInWay(src, target);
         // Same symlink-skipping walk as create(): a hand-planted link inside the
         // backup dir must not materialize its target into the managed config dir.
-        this.copyTreeSafe(src, target, undefined, 1);
+        this.copyTreeSafe(src, target, budget, 1, "BACKUP_RESTORE_TOO_LARGE");
       }
     }
     for (const { label, src } of this.extraDirs) {
@@ -347,7 +365,7 @@ export class BackupService {
       if (this.fsMod.existsSync(backup)) {
         this.fsMod.mkdirSync(path.dirname(src), { recursive: true });
         this.removeSymlinksInWay(backup, src);
-        this.copyTreeSafe(backup, src, undefined, 1);
+        this.copyTreeSafe(backup, src, budget, 1, "BACKUP_RESTORE_TOO_LARGE");
       }
     }
   }

@@ -107,7 +107,12 @@ export async function openPresetEditor(
     rejectReady = (error: Error) => settle(() => reject(error));
   });
   // A webview that fails to boot (bad bundle, CSP mismatch) must not hang the command.
-  readyTimer = setTimeout(() => rejectReady(new Error("模板编辑器初始化超时")), 20_000);
+  // The timeout also disposes the blank panel: a dead tab squatting openPanels would make
+  // every later editPreset(name) reveal it forever (same fix as the quota panel host).
+  readyTimer = setTimeout(() => {
+    rejectReady(new Error("模板编辑器初始化超时"));
+    panel.dispose();
+  }, 20_000);
 
   const buildInitPayload = (): WebviewInitPayload => {
     const assignments = deps.configStore.ohMyAssignments();

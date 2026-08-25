@@ -27,11 +27,17 @@ let openPanelFocus: QuotaProviderId | undefined;
 
 /** Register the quota panel entry commands (status-bar click + MiMo config shortcut). */
 export function registerQuotaPanel(ctx: vscode.ExtensionContext, deps: QuotaPanelDeps): void {
+  // Same contract as commands.ts run(): a ready-timeout rejection must surface as a
+  // Chinese message instead of escaping to the command system's English error log.
+  const openSafely = (options: OpenQuotaPanelOptions = {}): Promise<void> =>
+    openQuotaPanel(ctx, deps, options).catch((error: unknown) => {
+      const message = errorMessage(error);
+      deps.log(`quotaPanel: 打开额度面板失败: ${message}`);
+      void vscode.window.showErrorMessage(`打开额度面板失败: ${message}`);
+    });
   ctx.subscriptions.push(
-    // Handlers return the open promise (like editPreset): a command invocation resolves
-    // only once the webview finished its ready handshake.
-    vscode.commands.registerCommand(CMD.quotaRefresh, () => openQuotaPanel(ctx, deps)),
-    vscode.commands.registerCommand(CMD.quotaConfigureMimo, () => openQuotaPanel(ctx, deps, { focusProvider: "mimo" })),
+    vscode.commands.registerCommand(CMD.quotaRefresh, () => openSafely()),
+    vscode.commands.registerCommand(CMD.quotaConfigureMimo, () => openSafely({ focusProvider: "mimo" })),
   );
 }
 

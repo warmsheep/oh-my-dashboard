@@ -3,11 +3,8 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { getValue } from "./jsoncEditor";
-import { readdirSafe, readDirTree } from "./skillScanner";
+import { readdirSafe, readDirTree, TREE_EXCLUDES } from "./skillScanner";
 import type { ParseResult, PluginEntry } from "./types";
-
-/** Nested dependency dirs never shown in plugin file trees. */
-const PLUGIN_TREE_EXCLUDES = new Set(["node_modules", ".git"]);
 
 /**
  * Plugin specifiers declared in opencode.json[c], normalizing BOTH syntaxes: the V1
@@ -103,7 +100,7 @@ function resolvePathPlugin(specifier: string, host: PluginHost): PluginEntry {
     stat = undefined;
   }
   const tree = stat?.isDirectory()
-    ? readDirTree(resolved, 0, PLUGIN_TREE_EXCLUDES)
+    ? readDirTree(resolved, 0, TREE_EXCLUDES)
     : stat?.isFile()
       ? [{ name: path.basename(resolved), path: resolved, isDir: false }]
       : [];
@@ -158,7 +155,7 @@ function resolveNpmPlugin(specifier: string, host: PluginHost): PluginEntry {
     resolvedPath: finalPath,
     installed,
     ...(version !== undefined ? { version } : {}),
-    tree: installed ? readDirTree(finalPath, 0, PLUGIN_TREE_EXCLUDES) : [],
+    tree: installed ? readDirTree(finalPath, 0, TREE_EXCLUDES) : [],
   };
 }
 

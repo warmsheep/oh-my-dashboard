@@ -918,3 +918,29 @@ describe("ConfigTreeDataProvider", () => {
     expect(kids[0].kind).toBe("captureAction");
   });
 });
+
+describe("ConfigTreeDataProvider refresh coalescing", () => {
+  it("a refresh trigger arriving mid-reload chains one trailing reload (not dropped)", async () => {
+    let loads = 0;
+    let releaseFirst!: (snap: TreeDataSnapshot) => void;
+    const first = new Promise<TreeDataSnapshot>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const loader = (): TreeDataSnapshot | Promise<TreeDataSnapshot> => {
+      loads += 1;
+      return loads === 1 ? first : makeSnapshot();
+    };
+    const provider = new ConfigTreeDataProvider(loader);
+
+    const inFlight = provider.refresh();
+    // A second trigger lands while the first reload is still in flight.
+    const shared = provider.refresh();
+    expect(shared).toBe(inFlight);
+
+    releaseFirst(makeSnapshot());
+    await inFlight;
+    // The chained trailing reload ran (dirty flag), giving the newer burst its data.
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(loads).toBe(2);
+  });
+});

@@ -216,17 +216,17 @@ describe("WatchManager", () => {
     timers.fire();
     expect(refreshes).toHaveLength(1);
 
-    // Actually changed content: refresh.
+    // Actually changed content: refresh (advance past the min-interval gate first).
     fs.writeFileSync(managedFile(), '{"model":"x"}');
     emit(configDir(), "change", "opencode.json");
-    timers.now += 300;
+    timers.now += 1000;
     timers.fire();
     expect(refreshes).toHaveLength(2);
 
-    // Vanished file: refresh (deletion is a real change).
+    // Vanished file: refresh (deletion is a real change; past the min-interval gate).
     fs.rmSync(managedFile());
     emit(configDir(), "change", "opencode.json");
-    timers.now += 300;
+    timers.now += 1000;
     timers.fire();
     expect(refreshes).toHaveLength(3);
   });
@@ -249,9 +249,9 @@ describe("WatchManager", () => {
     expect(refreshes).toHaveLength(1);
 
     // A recursive-subdir event carries no file identity: force the next refresh even
-    // though every tracked file's content is unchanged since.
+    // though every tracked file's content is unchanged since (past the min-interval gate).
     emit(presetsDir(), "change", "some-preset.json");
-    timers.now += 300;
+    timers.now += 1000;
     timers.fire();
     expect(refreshes).toHaveLength(2);
   });
@@ -266,10 +266,11 @@ describe("WatchManager", () => {
     expect(manager.watcherCount()).toBe(1);
     expect(logs.some((l) => l.includes("fs.watch") && l.includes("EPERM"))).toBe(true);
 
-    // Re-arming happens at debounce fire (once per burst), NOT at event scheduling:
+    // Re-arming happens at debounce fire (once per burst), NOT at event scheduling.
+    // An async death also opens a 1s backoff window — advance past it before the burst.
     emit(configDir(), "change", "opencode.json");
     expect(armed.filter((a) => a.dir === presetsDir()).length).toBe(1);
-    timers.now += 300;
+    timers.now += 1100;
     timers.fire();
     expect(armed.filter((a) => a.dir === presetsDir()).length).toBe(2);
     expect(manager.watcherCount()).toBe(2);
@@ -297,12 +298,14 @@ describe("WatchManager", () => {
     manager.arm();
     expect(logs.filter((l) => l.includes("EMFILE"))).toHaveLength(1); // first failure only
 
-    // The dir starts watching again; merely arming does NOT reset the memo — a
-    // recurring EMFILE must stay quiet until a real event proves the watch works.
+    // The dir starts watching again (past the backoff window); merely arming does NOT
+    // reset the memo — a recurring EMFILE must stay quiet until a real event proves it.
+    timers.now += 1100;
     failPresets = false;
     manager.arm();
     expect(manager.watcherCount()).toBe(2);
     failPresets = true;
+    timers.now += 1100;
     manager.arm();
     expect(logs.filter((l) => l.includes("EMFILE"))).toHaveLength(1);
 
@@ -395,5 +398,119 @@ describe("WatchManager", () => {
       timers.fire();
       expect(refreshes).toHaveLength(1);
     });
+  });
+});
+
+describe("WatchManager refresh pacing (host protection)", () => {
+  let sandbox: string;
+  let timers: ManualTimers;
+  let refreshes: string[];
+  let logs: string[];
+  let m: WatchManager | null;
+  let emit: (filename: string | null) => void;
+
+  const presetsDir = (): string => path.join(sandbox, "opencode", "presets");
+
+  const makeManager = (watch?: WatchFactory): void => {
+    let listener: ((event: string, filename: string | Buffer | null) => void) | undefined;
+    const factory: WatchFactory =
+      watch ??
+      (((_dir: string, _options: fs.WatchOptions, l: (event: string, filename: string | Buffer | null) => void) => {
+        listener = l;
+        return new FakeWatcher() as unknown as fs.FSWatcher;
+      }) as WatchFactory);
+    emit = (filename: string | null): void => {
+      listener?.("change", filename);
+    };
+    m = new WatchManager({
+      targets: [{ dir: presetsDir(), recursive: true }],
+      onRefresh: () => refreshes.push(`t${timers.now}`),
+      log: (message) => logs.push(message),
+      watch: factory,
+      setTimeout: timers.setTimeout,
+      clearTimeout: timers.clearTimeout,
+      now: () => timers.now,
+    });
+    m.arm();
+  };
+
+  beforeEach(() => {
+    sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "watchmanager-pacing-"));
+    fs.mkdirSync(presetsDir(), { recursive: true });
+    timers = new ManualTimers();
+    refreshes = [];
+    logs = [];
+    m = null;
+  });
+
+  afterEach(() => {
+    m?.dispose();
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  });
+
+  it("throttles refreshes to minIntervalMs: a second burst too soon is deferred, not dropped", () => {
+    makeManager();
+
+    emit("a.json");
+    timers.now += 300;
+    timers.fire();
+    expect(refreshes).toHaveLength(1);
+
+    // Second burst 150ms later — inside the default 1000ms min interval.
+    emit("b.json");
+    timers.now += 150;
+    timers.fire();
+    // Deferred: the manager re-armed the timer for the remaining interval instead of
+    // refreshing, and the pending trigger survives.
+    expect(refreshes).toHaveLength(1);
+    expect(timers.armed).toBe(true);
+    timers.now += 1000;
+    timers.fire();
+    expect(refreshes).toHaveLength(2);
+  });
+
+  it("maxWaitMs: continuous sub-debounce churn still fires (no starvation)", () => {
+    makeManager();
+
+    // Simulate an event every 100ms for 3s without ever letting the 300ms debounce
+    // elapse — before maxWait this postponed fire() forever.
+    emit("a.json");
+    for (let t = 0; t < 30; t += 1) {
+      timers.now += 100;
+      emit(`f${t}.json`);
+    }
+    expect(timers.armed).toBe(true);
+    timers.fire();
+    expect(refreshes).toHaveLength(1);
+  });
+
+  it("backs off re-arming a failing watch target exponentially", () => {
+    const attempts: number[] = [];
+    let failFirst = true;
+    const failingFactory: WatchFactory = ((
+      _dir: string,
+      _options: fs.WatchOptions,
+      _listener: (event: string, filename: string | Buffer | null) => void,
+    ) => {
+      attempts.push(timers.now);
+      if (failFirst) {
+        failFirst = false;
+        throw new Error("EMFILE");
+      }
+      return new FakeWatcher() as unknown as fs.FSWatcher;
+    }) as WatchFactory;
+
+    makeManager(failingFactory);
+    expect(attempts).toHaveLength(1);
+
+    // A burst 100ms later must NOT retry (backoff window open).
+    m!.arm();
+    expect(attempts).toHaveLength(1);
+
+    // Past the backoff window the retry happens and succeeds.
+    timers.now += 1100;
+    m!.arm();
+    expect(attempts).toHaveLength(2);
+    expect(m!.watcherCount()).toBe(1);
   });
 });

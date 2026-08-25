@@ -77,6 +77,7 @@ npm run package                                   # 编译+webview构建+同步d
 ## 数据与运行时位置
 
 - 管理对象：`~/.config/opencode/` 下 `opencode.json`（或 `opencode.jsonc`）、`AGENTS.md`、`command/`、`skills/`；模板（原「预设」，代码与文件名仍用 preset）存 `presets/*.json`；备份存 `backups/<ISO时间戳>-manual/`（只有手动备份，无自动备份）。
+- **扩展宿主纪律（不许以任何方式拖累其他插件）**：`readDirTree` 统一排除 `.git`/`node_modules`（共享 `TREE_EXCLUDES`）且单次遍历 ≤`TREE_MAX_ENTRIES`(=4000) 条；watchManager 刷新节流 ≥1s + 连续事件 maxWait 2s（防 debounce 活锁）+ 失败重 arm 指数退避（1s→30s）；`backups/` 只做**扁平**监视（递归会随历史备份线性吃光 Linux inotify 配额 8192，殃及 workbench 与所有插件），全局 skills 监视目标先 realpath 去重；`provider.refresh()` 重载期间的触发用脏标记合并为一次尾随重载；warmup 延迟 2s 避开启动 IO 风暴；`restore()` 与 create 同受 256MB/2 万条目预算约束（`BACKUP_RESTORE_TOO_LARGE`）。
 - agent/category 配置目标**不固定**：`ConfigStore.resolveAgentConfig()` 按 `~/.omo/omo.jsonc` → `~/.omo/omo.json` → `oh-my-opencode.jsonc` → `oh-my-opencode.json` → `oh-my-openagent.jsonc` → `oh-my-openagent.json` 顺序检测（与 oh-my-openagent 运行时同序）；都不存在时按 `~/.omo` 目录或 opencode.json 的 plugin 条目决定创建目标。omo 目标写 `[opencode]` 块内的 `reasoning` 键，legacy 目标写顶层 `variant` 键；应用时会清掉被改条目的冲突键（`variant`/`reasoning`/`models` 链）。
 - 模型清单：内置清单在 `src/core/builtinModels.ts`，首次使用 seed 到 `~/.config/opencode/models.json`（可手编、损坏自愈重建，自愈前原文件备份为 `models.json.bak`）。清单来源是 models.dev（opencode 官方目录）— 更新模型时以其 provider/model id 为准。
 - 配置目录解析与 opencode 运行时严格一致（opencode 用 xdg-basedir，无平台分支）：三平台同为 `OPENCODE_CONFIG_DIR` > `$XDG_CONFIG_HOME/opencode` > `~/.config/opencode`（macOS/Windows 不用各自平台默认目录）；缓存/数据同理为 `~/.cache/opencode`、`~/.local/share/opencode`。

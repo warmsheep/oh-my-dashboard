@@ -89,6 +89,8 @@ function iconId(node: BaseNode): string {
 export class ConfigTreeDataProvider implements vscode.TreeDataProvider<BaseNode> {
   private cache: TreeDataSnapshot | null = null;
   private reloading: Promise<TreeDataSnapshot> | null = null;
+  /** A refresh trigger arrived mid-reload — chain ONE trailing reload with fresh data. */
+  private dirty = false;
   /** Root nodes memo keyed by snapshot identity — repeated root renders (view visibility
    * changes, multiple getChildren per refresh) reuse one built tree instead of rebuilding. */
   private rootNodes: { snapshot: TreeDataSnapshot; roots: BaseNode[] } | null = null;
@@ -100,10 +102,12 @@ export class ConfigTreeDataProvider implements vscode.TreeDataProvider<BaseNode>
   /**
    * Stale-while-revalidate: getChildren always serves the last snapshot once loaded, so a
    * refresh can never stall rendering (the reload happens in the background and re-renders
-   * only after the new snapshot lands).
+   * only after the new snapshot lands). A trigger arriving mid-reload marks the data dirty
+   * and chains exactly one trailing reload — the older burst's events are not lost.
    */
   refresh(): Promise<TreeDataSnapshot> {
     if (this.reloading) {
+      this.dirty = true;
       return this.reloading;
     }
     this.reloading = Promise.resolve(this.loadData())
@@ -111,11 +115,17 @@ export class ConfigTreeDataProvider implements vscode.TreeDataProvider<BaseNode>
         this.cache = snapshot;
         this.rootNodes = null; // a new generation must rebuild roots even if the loader reuses objects
         this.reloading = null;
+        const rerun = this.dirty;
+        this.dirty = false;
+        if (rerun) {
+          void this.refresh();
+        }
         this._onDidChangeTreeData.fire();
         return snapshot;
       })
       .catch((error) => {
         this.reloading = null;
+        this.dirty = false;
         throw error;
       });
     return this.reloading;

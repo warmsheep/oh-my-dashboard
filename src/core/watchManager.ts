@@ -44,10 +44,19 @@ export interface WatchManagerOptions {
   debounceMs?: number;
   /** How long after noteExternalRefresh() forced (identity-less) events are dropped. */
   forcedCooldownMs?: number;
+  /** Min gap between refreshes (default 1000ms): watcher churn must not turn into a refresh pump. */
+  minIntervalMs?: number;
+  /** Max time a pending burst may be postponed by further events (default 2000ms) — trailing-debounce starvation guard. */
+  maxWaitMs?: number;
 }
 
 const DEFAULT_DEBOUNCE_MS = 300;
 const DEFAULT_FORCED_COOLDOWN_MS = 500;
+const DEFAULT_MIN_INTERVAL_MS = 1_000;
+const DEFAULT_MAX_WAIT_MS = 2_000;
+/** Re-arm backoff for a failing watch target: 1s doubling, capped at 30s. */
+const ARM_BACKOFF_BASE_MS = 1_000;
+const ARM_BACKOFF_CAP_MS = 30_000;
 
 /**
  * Debounced filesystem-watch orchestrator for the managed config dirs (pure Node,
@@ -75,6 +84,8 @@ export class WatchManager {
   private readonly now: () => number;
   private readonly debounceMs: number;
   private readonly forcedCooldownMs: number;
+  private readonly minIntervalMs: number;
+  private readonly maxWaitMs: number;
 
   private readonly watchers = new Map<string, defaultFs.FSWatcher>();
   /** Tracked-file contents last deemed current; null = known-missing at mark time. */
@@ -82,7 +93,14 @@ export class WatchManager {
   private readonly pendingTriggers = new Set<string>();
   /** Dirs whose watch failure is already logged this streak — quiet until a real event proves recovery. */
   private readonly loggedWatchFailures = new Set<string>();
+  /** Per-dir re-arm backoff: earliest retry time (epoch ms) after a failed arm attempt. */
+  private readonly armRetryAfter = new Map<string, number>();
+  private readonly armFailures = new Map<string, number>();
   private timer: unknown;
+  /** When the current pending burst started (epoch ms) — the maxWaitMs starvation guard. */
+  private pendingSince: number | undefined;
+  /** Earliest allowed next refresh (epoch ms) — the minIntervalMs pump guard. */
+  private nextRefreshAt = 0;
   private forceNext = false;
   private suppressForcedUntil = 0;
   private disposed = false;
@@ -97,6 +115,8 @@ export class WatchManager {
     this.now = options.now ?? Date.now;
     this.debounceMs = options.debounceMs ?? DEFAULT_DEBOUNCE_MS;
     this.forcedCooldownMs = options.forcedCooldownMs ?? DEFAULT_FORCED_COOLDOWN_MS;
+    this.minIntervalMs = options.minIntervalMs ?? DEFAULT_MIN_INTERVAL_MS;
+    this.maxWaitMs = options.maxWaitMs ?? DEFAULT_MAX_WAIT_MS;
   }
 
   /** (Re-)arm watchers for every existing target dir. Idempotent; safe to call per burst. */
@@ -105,12 +125,18 @@ export class WatchManager {
       if (this.watchers.has(target.dir) || !defaultFs.existsSync(target.dir)) {
         continue;
       }
+      const retryAt = this.armRetryAfter.get(target.dir);
+      if (retryAt !== undefined && this.now() < retryAt) {
+        continue;
+      }
       try {
         const watcher = this.watchFn(target.dir, { recursive: target.recursive }, this.handlerFor(target));
         // An async error (EMFILE/EPERM/deleted dir) with no listener would take down the
         // extension host: drop the handle so re-arming can retry instead.
         watcher.on("error", (error: Error) => this.handleWatcherError(target.dir, watcher, error));
         this.watchers.set(target.dir, watcher);
+        this.armRetryAfter.delete(target.dir);
+        this.armFailures.delete(target.dir);
       } catch (error) {
         // Log once per failure streak: a persistently failing target re-tried every
         // burst must not flood the output channel. A delivered event clears the memo.
@@ -118,6 +144,14 @@ export class WatchManager {
           this.loggedWatchFailures.add(target.dir);
           this.log(`watchManager: fs.watch(${target.dir}) 失败: ${errorDetail(error)}`);
         }
+        // Exponential retry backoff: re-arming a big recursive tree costs O(subtree)
+        // syscalls — a per-burst retry of a doomed target is its own storm.
+        const failures = Math.min((this.armFailures.get(target.dir) ?? 0) + 1, 5);
+        this.armFailures.set(target.dir, failures);
+        this.armRetryAfter.set(
+          target.dir,
+          this.now() + Math.min(ARM_BACKOFF_BASE_MS * 2 ** (failures - 1), ARM_BACKOFF_CAP_MS),
+        );
       }
     }
   }
@@ -136,9 +170,18 @@ export class WatchManager {
       this.pendingTriggers.add(trigger);
     }
     if (this.timer !== undefined) {
-      this.cancelTimeout(this.timer);
+      // Trailing debounce, bounded by maxWait: further events keep postponing the fire
+      // ONLY while the burst is younger than maxWaitMs — older bursts must fire even
+      // under continuous churn (starvation otherwise never refreshes NOR re-arms).
+      const waited = this.now() - (this.pendingSince ?? this.now());
+      if (waited < this.maxWaitMs) {
+        this.cancelTimeout(this.timer);
+        this.timer = this.scheduleTimeout(() => this.fire(), this.debounceMs);
+      }
+    } else {
+      this.pendingSince = this.now();
+      this.timer = this.scheduleTimeout(() => this.fire(), this.debounceMs);
     }
-    this.timer = this.scheduleTimeout(() => this.fire(), this.debounceMs);
   }
 
   /**
@@ -186,7 +229,16 @@ export class WatchManager {
   }
 
   private fire(): void {
+    // Min-interval throttle: defer (not drop) a too-soon refresh; the pending
+    // triggers stay queued for the rescheduled fire.
+    const nowAtFire = this.now();
+    if (nowAtFire < this.nextRefreshAt) {
+      this.timer = this.scheduleTimeout(() => this.fire(), Math.max(1, this.nextRefreshAt - nowAtFire));
+      return;
+    }
     this.timer = undefined;
+    this.pendingSince = undefined;
+    this.nextRefreshAt = nowAtFire + this.minIntervalMs;
     // Re-arm once per (debounced) burst, not per event — an event storm pays one
     // existsSync pass and one retry for dropped watchers instead of one per event.
     this.arm();
@@ -257,6 +309,10 @@ export class WatchManager {
     }
     if (this.watchers.get(dir) === watcher) {
       this.watchers.delete(dir);
+      // The handle died — the next re-arm pays O(subtree) again, so back it off too.
+      const failures = Math.min((this.armFailures.get(dir) ?? 0) + 1, 5);
+      this.armFailures.set(dir, failures);
+      this.armRetryAfter.set(dir, this.now() + Math.min(ARM_BACKOFF_BASE_MS * 2 ** (failures - 1), ARM_BACKOFF_CAP_MS));
     }
     closeWatcherQuietly(watcher);
   }

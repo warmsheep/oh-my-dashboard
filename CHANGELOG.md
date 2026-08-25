@@ -2,6 +2,15 @@
 
 > 版本与日期以 git 历史为准；0.8.0–0.14.0、0.16.x、0.18.0 等中间版本为本地打包、版本号未入库，相关变更归并入下一个入库版本。
 
+## 0.24.0 (2026-08-25)
+
+- 三路子代理深审后的扩展宿主加固（消除一切可能拖垮其他插件的路径）：
+  - 目录遍历防护：readDirTree 统一排除 `.git`/`node_modules`（收口为共享 `TREE_EXCLUDES`）并加 4000 条目预算——git clone 的 skills 仓库不再把 `.git/objects` 数千文件带入每次同步刷新；visited 键从 realpathSync（O(路径组件数)）改为 statSync dev:ino（1 次系统调用）
+  - 文件监视纪律：backups/ 由递归改扁平监视（备份永不清理，递归监视会随历史备份线性消耗 Linux inotify 配额 8192，耗尽殃及所有插件与 workbench 自身）；全局 skills 监视目标 realpath 去重（~/.claude/skills → ~/.agents/skills symlink 双监视）；刷新节流 ≥1s、连续事件 maxWait 2s 防活锁、失败重 arm 指数退避（1s→30s）
+  - 刷新合并：provider 重载期间的触发改为脏标记 + 一次尾随重载（原先被丢弃导致树滞留）
+  - 激活让路：warmup 全量发现延迟 2s（避开其他插件启动 IO 风暴）且种子写回声不再触发二次全扫；restore() 补 256MB/2 万条目预算上限（外来超大备份目录不再变成无界同步拷贝，超限报 `BACKUP_RESTORE_TOO_LARGE`）
+  - 面板健壮性：模板编辑器 ready 超时后关闭死标签页（原先永久占用 openPanels）；额度面板命令超时改为中文错误提示（不再外溢英文 rejection）
+
 ## 0.23.2 (2026-08-25)
 
 - 备份 zip 导入/导出改走 fflate 异步 worker（worker_threads）：此前 zipSync/unzipSync 在扩展宿主主线程同步压缩/解压（上限 256MB，最坏冻结事件循环数秒，所有插件一并无响应）；现压缩/解压移出事件循环，新增「导出期间事件循环保持心跳」防回归单测；审计确认其余同步 IO 均有界（条目/字节上限），命令层异常经统一 run() 包裹无未处理 rejection

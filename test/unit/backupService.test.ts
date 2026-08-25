@@ -1157,3 +1157,33 @@ describe("BackupService.list resilience", () => {
     expect(manifestReads).toBe(2); // mtime bumped → re-read
   });
 });
+
+describe("BackupService.restore caps (host protection)", () => {
+  it("aborts restoring a foreign oversized backup dir with BACKUP_RESTORE_TOO_LARGE", () => {
+    seedFullTree();
+    const svc = new BackupService({ configDir, now: seqNow("2026-08-22T10:00:00.000Z") });
+    const entry = svc.create("manual");
+
+    // Plant a huge tree INSIDE the backup (foreign dir placed by hand — create() caps
+    // do not apply to it) and lower the caps so the restore-path budget trips.
+    const huge = path.join(entry.dir, "skills", "huge");
+    fs.mkdirSync(huge, { recursive: true });
+    for (let i = 0; i < 30; i += 1) {
+      fs.writeFileSync(path.join(huge, `f${i}.txt`), "x");
+    }
+    const strict = new BackupService({
+      configDir,
+      now: seqNow("2026-08-22T10:00:00.000Z"),
+      caps: { maxEntries: 10, maxTotalBytes: 256 * 1024 * 1024 },
+    });
+
+    expect(() => strict.restore(entry.dirName)).toThrow("BACKUP_RESTORE_TOO_LARGE");
+  });
+
+  it("restores normally within caps", () => {
+    seedFullTree();
+    const svc = new BackupService({ configDir, now: seqNow("2026-08-22T10:00:00.000Z") });
+    const entry = svc.create("manual");
+    expect(() => svc.restore(entry.dirName)).not.toThrow();
+  });
+});
