@@ -99,7 +99,7 @@ afterEach(() => {
 });
 
 describe("integration: core pipeline (capture → mutate → apply → backup → restore)", () => {
-  it("scenario A: full lifecycle round-trip over one temp config dir", () => {
+  it("scenario A: full lifecycle round-trip over one temp config dir", async () => {
     const env = makeEnv({ now: seqNow("2026-08-21T10:00:00.000Z") });
     const fixtureOhMy = readBytes(path.join(FIXTURES_DIR, "oh-my-opencode.json"));
     const fixtureOpencode = readBytes(path.join(FIXTURES_DIR, "opencode.jsonc"));
@@ -162,7 +162,7 @@ describe("integration: core pipeline (capture → mutate → apply → backup �
     expect(env.backup.list()).toHaveLength(1);
   });
 
-  it("scenario B: comments, tabs and trailing commas survive set/clear of defaults.model", () => {
+  it("scenario B: comments, tabs and trailing commas survive set/clear of defaults.model", async () => {
     const env = makeEnv({ opencodeFixture: "opencode.comments.jsonc" });
     const captured = env.service.capture("commented");
     expect(captured.defaults.model).toBeNull();
@@ -196,7 +196,7 @@ describe("integration: core pipeline (capture → mutate → apply → backup �
     }
   });
 
-  it("scenario C: applies create no backups; manual backups are never pruned", () => {
+  it("scenario C: applies create no backups; manual backups are never pruned", async () => {
     const env = makeEnv({ now: seqNow("2026-08-21T11:00:00.000Z") });
     env.service.capture("keep");
 
@@ -216,7 +216,7 @@ describe("integration: core pipeline (capture → mutate → apply → backup �
     expect(fs.readdirSync(env.backupsDir).sort()).toEqual([...manualNames].sort());
   });
 
-  it("scenario D: apply on a corrupted oh-my-opencode.json throws, keeps bytes, creates no backups", () => {
+  it("scenario D: apply on a corrupted oh-my-opencode.json throws, keeps bytes, creates no backups", async () => {
     const env = makeEnv({ now: seqNow("2026-08-21T12:00:00.000Z") });
     env.service.capture("snap");
 
@@ -234,7 +234,7 @@ describe("integration: core pipeline (capture → mutate → apply → backup �
     expect(env.service.load("snap").appliedAt).toBeNull();
   });
 
-  it("scenario E: omo machine — preset lifecycle targets ~/.omo/omo.jsonc end to end", () => {
+  it("scenario E: omo machine — preset lifecycle targets ~/.omo/omo.jsonc end to end", async () => {
     const env = makeEnv({ now: seqNow("2026-08-22T10:00:00.000Z") });
     fs.rmSync(env.ohMyPath);
     const omoPath = path.join(env.homeDir, ".omo", "omo.jsonc");
@@ -285,7 +285,7 @@ describe("integration: core pipeline (capture → mutate → apply → backup �
     expect(fs.readFileSync(omoPath, "utf8")).toBe(appliedText);
   });
 
-  it("scenario F: home-level skills (~/.agents/skills) round-trip via extraDirs, project skills untouched", () => {
+  it("scenario F: home-level skills (~/.agents/skills) round-trip via extraDirs, project skills untouched", async () => {
     const env = makeEnv({ now: seqNow("2026-08-22T12:00:00.000Z") });
     const userSkillsDir = env.store.userSkillsDir;
     expect(userSkillsDir).toBe(path.join(env.homeDir, ".agents", "skills"));
@@ -315,7 +315,7 @@ describe("integration: core pipeline (capture → mutate → apply → backup �
     expect(readBytes(path.join(env.configDir, "skills", "one", "x.md"))).toEqual(Buffer.from(SKILL_X_SEED, "utf8"));
   });
 
-  it("scenario G: models.json seeds on first listModels, then corrupt hand-edits self-heal with a .bak of the user's bytes", () => {
+  it("scenario G: models.json seeds on first listModels, then corrupt hand-edits self-heal with a .bak of the user's bytes", async () => {
     const env = makeEnv({ now: seqNow("2026-08-23T09:00:00.000Z") });
     const modelsFile = path.join(env.configDir, "models.json");
     expect(fs.existsSync(modelsFile)).toBe(false);
@@ -334,7 +334,7 @@ describe("integration: core pipeline (capture → mutate → apply → backup �
     expect(JSON.parse(readBytes(modelsFile).toString("utf8")).models).toEqual(seededFileModels);
   });
 
-  it("scenario H: backup → exportZip → wipe machine → importZip → restore is byte-identical", () => {
+  it("scenario H: backup → exportZip → wipe machine → importZip → restore is byte-identical", async () => {
     const env = makeEnv({ now: seqNow("2026-08-23T10:00:00.000Z") });
     env.service.capture("handcuff");
     fs.appendFileSync(env.agentsMdPath, "\nhand-added line\n");
@@ -345,7 +345,7 @@ describe("integration: core pipeline (capture → mutate → apply → backup �
     const originalCommandA = readBytes(path.join(env.configDir, "command", "a.md"));
 
     const zipPath = path.join(env.configDir, "portable.zip");
-    env.backup.exportZip(entry.dirName, zipPath);
+    await env.backup.exportZip(entry.dirName, zipPath);
     expect(fs.existsSync(zipPath)).toBe(true);
 
     fs.rmSync(entry.dir, { recursive: true, force: true });
@@ -354,7 +354,7 @@ describe("integration: core pipeline (capture → mutate → apply → backup �
     fs.writeFileSync(env.agentsMdPath, "# wiped");
     fs.rmSync(path.join(env.configDir, "command", "a.md"));
 
-    const imported = env.backup.importZip(zipPath);
+    const imported = await env.backup.importZip(zipPath);
     env.backup.restore(imported.dirName);
 
     expect(readBytes(env.ohMyPath)).toEqual(originalOhMy);

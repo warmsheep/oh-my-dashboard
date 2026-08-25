@@ -3,11 +3,29 @@ import type { Dirent } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { strFromU8, unzipSync, zipSync } from "fflate";
+import { strFromU8, unzip, zip, type AsyncZipOptions, type UnzipOptions } from "fflate";
 
 import { writeFileAtomic } from "./atomicFile";
 import { assertContainedFileName } from "./pathSafety";
 import type { BackupEntry, BackupManifest, BackupReason } from "./types";
+
+/**
+ * Deflate/inflate MUST stay off the extension-host event loop: fflate's async
+ * zip/unzip run on worker_threads (own workers, not the shared libuv pool), so a
+ * multi-hundred-MB export/import never freezes every other extension's messages.
+ * The sync-looking file walk/reads around them are bounded by the caps below.
+ */
+function zipAsync(files: Record<string, Uint8Array>, opts: AsyncZipOptions): Promise<Uint8Array> {
+  return new Promise((resolve, reject) => {
+    zip(files, opts, (err, out) => (err ? reject(err) : resolve(out)));
+  });
+}
+
+function unzipAsync(data: Uint8Array, opts: UnzipOptions): Promise<Record<string, Uint8Array>> {
+  return new Promise((resolve, reject) => {
+    unzip(data, opts, (err, out) => (err ? reject(err) : resolve(out)));
+  });
+}
 
 /** Zip size caps shared by import AND export so the two directions stay symmetric. */
 const ZIP_MAX_ENTRIES = 20_000;
@@ -382,7 +400,7 @@ export class BackupService {
    * The walk enforces the SAME caps as importZip (entries/total bytes) and fails with
    * BACKUP_EXPORT_TOO_LARGE before the zip is built in memory.
    */
-  exportZip(dirName: string, targetFile: string): void {
+  async exportZip(dirName: string, targetFile: string): Promise<void> {
     this.assertDirName(dirName);
     if (!this.readEntry(dirName)) {
       throw new Error("BACKUP_NOT_FOUND");
@@ -414,7 +432,7 @@ export class BackupService {
       }
     };
     walk(srcDir, "");
-    writeFileAtomic(targetFile, zipSync(files, { level: 6 }), this.fsMod);
+    writeFileAtomic(targetFile, await zipAsync(files, { level: 6 }), this.fsMod);
   }
 
   /**
@@ -423,7 +441,7 @@ export class BackupService {
    * a version-1 backup manifest, and the target dirName is rebuilt from it (foreign reasons
    * downgrade to "manual"; name collisions get an -import-N suffix).
    */
-  importZip(zipFile: string): BackupEntry {
+  async importZip(zipFile: string): Promise<BackupEntry> {
     // Cap the compressed file itself first — readFileSync of a multi-GB "zip" would OOM
     // before any other check runs.
     const zipSize = this.fsMod.statSync(zipFile).size;
@@ -440,7 +458,7 @@ export class BackupService {
     const declaredSizes: Record<string, number> = {};
     let entries: Record<string, Uint8Array>;
     try {
-      entries = unzipSync(new Uint8Array(this.fsMod.readFileSync(zipFile)), {
+      entries = await unzipAsync(new Uint8Array(this.fsMod.readFileSync(zipFile)), {
         filter: (file) => {
           entryCount += 1;
           totalBytes += file.originalSize;

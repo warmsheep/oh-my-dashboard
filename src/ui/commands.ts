@@ -734,7 +734,7 @@ async function exportBackup(deps: ExtensionDeps, arg: unknown): Promise<void> {
       void vscode.window.showErrorMessage(`导出备份失败: ${EXPORT_TARGET_DENIED}（${request.target}）`);
       return;
     }
-    deps.backupService.exportZip(request.dirName, request.target);
+    await deps.backupService.exportZip(request.dirName, request.target);
     deps.log(`已导出备份 ${request.dirName} → ${request.target}`);
     return;
   }
@@ -749,7 +749,7 @@ async function exportBackup(deps: ExtensionDeps, arg: unknown): Promise<void> {
   if (!target) {
     return;
   }
-  deps.backupService.exportZip(entry.dirName, target.fsPath);
+  await deps.backupService.exportZip(entry.dirName, target.fsPath);
   void vscode.window.showInformationMessage(`已导出备份 ${entry.dirName} → ${target.fsPath}`);
 }
 
@@ -767,7 +767,7 @@ async function importBackup(deps: ExtensionDeps, arg: unknown): Promise<void> {
   if (!zipPath) {
     return;
   }
-  const entry = deps.backupService.importZip(zipPath);
+  const entry = await deps.backupService.importZip(zipPath);
   deps.refreshAll();
   void vscode.window.showInformationMessage(`已导入备份 ${entry.dirName}（${entry.manifest.fileCount} 个文件）`);
 }
