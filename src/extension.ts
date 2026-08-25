@@ -3,7 +3,8 @@ import * as path from "node:path";
 
 import * as vscode from "vscode";
 
-import { CONFIG_LEAF, CONFIG_SECTION, OUTPUT_CHANNEL_NAME, TEST_BRIDGE, VIEW } from "./constants";
+import { CONFIG_KEY, CONFIG_LEAF, CONFIG_SECTION, OUTPUT_CHANNEL_NAME, TEST_BRIDGE, VIEW } from "./constants";
+import { AutoRefreshScheduler } from "./core/autoRefreshScheduler";
 import { BackupService } from "./core/backupService";
 import { ConfigStore } from "./core/configStore";
 import { errorMessage } from "./core/errors";
@@ -17,9 +18,15 @@ import { ConfigTreeDataProvider } from "./tree/provider";
 import type { TreeDataSnapshot } from "./tree/provider";
 import { registerCommands } from "./ui/commands";
 import { createQuotaStatusBar } from "./ui/quotaStatusBar";
+import { readAutoRefreshSettings, writeAutoRefreshSettings } from "./ui/settingsStore";
 import { createStatusBar } from "./ui/statusbar";
 import { notifyPresetEditorsModelsChanged, postMessageToPresetEditor } from "./webview/presetEditorHost";
 import { postMessageToQuotaPanel, registerQuotaPanel } from "./webview/quotaPanelHost";
+import {
+  postMessageToSettingsPanel,
+  pushSettingsToOpenPanel,
+  registerSettingsPanel,
+} from "./webview/settingsPanelHost";
 
 export function activate(ctx: vscode.ExtensionContext): void {
   const cfg = vscode.workspace.getConfiguration(CONFIG_SECTION);
@@ -219,6 +226,42 @@ export function activate(ctx: vscode.ExtensionContext): void {
     watchManager.noteExternalRefresh();
   };
 
+  // Opt-in per-category polling on top of the always-on fs.watch layer: every tick
+  // walks the same manual-refresh path (reload + echo suppression), so the two
+  // mechanisms coalesce inside the provider's dirty-flag refresh logic.
+  let autoRefreshTicks = 0;
+  const autoRefreshScheduler = new AutoRefreshScheduler({
+    getSettings: readAutoRefreshSettings,
+    onRefresh: () => {
+      autoRefreshTicks += 1;
+      refreshAll();
+    },
+  });
+  autoRefreshScheduler.reconfigure();
+  ctx.subscriptions.push(autoRefreshScheduler);
+
+  registerSettingsPanel(ctx, {
+    readSettings: readAutoRefreshSettings,
+    saveSettings: writeAutoRefreshSettings,
+    log,
+  });
+
+  // autoRefresh.* keys re-arm the polling scheduler; EXTERNAL settings changes
+  // (standard Settings UI, hand edits) re-sync the open settings page — own-save
+  // echoes are suppressed inside pushSettingsToOpenPanel so they can't revert
+  // in-flight edits. quota.refreshSeconds is covered by quotaStatusBar's own
+  // listener for re-scheduling; here it only refreshes the page display.
+  const settingsListener = vscode.workspace.onDidChangeConfiguration((event) => {
+    const autoRefreshChanged = event.affectsConfiguration(CONFIG_KEY.autoRefresh);
+    if (autoRefreshChanged) {
+      autoRefreshScheduler.reconfigure();
+    }
+    if (autoRefreshChanged || event.affectsConfiguration(CONFIG_KEY.quotaRefreshSeconds)) {
+      pushSettingsToOpenPanel(readAutoRefreshSettings);
+    }
+  });
+  ctx.subscriptions.push(settingsListener);
+
   registerCommands(ctx, { configStore, backupService, presetService, refreshAll, log });
 
   // Warmup's full discover (skills/plugin trees, models seed write) runs synchronously
@@ -246,7 +289,11 @@ export function activate(ctx: vscode.ExtensionContext): void {
       vscode.commands.registerCommand(TEST_BRIDGE.quotaPanelPostMessage, (message: unknown): boolean =>
         postMessageToQuotaPanel(message),
       ),
+      vscode.commands.registerCommand(TEST_BRIDGE.settingsPanelPostMessage, (message: unknown): boolean =>
+        postMessageToSettingsPanel(message),
+      ),
       vscode.commands.registerCommand(TEST_BRIDGE.statusBarText, (): string => statusbar.text()),
+      vscode.commands.registerCommand(TEST_BRIDGE.autoRefreshTicks, (): number => autoRefreshTicks),
     );
   }
 }

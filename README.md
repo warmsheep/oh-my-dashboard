@@ -44,10 +44,18 @@ code --install-extension build/packages/opencode-config-manager-<版本>.vsix
 
 ### 设置
 
+入口：侧边栏面板标题栏的齿轮按钮（或命令面板「OpenCode: 打开设置」），打开类设置页的编辑器窗口：
+
+- **分区自动刷新**：配置 / 模板 / 备份 / 模型 / 插件五个分区各自独立开关（切换按钮），开启后可配置轮询间隔（秒，默认 30，范围 1–3600）；关闭（默认）时仅保留文件变更监听 + 手动刷新
+- **Coding Plan 额度刷新频率**：默认 30 秒（0 = 关闭自动刷新），与状态栏/额度面板同源生效，更改后立即按新频率查询
+- 修改为本地编辑：点击「保存设置」才一次性写入全部设置（未保存时按钮禁用并提示）
+
 | 键 | 默认 | 说明 |
 |---|---|---|
 | `opencodeConfigManager.configDirOverride` | — | 配置目录覆盖（默认与 opencode 运行时一致：`OPENCODE_CONFIG_DIR` > `XDG_CONFIG_HOME/opencode` > `~/.config/opencode`，三平台相同） |
 | `opencodeConfigManager.quota.refreshSeconds` | 30 | Coding Plan 额度自动刷新间隔（秒，0 = 关闭） |
+| `opencodeConfigManager.autoRefresh.<分区>.enabled` | false | 对应分区（config/presets/backups/models/plugins）定时自动刷新开关 |
+| `opencodeConfigManager.autoRefresh.<分区>.intervalSeconds` | 30 | 对应分区自动刷新间隔（秒，1–3600） |
 
 ## 架构
 
@@ -61,9 +69,9 @@ src/core/      纯逻辑（无 vscode 依赖，vitest 单测）
                    插件与 skills 发现、agent 分配、额度查询
   atomicFile / pathSafety / errors / watchManager  基础设施
 src/tree/      树节点纯构建器 + 单一分区 Explorer
-src/ui/        命令 / QuickPick / 状态栏（模板 + 额度）/ 保存守护
-src/webview/   Webview 宿主（模板编辑器 + 额度面板；CSP + nonce + postMessage 协议）
-webview-ui/    React 前端（Vite 多入口：模板矩阵表单 + 额度设置页，VSCode CSS 变量主题）
+src/ui/        命令 / QuickPick / 状态栏（模板 + 额度）/ 设置读写
+src/webview/   Webview 宿主（模板编辑器 + 额度面板 + 设置页；CSP + postMessage 协议）
+webview-ui/    React 前端（Vite 多入口：模板矩阵表单 + 额度设置页 + 设置页，VSCode CSS 变量主题）
 ```
 
 数据位置：模板 `~/.config/opencode/presets/*.json`；备份 `~/.config/opencode/backups/<ISO时间戳>-manual/`（含 `manifest.json` 与展示名称，覆盖检测到的实际配置文件与 `~/.agents/skills`）。模板应用/捕获的写入目标由本机检测结果决定（`~/.omo/omo.jsonc` 或旧版 `oh-my-opencode.json[c]`）。

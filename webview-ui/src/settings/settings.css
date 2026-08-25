@@ -1,0 +1,186 @@
+/* Settings page — shares main.css (theme tokens, .ctl/.banner-error/.toast) and
+   adds section cards, setting rows and the iOS-style toggle switch. */
+
+.settings-page {
+  max-width: 620px;
+}
+
+/* ---------- sections ---------- */
+
+.s-section {
+  margin-top: 14px;
+  border: 1px solid var(--hairline);
+  border-radius: 2px;
+}
+
+.s-section-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  background: var(--section-bg);
+  border-bottom: 1px solid var(--hairline);
+}
+
+.s-section-head h2 {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.s-section-body {
+  padding: 2px 12px 8px;
+}
+
+/* ---------- rows ---------- */
+
+.s-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 34px;
+  padding: 5px 0;
+  border-bottom: 1px solid var(--hairline);
+}
+
+.s-row:last-child {
+  border-bottom: none;
+}
+
+.s-row-label {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.s-controls {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 10px;
+}
+
+.s-num-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  transition: opacity 0.15s ease;
+}
+
+/* Dim the interval input while its section polling is disabled. */
+.s-num-group.off {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.s-num {
+  width: 76px;
+  text-align: right;
+}
+
+.s-unit {
+  font-size: 11px;
+  color: var(--desc);
+}
+
+.s-hint {
+  margin: 6px 2px 0;
+  font-size: 11px;
+  color: var(--desc);
+}
+
+.s-footnote {
+  margin: 14px 2px 0;
+}
+
+/* ---------- footer (explicit save) ---------- */
+
+.s-footer {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid var(--hairline);
+}
+
+.s-dirty-hint {
+  font-size: 11px;
+  color: var(--desc);
+}
+
+/* ---------- toggle switch ---------- */
+
+/*
+ * iOS-style switch over a native checkbox: the checkbox keeps real focus and
+ * keyboard semantics but is painted onto the track through the sibling selector.
+ */
+.s-switch {
+  position: relative;
+  display: inline-flex;
+  flex: none;
+  cursor: pointer;
+}
+
+.s-switch-input {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+/* The global :focus-visible outline would draw on the invisible checkbox itself;
+   the track ring below is the single visible focus indicator. */
+.s-switch-input:focus-visible {
+  outline: none;
+}
+
+.s-switch-track {
+  position: relative;
+  width: 34px;
+  height: 18px;
+  border: 1px solid var(--inp-border);
+  border-radius: 9px;
+  background: var(--inp-bg);
+  transition:
+    background 0.15s ease,
+    border-color 0.15s ease;
+}
+
+/* Knob: 14px circle inset 2px, travelling 16px when on. The hairline keeps it
+   visible on light-theme off tracks (--vscode-input-background is near-white). */
+.s-switch-track::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--btn-fg);
+  box-shadow: inset 0 0 0 1px var(--inp-border);
+  transition:
+    transform 0.15s ease,
+    box-shadow 0.15s ease;
+}
+
+.s-switch-input:checked + .s-switch-track {
+  border-color: var(--btn-bg);
+  background: var(--btn-bg);
+}
+
+.s-switch-input:checked + .s-switch-track::after {
+  transform: translateX(16px);
+  box-shadow: none;
+}
+
+/* Focus ring lands on the track so the hidden checkbox stays keyboard-visible. */
+.s-switch-input:focus-visible + .s-switch-track {
+  outline: 1px solid var(--focus);
+  outline-offset: 2px;
+}

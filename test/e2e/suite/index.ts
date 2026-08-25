@@ -440,6 +440,115 @@ function quotaSnapshots(bridge: PanelBridge): QuotaSnapshotMessage[] {
     .map((message) => message.payload);
 }
 
+// ---------------------------------------------------------------------------
+// Settings panel webview bridge — same capture technique as the quota panel,
+// driven by the singleton settings page (openSettings).
+// ---------------------------------------------------------------------------
+
+let settingsBridge: PanelBridge | undefined;
+
+interface SettingsInitMessage {
+  settings: {
+    categories: Record<string, { enabled: boolean; intervalSeconds: number }>;
+    quotaRefreshSeconds: number;
+  };
+}
+
+function settingsInits(bridge: PanelBridge): SettingsInitMessage[] {
+  return bridge.outbound
+    .filter(
+      (message): message is PanelMessage & { payload: SettingsInitMessage } =>
+        message.type === "settingsInit" &&
+        typeof message.payload === "object" &&
+        message.payload !== null &&
+        typeof (message.payload as SettingsInitMessage).settings?.categories === "object",
+    )
+    .map((message) => message.payload);
+}
+
+function settingsSavedReplies(bridge: PanelBridge): { ok: boolean }[] {
+  return bridge.outbound
+    .filter(
+      (message): message is PanelMessage & { payload: { ok: boolean } } =>
+        message.type === "settingsSaved" &&
+        typeof message.payload === "object" &&
+        message.payload !== null &&
+        typeof (message.payload as { ok?: unknown }).ok === "boolean",
+    )
+    .map((message) => message.payload);
+}
+
+/**
+ * Poll a config value until it equals the expected value — config.update()
+ * resolving does NOT guarantee the extension host's in-memory snapshot has
+ * reloaded yet (the change broadcasts back asynchronously), so post-save
+ * assertions must poll instead of reading once.
+ */
+async function pollConfigValue(key: string, expected: unknown, message: string): Promise<void> {
+  await pollUntil(
+    () => vscode.workspace.getConfiguration("opencodeConfigManager").get(key) === expected,
+    10_000,
+    message,
+  );
+}
+
+/** Open (or reveal) the settings panel while capturing its bridge; asserts the boot handshake. */
+async function openSettingsPanelCaptured(commandId: string): Promise<PanelBridge> {
+  const windowApi = vscode.window as unknown as {
+    createWebviewPanel: (...args: unknown[]) => vscode.WebviewPanel;
+  };
+  const original = windowApi.createWebviewPanel;
+  let bridge: PanelBridge | undefined;
+  windowApi.createWebviewPanel = (...args: unknown[]) => {
+    const panel = original.apply(windowApi, args);
+    const webview = panel.webview as unknown as {
+      onDidReceiveMessage: (listener: (raw: unknown) => void, ...rest: unknown[]) => vscode.Disposable;
+      postMessage: (message: unknown) => Thenable<boolean>;
+    };
+    const capture: PanelBridge = {
+      deliver: (): void => {
+        throw new Error("onDidReceiveMessage listener was never registered for the captured settings panel");
+      },
+      outbound: [],
+    };
+    const originalOnDid = webview.onDidReceiveMessage;
+    webview.onDidReceiveMessage = (listener: (raw: unknown) => void, ...rest: unknown[]) => {
+      capture.deliver = (raw: unknown): void => {
+        listener(raw);
+      };
+      return originalOnDid.call(webview, listener, ...rest);
+    };
+    const originalPost = webview.postMessage.bind(webview);
+    webview.postMessage = (message: unknown) => {
+      capture.outbound.push(message as PanelMessage);
+      return originalPost(message);
+    };
+    bridge = capture;
+    return panel;
+  };
+  try {
+    await withTimeout(
+      Promise.resolve(vscode.commands.executeCommand(commandId)),
+      20_000,
+      `${commandId} must resolve once the settings panel webview is ready`,
+    );
+  } finally {
+    windowApi.createWebviewPanel = original;
+  }
+  // Reveal of an ALREADY-open singleton panel never calls createWebviewPanel — reuse
+  // the held bridge instead (the settingsInit re-push lands there).
+  if (bridge === undefined) {
+    assert.ok(settingsBridge, "settings panel reveal must reuse the previously captured bridge");
+    return settingsBridge;
+  }
+  assert.ok(
+    bridge.outbound.some((message) => message.type === "settingsInit"),
+    "captured settings panel must have received the settingsInit message",
+  );
+  settingsBridge = bridge;
+  return bridge;
+}
+
 /** Open (or reveal) the quota panel while capturing its bridge; asserts the boot handshake. */
 async function openQuotaPanelCaptured(commandId: string, arg?: unknown): Promise<PanelBridge> {
   const windowApi = vscode.window as unknown as {
@@ -1289,17 +1398,36 @@ function tests(): TestCase[] {
         const wvFile = path.join(presetsDir, `${WV_PRESET}.json`);
         const parked = `${wvFile}.parked`; // .parked ≠ *.json → not picked up as a preset
 
-        fs.writeFileSync(bootstrapFlag, "{}\n");
+        // A noteExternalRefresh (e.g. the activation warmup at +2s) can land BETWEEN
+        // the write and the debounced fire on fast machines, marking the bootstrap
+        // content as seen and eating the event. Retry with FRESH content — a real
+        // byte change always survives the content dedupe.
+        let bootstrapAttempt = 0;
+        const writeBootstrap = (): void => {
+          bootstrapAttempt += 1;
+          fs.writeFileSync(bootstrapFlag, `${JSON.stringify({ attempt: bootstrapAttempt })}\n`);
+        };
+        writeBootstrap();
         fs.writeFileSync(
           probePreset,
           JSON.stringify({ name: "e2e-watch-probe", appliedAt: "2999-01-01T00:00:00.000Z" }),
         );
         try {
-          await pollUntil(
-            async () => (await statusBarText()).includes("模板: e2e-watch-probe"),
-            5_000,
-            "watcher must pick up the externally created probe preset",
-          );
+          while (true) {
+            try {
+              await pollUntil(
+                async () => (await statusBarText()).includes("模板: e2e-watch-probe"),
+                4_000,
+                "watcher must pick up the externally created probe preset",
+              );
+              break;
+            } catch (error) {
+              if (bootstrapAttempt >= 3) {
+                throw error;
+              }
+              writeBootstrap();
+            }
+          }
         } finally {
           fs.rmSync(probePreset, { force: true });
           fs.rmSync(bootstrapFlag, { force: true });
@@ -1502,6 +1630,135 @@ function tests(): TestCase[] {
           10_000,
           "quotaConfigureMimo must re-init the panel focused on MiMo",
         );
+      },
+    },
+    {
+      name: "openSettings boots with defaults; save persists clamped config and re-syncs the page",
+      fn: async () => {
+        const bridge = await openSettingsPanelCaptured(CMD.openSettings);
+
+        // Boot payload reflects the package.json defaults: every category off at 30s, quota 30s.
+        const boot = settingsInits(bridge)[0];
+        assert.ok(boot, "captured settings panel must have received the settingsInit message");
+        for (const category of ["config", "presets", "backups", "models", "plugins"]) {
+          assert.deepEqual(
+            boot.settings.categories[category],
+            { enabled: false, intervalSeconds: 30 },
+            `${category} must carry the default setting`,
+          );
+        }
+        assert.equal(boot.settings.quotaRefreshSeconds, 30);
+
+        // Save a partial payload — the host normalizes (missing categories → defaults,
+        // out-of-range interval → clamp) and persists every key.
+        bridge.deliver({
+          type: "settingsSave",
+          payload: {
+            settings: {
+              categories: {
+                presets: { enabled: true, intervalSeconds: 45 },
+                backups: { enabled: true, intervalSeconds: 99_999 },
+              },
+              quotaRefreshSeconds: 0,
+            },
+          },
+        });
+        await pollUntil(
+          () => settingsSavedReplies(bridge).some((reply) => reply.ok),
+          10_000,
+          "save must produce a settingsSaved(ok:true) reply",
+        );
+        await pollConfigValue("autoRefresh.presets.enabled", true, "presets polling must be enabled");
+        await pollConfigValue("autoRefresh.presets.intervalSeconds", 45, "presets interval must persist as 45");
+        await pollConfigValue("autoRefresh.backups.intervalSeconds", 3600, "out-of-range interval must clamp to 3600");
+        await pollConfigValue("autoRefresh.models.enabled", false, "missing category falls back to its default");
+        await pollConfigValue("quota.refreshSeconds", 0, "quota refresh must be disabled (0)");
+
+        // Own-save config events must NOT echo settingsInit carrying PARTIAL state
+        // back to the page — mid-flight echoes were the visible "rapid edits revert"
+        // regression. Any echo that arrives (incl. a harmless post-settle no-op) must
+        // carry the FINAL persisted state, never a pre-save value.
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+        for (const echo of settingsInits(bridge).slice(1)) {
+          assert.equal(
+            echo.settings.categories.presets?.enabled,
+            true,
+            "a settingsInit echo must never carry stale pre-save state (rapid-edit revert regression)",
+          );
+          assert.equal(echo.settings.quotaRefreshSeconds, 0);
+        }
+
+        // EXTERNAL changes (Settings UI, hand-edited settings.json) still push a
+        // settingsInit so an open page never shows stale values.
+        const userConfig = vscode.workspace.getConfiguration("opencodeConfigManager");
+        await userConfig.update("autoRefresh.plugins.enabled", true, vscode.ConfigurationTarget.Global);
+        await pollUntil(
+          () => settingsInits(bridge).some((message) => message.settings.categories.plugins?.enabled === true),
+          10_000,
+          "external config change must push settingsInit to the open page",
+        );
+        await userConfig.update("autoRefresh.plugins.enabled", undefined, vscode.ConfigurationTarget.Global);
+        await pollConfigValue("autoRefresh.plugins.enabled", false, "external cleanup must remove the override");
+
+        // Persisted settings must actually RE-ARM the polling scheduler (the feature's
+        // whole purpose): enable the config section at a 1s interval and observe two
+        // ticks through the test-bridge counter.
+        const ticksBefore = (await vscode.commands.executeCommand(TEST_BRIDGE.autoRefreshTicks)) as number;
+        bridge.deliver({
+          type: "settingsSave",
+          payload: { settings: { categories: { config: { enabled: true, intervalSeconds: 1 } } } },
+        });
+        await pollUntil(
+          async () =>
+            ((await vscode.commands.executeCommand(TEST_BRIDGE.autoRefreshTicks)) as number) >= ticksBefore + 2,
+          20_000,
+          "enabled 1s polling must produce at least two scheduler ticks",
+        );
+
+        // VSCode user settings persist across e2e runs — restore the defaults so
+        // later runs (and later cases) start from a clean sheet. Defaults write as
+        // key REMOVALS (undefined), keeping settings.json free of redundant keys.
+        bridge.deliver({ type: "settingsSave", payload: { settings: { categories: {}, quotaRefreshSeconds: 30 } } });
+        await pollUntil(
+          () => settingsSavedReplies(bridge).length >= 3,
+          10_000,
+          "restore save must produce its settingsSaved reply",
+        );
+        await pollConfigValue("autoRefresh.presets.enabled", false, "restore must disable presets polling");
+        await pollConfigValue("autoRefresh.config.enabled", false, "restore must stop the 1s polling");
+        await pollConfigValue("quota.refreshSeconds", 30, "restore must reset the quota interval");
+      },
+    },
+    {
+      name: "settings panel reveal reuses the singleton and malformed messages are ignored",
+      fn: async () => {
+        assert.ok(settingsBridge, "settings panel must still be open from the previous step");
+        const bridge = await openSettingsPanelCaptured(CMD.openSettings);
+        assert.equal(bridge, settingsBridge, "reveal must reuse the captured singleton bridge");
+
+        // Malformed payloads are dropped without a reply or a crash…
+        bridge.deliver({ type: "settingsSave", payload: {} });
+        bridge.deliver({ type: "settingsSave" });
+        bridge.deliver({ type: "totally-unknown" });
+        // …and a well-formed save still works afterwards.
+        const repliesBefore = settingsSavedReplies(bridge).length;
+        bridge.deliver({
+          type: "settingsSave",
+          payload: { settings: { categories: { models: { enabled: true, intervalSeconds: 60 } } } },
+        });
+        await pollUntil(
+          () => settingsSavedReplies(bridge).length >= repliesBefore + 1,
+          10_000,
+          "valid save after garbage must still produce a reply",
+        );
+        await pollConfigValue("autoRefresh.models.enabled", true, "models polling must be enabled after the save");
+        bridge.deliver({ type: "settingsSave", payload: { settings: { categories: {}, quotaRefreshSeconds: 30 } } });
+        await pollUntil(
+          () => settingsSavedReplies(bridge).length >= repliesBefore + 2,
+          10_000,
+          "final restore must produce a reply",
+        );
+        await pollConfigValue("autoRefresh.models.enabled", false, "final restore must disable models polling");
       },
     },
     {

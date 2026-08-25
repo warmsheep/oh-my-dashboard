@@ -16,12 +16,19 @@ import {
 } from "../../src/core/types";
 import type { ModelOption as CoreModelOption } from "../../src/core/types";
 import {
+  AUTO_REFRESH_CATEGORIES,
+  AUTO_REFRESH_DEFAULT_INTERVAL_SECONDS,
+  AUTO_REFRESH_MAX_INTERVAL_SECONDS,
+  AUTO_REFRESH_MIN_INTERVAL_SECONDS,
+  autoRefreshCategoryLabel,
   balanceColor,
   deriveRemainingPercent,
   formatQuotaResetTime,
   KNOWN_AGENTS,
   KNOWN_CATEGORIES,
+  normalizeAutoRefreshSettings,
   QUOTA_PROVIDER_IDS,
+  QUOTA_REFRESH_DEFAULT_SECONDS,
   QUOTA_WINDOW_ORDER,
   quotaCurrencySymbol,
   quotaWindowLabel,
@@ -29,7 +36,7 @@ import {
   VARIANT_ORDER,
   VARIANTS,
 } from "../../src/shared/protocol";
-import type { ModelOption, QuotaWindow, Variant } from "../../src/shared/protocol";
+import type { AutoRefreshSettings, ModelOption, QuotaWindow, Variant } from "../../src/shared/protocol";
 
 const PROTOCOL_SRC = path.resolve(process.cwd(), "src/shared/protocol.ts");
 
@@ -147,5 +154,86 @@ describe("shared/protocol quota canon (single source of truth)", () => {
     expect(deriveRemainingPercent(w({ remainingPercent: 72, usedPercent: 28 }))).toBe(72);
     expect(deriveRemainingPercent(w({ usedPercent: 33.3 }))).toBe(66.7);
     expect(deriveRemainingPercent(w({}))).toBeNull();
+  });
+});
+
+describe("shared/protocol settings canon (auto-refresh contract)", () => {
+  it("AUTO_REFRESH_CATEGORIES is the canonical five-section order, duplicate-free", () => {
+    expect([...AUTO_REFRESH_CATEGORIES]).toEqual(["config", "presets", "backups", "models", "plugins"]);
+    expect(new Set(AUTO_REFRESH_CATEGORIES).size).toBe(AUTO_REFRESH_CATEGORIES.length);
+  });
+
+  it("autoRefreshCategoryLabel maps the five categories to Chinese section names", () => {
+    expect(autoRefreshCategoryLabel("config")).toBe("配置");
+    expect(autoRefreshCategoryLabel("presets")).toBe("模板");
+    expect(autoRefreshCategoryLabel("backups")).toBe("备份");
+    expect(autoRefreshCategoryLabel("models")).toBe("模型");
+    expect(autoRefreshCategoryLabel("plugins")).toBe("插件");
+  });
+
+  it("normalizeAutoRefreshSettings fills every default for empty/absent input", () => {
+    for (const source of [undefined, null, {}]) {
+      const settings = normalizeAutoRefreshSettings(source);
+      for (const category of AUTO_REFRESH_CATEGORIES) {
+        expect(settings.categories[category]).toEqual({
+          enabled: false,
+          intervalSeconds: AUTO_REFRESH_DEFAULT_INTERVAL_SECONDS,
+        });
+      }
+      expect(settings.quotaRefreshSeconds).toBe(QUOTA_REFRESH_DEFAULT_SECONDS);
+    }
+  });
+
+  it("normalizeAutoRefreshSettings keeps valid values and preserves disabled intervals", () => {
+    const settings = normalizeAutoRefreshSettings({
+      categories: { presets: { enabled: true, intervalSeconds: 45 }, backups: { enabled: false, intervalSeconds: 90 } },
+      quotaRefreshSeconds: 0,
+    });
+    expect(settings.categories.presets).toEqual({ enabled: true, intervalSeconds: 45 });
+    expect(settings.categories.backups).toEqual({ enabled: false, intervalSeconds: 90 });
+    expect(settings.quotaRefreshSeconds).toBe(0);
+  });
+
+  it("normalizeAutoRefreshSettings clamps out-of-range intervals and rounds fractions", () => {
+    const settings = normalizeAutoRefreshSettings({
+      categories: {
+        config: { enabled: true, intervalSeconds: 0 },
+        models: { enabled: true, intervalSeconds: 99_999 },
+        plugins: { enabled: true, intervalSeconds: 29.6 },
+      },
+      quotaRefreshSeconds: -5,
+    });
+    expect(settings.categories.config.intervalSeconds).toBe(AUTO_REFRESH_MIN_INTERVAL_SECONDS);
+    expect(settings.categories.models.intervalSeconds).toBe(AUTO_REFRESH_MAX_INTERVAL_SECONDS);
+    expect(settings.categories.plugins.intervalSeconds).toBe(30);
+    expect(settings.quotaRefreshSeconds).toBe(0);
+  });
+
+  it("normalizeAutoRefreshSettings degrades garbage input to defaults and strict-boolean enabled", () => {
+    const settings = normalizeAutoRefreshSettings({
+      categories: {
+        config: { enabled: "yes" as unknown, intervalSeconds: "fast" as unknown },
+        presets: { enabled: 1 as unknown, intervalSeconds: Number.NaN },
+      },
+      quotaRefreshSeconds: "off" as unknown,
+    });
+    expect(settings.categories.config).toEqual({
+      enabled: false,
+      intervalSeconds: AUTO_REFRESH_DEFAULT_INTERVAL_SECONDS,
+    });
+    expect(settings.categories.presets).toEqual({
+      enabled: false,
+      intervalSeconds: AUTO_REFRESH_DEFAULT_INTERVAL_SECONDS,
+    });
+    expect(settings.quotaRefreshSeconds).toBe(QUOTA_REFRESH_DEFAULT_SECONDS);
+  });
+
+  it("normalizeAutoRefreshSettings output is assignable to the AutoRefreshSettings contract", () => {
+    const settings: AutoRefreshSettings = normalizeAutoRefreshSettings({
+      categories: { plugins: { enabled: true, intervalSeconds: 60 } },
+      quotaRefreshSeconds: 120,
+    });
+    expect(settings.categories.plugins.enabled).toBe(true);
+    expect(settings.quotaRefreshSeconds).toBe(120);
   });
 });

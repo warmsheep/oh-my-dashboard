@@ -7,7 +7,7 @@ import { errorMessage } from "../core/errors";
 import { rewriteWebviewAssets } from "./assetRewrite";
 
 /** Which dist-webview HTML file a panel host serves (one bundle per webview page). */
-export type WebviewPage = "index.html" | "quota.html";
+export type WebviewPage = "index.html" | "quota.html" | "settings.html";
 
 /**
  * Read a dist-webview HTML document. Returns undefined (after logging) when the

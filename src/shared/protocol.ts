@@ -80,7 +80,11 @@ export type ExtToWebview =
   /** Fresh quota data — manual refresh results and auto-refresh cycle pushes share this channel. */
   | { type: "quotaSnapshot"; payload: { snapshot: QuotaSnapshot } }
   /** Reply to quotaSaveMimoCookie: ok carries no error, !ok carries the friendly Chinese message. */
-  | { type: "quotaConfigSaved"; payload: { ok: boolean; error?: string } };
+  | { type: "quotaConfigSaved"; payload: { ok: boolean; error?: string } }
+  /** Settings page boot payload AND external-change push (Settings-UI edits re-sync the open page). */
+  | { type: "settingsInit"; payload: SettingsInitPayload }
+  /** Reply to settingsSave: ok carries no error, !ok carries the friendly Chinese message. */
+  | { type: "settingsSaved"; payload: { ok: boolean; error?: string } };
 
 export type WebviewToExt =
   | { type: "ready" }
@@ -89,7 +93,9 @@ export type WebviewToExt =
   | { type: "save"; payload: { name: string; description?: string; rows: PresetRow[]; apply: boolean } }
   /** Manual refresh from the quota panel; providerId omitted (or undefined) means refresh all providers. */
   | { type: "quotaRefresh"; payload?: { providerId?: QuotaProviderId } }
-  | { type: "quotaSaveMimoCookie"; payload: { cookie: string } };
+  | { type: "quotaSaveMimoCookie"; payload: { cookie: string } }
+  /** Persist the whole settings form (idempotent full-object save; values re-normalized host-side). */
+  | { type: "settingsSave"; payload: { settings: AutoRefreshSettings } };
 
 // ---------------------------------------------------------------------------
 // Quota panel contract — data shapes consumed by BOTH the extension host
@@ -201,4 +207,99 @@ export function formatQuotaResetTime(iso: string | null): string {
   }
   const date = new Date(iso);
   return Number.isNaN(date.getTime()) ? "重置时间未知" : `重置于 ${date.toLocaleString("zh-CN", { hour12: false })}`;
+}
+
+// ---------------------------------------------------------------------------
+// Settings page contract — per-category tree auto-refresh polling plus the
+// Coding Plan refresh interval. Consumed by BOTH the extension host
+// (settingsStore read/write, autoRefreshScheduler, settingsPanelHost) and the
+// settings webview bundle (settings.html), so the shapes, bounds and the
+// normalizer live here as the single source of truth.
+// ---------------------------------------------------------------------------
+
+/** Tree sections that support timed auto-refresh polling, in settings-page display order. */
+export const AUTO_REFRESH_CATEGORIES = ["config", "presets", "backups", "models", "plugins"] as const;
+export type AutoRefreshCategory = (typeof AUTO_REFRESH_CATEGORIES)[number];
+
+export interface AutoRefreshCategorySetting {
+  enabled: boolean;
+  /** Polling interval in seconds (1–3600); kept even when disabled so the input survives toggling. */
+  intervalSeconds: number;
+}
+
+export interface AutoRefreshSettings {
+  categories: Record<AutoRefreshCategory, AutoRefreshCategorySetting>;
+  /** Coding Plan auto-refresh interval in seconds; 0 disables the cycle (quota.refreshSeconds semantics). */
+  quotaRefreshSeconds: number;
+}
+
+export const AUTO_REFRESH_DEFAULT_INTERVAL_SECONDS = 30;
+export const AUTO_REFRESH_MIN_INTERVAL_SECONDS = 1;
+export const AUTO_REFRESH_MAX_INTERVAL_SECONDS = 3600;
+export const QUOTA_REFRESH_DEFAULT_SECONDS = 30;
+export const QUOTA_REFRESH_MIN_SECONDS = 0;
+export const QUOTA_REFRESH_MAX_SECONDS = 3600;
+
+const AUTO_REFRESH_CATEGORY_LABELS: Record<AutoRefreshCategory, string> = {
+  config: "配置",
+  presets: "模板",
+  backups: "备份",
+  models: "模型",
+  plugins: "插件",
+};
+
+/** Chinese display label of an auto-refresh category (settings page rows). */
+export function autoRefreshCategoryLabel(category: AutoRefreshCategory): string {
+  return AUTO_REFRESH_CATEGORY_LABELS[category];
+}
+
+/** Loose input accepted by the normalizer: config get() results and webview payloads alike. */
+export interface AutoRefreshSettingsSource {
+  categories?: Partial<Record<AutoRefreshCategory, { enabled?: unknown; intervalSeconds?: unknown }>>;
+  quotaRefreshSeconds?: unknown;
+}
+
+function clampSeconds(value: unknown, min: number, max: number, fallback: number): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return fallback;
+  }
+  return Math.min(max, Math.max(min, Math.round(value)));
+}
+
+/**
+ * Validate + clamp arbitrary settings input into a well-formed AutoRefreshSettings:
+ * non-numeric intervals fall back to defaults, out-of-range values clamp to the
+ * bounds, enabled is strictly boolean. The same normalizer guards the host-side
+ * message parse, the config read, and the webview form state.
+ */
+export function normalizeAutoRefreshSettings(
+  source: AutoRefreshSettingsSource | null | undefined,
+): AutoRefreshSettings {
+  const categories = {} as Record<AutoRefreshCategory, AutoRefreshCategorySetting>;
+  for (const category of AUTO_REFRESH_CATEGORIES) {
+    const raw = source?.categories?.[category];
+    categories[category] = {
+      enabled: raw?.enabled === true,
+      intervalSeconds: clampSeconds(
+        raw?.intervalSeconds,
+        AUTO_REFRESH_MIN_INTERVAL_SECONDS,
+        AUTO_REFRESH_MAX_INTERVAL_SECONDS,
+        AUTO_REFRESH_DEFAULT_INTERVAL_SECONDS,
+      ),
+    };
+  }
+  return {
+    categories,
+    quotaRefreshSeconds: clampSeconds(
+      source?.quotaRefreshSeconds,
+      QUOTA_REFRESH_MIN_SECONDS,
+      QUOTA_REFRESH_MAX_SECONDS,
+      QUOTA_REFRESH_DEFAULT_SECONDS,
+    ),
+  };
+}
+
+/** Boot payload of the settings page; also pushed when the settings change outside the page. */
+export interface SettingsInitPayload {
+  settings: AutoRefreshSettings;
 }

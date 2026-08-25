@@ -29,6 +29,7 @@ export const CMD = {
   openModelsFile: "opencode.openModelsFile",
   quotaRefresh: "opencode.quotaRefresh",
   quotaConfigureMimo: "opencode.quotaConfigureMimo",
+  openSettings: "opencode.openSettings",
 } as const;
 
 export const VIEW = {
@@ -39,7 +40,9 @@ export const VIEW = {
 export const TEST_BRIDGE = {
   presetEditorPostMessage: "opencode._test.presetEditorPostMessage",
   quotaPanelPostMessage: "opencode._test.quotaPanelPostMessage",
+  settingsPanelPostMessage: "opencode._test.settingsPanelPostMessage",
   statusBarText: "opencode._test.statusBarText",
+  autoRefreshTicks: "opencode._test.autoRefreshTicks",
 } as const;
 
 export const CONFIG_SECTION = "opencodeConfigManager";
@@ -48,6 +51,8 @@ export const CONFIG_SECTION = "opencodeConfigManager";
 export const CONFIG_KEY = {
   configDirOverride: "opencodeConfigManager.configDirOverride",
   quotaRefreshSeconds: "opencodeConfigManager.quota.refreshSeconds",
+  /** Prefix of the 10 per-category autoRefresh.* keys — affectsConfiguration() matches prefixes. */
+  autoRefresh: "opencodeConfigManager.autoRefresh",
 } as const;
 
 /**
@@ -64,6 +69,9 @@ export const PRESET_EDITOR_VIEW_TYPE = "opencode.presetEditor";
 
 /** Webview panel view type of the quota settings page (quota.html bundle). */
 export const QUOTA_PANEL_VIEW_TYPE = "opencode.quotaPanel";
+
+/** Webview panel view type of the extension settings page (settings.html bundle). */
+export const SETTINGS_PANEL_VIEW_TYPE = "opencode.settingsPanel";
 
 /**
  * Preset name validation is owned by src/core/pathSafety.ts (single source for the

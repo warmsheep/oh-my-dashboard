@@ -2,7 +2,7 @@
   "name": "opencode-config-manager",
   "displayName": "OpenCode 配置管理器",
   "description": "管理 opencode / oh-my-opencode 配置：结构化修改、备份、恢复、命名模板一键切换",
-  "version": "0.24.0",
+  "version": "0.26.0",
   "publisher": "local",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -154,10 +154,21 @@
       {
         "command": "opencode.renameBackup",
         "title": "重命名备份"
+      },
+      {
+        "command": "opencode.openSettings",
+        "title": "打开设置",
+        "category": "OpenCode"
       }
     ],
     "menus": {
       "view/title": [
+        {
+          "command": "opencode.openSettings",
+          "when": "view == opencodeExplorer",
+          "group": "navigation@98",
+          "icon": "$(gear)"
+        },
         {
           "command": "opencode.refreshTree",
           "when": "view == opencodeExplorer",
@@ -324,7 +335,79 @@
           "type": "number",
           "default": 30,
           "minimum": 0,
+          "maximum": 3600,
+          "order": 30,
           "description": "状态栏 Coding Plan 额度自动刷新间隔（秒，0 = 关闭自动刷新）"
+        },
+        "opencodeConfigManager.autoRefresh.config.enabled": {
+          "type": "boolean",
+          "default": false,
+          "order": 40,
+          "description": "「配置」分区定时自动刷新（开启后按间隔轮询刷新树视图；文件变更监听不受影响）"
+        },
+        "opencodeConfigManager.autoRefresh.config.intervalSeconds": {
+          "type": "number",
+          "default": 30,
+          "minimum": 1,
+          "maximum": 3600,
+          "order": 41,
+          "description": "「配置」分区自动刷新间隔（秒）"
+        },
+        "opencodeConfigManager.autoRefresh.presets.enabled": {
+          "type": "boolean",
+          "default": false,
+          "order": 42,
+          "description": "「模板」分区定时自动刷新（开启后按间隔轮询刷新树视图；文件变更监听不受影响）"
+        },
+        "opencodeConfigManager.autoRefresh.presets.intervalSeconds": {
+          "type": "number",
+          "default": 30,
+          "minimum": 1,
+          "maximum": 3600,
+          "order": 43,
+          "description": "「模板」分区自动刷新间隔（秒）"
+        },
+        "opencodeConfigManager.autoRefresh.backups.enabled": {
+          "type": "boolean",
+          "default": false,
+          "order": 44,
+          "description": "「备份」分区定时自动刷新（开启后按间隔轮询刷新树视图；文件变更监听不受影响）"
+        },
+        "opencodeConfigManager.autoRefresh.backups.intervalSeconds": {
+          "type": "number",
+          "default": 30,
+          "minimum": 1,
+          "maximum": 3600,
+          "order": 45,
+          "description": "「备份」分区自动刷新间隔（秒）"
+        },
+        "opencodeConfigManager.autoRefresh.models.enabled": {
+          "type": "boolean",
+          "default": false,
+          "order": 46,
+          "description": "「模型」分区定时自动刷新（开启后按间隔轮询刷新树视图；文件变更监听不受影响）"
+        },
+        "opencodeConfigManager.autoRefresh.models.intervalSeconds": {
+          "type": "number",
+          "default": 30,
+          "minimum": 1,
+          "maximum": 3600,
+          "order": 47,
+          "description": "「模型」分区自动刷新间隔（秒）"
+        },
+        "opencodeConfigManager.autoRefresh.plugins.enabled": {
+          "type": "boolean",
+          "default": false,
+          "order": 48,
+          "description": "「插件」分区定时自动刷新（开启后按间隔轮询刷新树视图；文件变更监听不受影响）"
+        },
+        "opencodeConfigManager.autoRefresh.plugins.intervalSeconds": {
+          "type": "number",
+          "default": 30,
+          "minimum": 1,
+          "maximum": 3600,
+          "order": 49,
+          "description": "「插件」分区自动刷新间隔（秒）"
         }
       }
     }

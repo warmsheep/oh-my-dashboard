@@ -10,7 +10,13 @@ import {
   quotaShouldPauseAutoRefresh,
 } from "../core/quotaService";
 import type { QuotaSegmentColor, QuotaService, QuotaSnapshot, QuotaWindow } from "../core/quotaService";
-import { deriveRemainingPercent, quotaWindowLabel } from "../shared/protocol";
+import {
+  deriveRemainingPercent,
+  QUOTA_REFRESH_DEFAULT_SECONDS,
+  QUOTA_REFRESH_MAX_SECONDS,
+  QUOTA_REFRESH_MIN_SECONDS,
+  quotaWindowLabel,
+} from "../shared/protocol";
 import type { QuotaProviderId } from "../shared/protocol";
 
 export interface QuotaStatusBarDeps {
@@ -181,7 +187,13 @@ export function createQuotaStatusBar(deps: QuotaStatusBarDeps): QuotaStatusBar {
 
   const refreshSeconds = (): number => {
     const value = vscode.workspace.getConfiguration(CONFIG_SECTION).get<number>(CONFIG_LEAF.quotaRefreshSeconds);
-    return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 30;
+    // Shared bounds keep the status bar in lockstep with the settings page's
+    // normalized view — a hand-edited out-of-range value must not make the two
+    // disagree about the effective interval (or whether 0 = off).
+    if (typeof value !== "number" || !Number.isFinite(value)) {
+      return QUOTA_REFRESH_DEFAULT_SECONDS;
+    }
+    return Math.min(QUOTA_REFRESH_MAX_SECONDS, Math.max(QUOTA_REFRESH_MIN_SECONDS, value));
   };
 
   // Self-scheduling setTimeout chain (NOT setInterval): each next tick is armed only after the
