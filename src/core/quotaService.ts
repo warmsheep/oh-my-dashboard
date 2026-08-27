@@ -4,6 +4,7 @@ import * as path from "node:path";
 
 import {
   balanceColor,
+  defaultQuotaVisibility,
   deriveRemainingPercent,
   QUOTA_PROVIDER_IDS,
   QUOTA_WINDOW_ORDER,
@@ -16,6 +17,7 @@ import type {
   QuotaProviderId,
   QuotaSegmentColor,
   QuotaSnapshot,
+  QuotaVisibility,
   QuotaWindow,
   QuotaWindowKind,
 } from "../shared/protocol";
@@ -199,6 +201,34 @@ function readMimoCookie(quotaConfigPath: string, fsMod: typeof defaultFs): strin
     return normalizeMimoCookie(cookie);
   } catch {
     return null;
+  }
+}
+
+/**
+ * Validate the raw `statusBar` block of quota.json into a full visibility record:
+ * only a strict `false` hides a provider — absent keys, `true`, or garbage all
+ * mean visible (a hand-edited file must never silently hide the whole bar).
+ * Pure; shared by the read path and the save path's merge.
+ */
+export function normalizeQuotaVisibility(source: unknown): QuotaVisibility {
+  const visibility = defaultQuotaVisibility();
+  if (source && typeof source === "object" && !Array.isArray(source)) {
+    for (const id of QUOTA_PROVIDER_IDS) {
+      if ((source as Record<string, unknown>)[id] === false) {
+        visibility[id] = false;
+      }
+    }
+  }
+  return visibility;
+}
+
+/** Read the persisted status-bar visibility from quota.json; missing/corrupt → all visible. */
+export function readQuotaStatusBarVisibility(quotaConfigPath: string, fsMod: typeof defaultFs): QuotaVisibility {
+  try {
+    const parsed: unknown = JSON.parse(fsMod.readFileSync(quotaConfigPath, "utf8"));
+    return normalizeQuotaVisibility((parsed as { statusBar?: unknown })?.statusBar);
+  } catch {
+    return defaultQuotaVisibility();
   }
 }
 
@@ -529,14 +559,20 @@ export class QuotaService {
     this.gate = new RequestGate(Math.max(1, opts.maxConcurrentRequests ?? 2));
   }
 
-  async fetchAll(): Promise<QuotaSnapshot> {
-    // One auth.json read shared by all four providers (fetchProvider re-reads for solo runs).
+  /**
+   * Fetch providers; `providerIds` narrows the round to a subset (status-bar
+   * gating: hidden providers skip auto-refresh while the quota page is closed).
+   * Undefined = all providers, in canonical order.
+   */
+  async fetchAll(providerIds?: readonly QuotaProviderId[]): Promise<QuotaSnapshot> {
+    // One auth.json read shared by all fetched providers (fetchProvider re-reads for solo runs).
     // Every provider fetch goes through the gate: at most `maxConcurrentRequests`
     // requests exist at once, however many callers (timer cycle, panel buttons) fire.
-    const entries = readAuthEntries(this.authFilePath, this.fsMod);
-    const providers = await Promise.all(
-      QUOTA_PROVIDER_IDS.map((id) => this.gate.run(() => this.fetchProviderWith(id, entries))),
+    const ids = (providerIds ?? QUOTA_PROVIDER_IDS).filter((id) =>
+      (QUOTA_PROVIDER_IDS as readonly string[]).includes(id),
     );
+    const entries = readAuthEntries(this.authFilePath, this.fsMod);
+    const providers = await Promise.all(ids.map((id) => this.gate.run(() => this.fetchProviderWith(id, entries))));
     return { providers, fetchedAt: this.now().toISOString() };
   }
 
@@ -822,17 +858,15 @@ export class QuotaService {
   }
 
   /**
-   * Persist the MiMo dashboard cookie into the configured quota.json (<configDir>/quota.json):
-   * normalize (invalid → throws `MIMO_COOKIE_INVALID`), merge into the existing document
-   * (corrupt content heals to a fresh object; unreadable-but-existing file aborts with
-   * `CONFIG_UNREADABLE`), mkdir the parent dir on demand, atomic write, then best-effort
-   * chmod 0600 (credential; no-op where unsupported). Requires quotaConfigPath to be set.
+   * Shared quota.json mutation (single writer for every quota.json write path):
+   * read-for-edit (absent → ""; unreadable-but-existing → `CONFIG_UNREADABLE`),
+   * parse with corrupt-heal, apply the mutator, mkdir the parent dir on demand,
+   * atomic write, then re-apply chmod 0600 — writeFileAtomic renames a fresh tmp
+   * file, which would otherwise drop the credential-bearing file back to the
+   * umask default (0644). Owner-only permission is best-effort; platforms
+   * without POSIX modes ignore it.
    */
-  saveMimoCookie(cookie: string): void {
-    const normalized = normalizeMimoCookie(cookie);
-    if (normalized === null) {
-      throw new Error("MIMO_COOKIE_INVALID");
-    }
+  private mutateQuotaConfig(mutate: (root: Record<string, unknown>) => void): void {
     let root: Record<string, unknown> = {};
     const existing = this.readQuotaConfigTextForEdit();
     if (existing !== "") {
@@ -845,18 +879,33 @@ export class QuotaService {
         // Extension-owned file: corrupt content is healed, not preserved.
       }
     }
-    const mimo =
-      root.mimo && typeof root.mimo === "object" && !Array.isArray(root.mimo)
-        ? { ...(root.mimo as Record<string, unknown>) }
-        : {};
-    root.mimo = { ...mimo, cookie: normalized };
+    mutate(root);
     this.fsMod.mkdirSync(path.dirname(this.quotaConfigPath), { recursive: true });
     writeFileAtomic(this.quotaConfigPath, `${JSON.stringify(root, null, 2)}\n`, this.fsMod);
     try {
       this.fsMod.chmodSync(this.quotaConfigPath, 0o600);
     } catch {
-      // Owner-only permission is best-effort; platforms without POSIX modes ignore it.
+      // See JSDoc: best-effort owner-only mode.
     }
+  }
+
+  /**
+   * Persist the MiMo dashboard cookie into the configured quota.json (<configDir>/quota.json):
+   * normalize (invalid → throws `MIMO_COOKIE_INVALID`), then a merge-write that preserves
+   * unknown keys. Requires quotaConfigPath to be set.
+   */
+  saveMimoCookie(cookie: string): void {
+    const normalized = normalizeMimoCookie(cookie);
+    if (normalized === null) {
+      throw new Error("MIMO_COOKIE_INVALID");
+    }
+    this.mutateQuotaConfig((root) => {
+      const mimo =
+        root.mimo && typeof root.mimo === "object" && !Array.isArray(root.mimo)
+          ? { ...(root.mimo as Record<string, unknown>) }
+          : {};
+      root.mimo = { ...mimo, cookie: normalized };
+    });
   }
 
   /** readTextForEdit contract: "" only when genuinely absent; unreadable → CONFIG_UNREADABLE. */
@@ -866,5 +915,28 @@ export class QuotaService {
     } catch {
       throw new Error("CONFIG_UNREADABLE");
     }
+  }
+
+  /** Current status-bar visibility (memory-cheap read; callers cache the result). */
+  readStatusBarVisibility(): QuotaVisibility {
+    if (!this.quotaConfigPath) {
+      return defaultQuotaVisibility();
+    }
+    return readQuotaStatusBarVisibility(this.quotaConfigPath, this.fsMod);
+  }
+
+  /**
+   * Persist one provider's status-bar visibility into quota.json: merge-write that
+   * preserves the MiMo cookie and unknown keys. Returns the normalized full
+   * visibility record.
+   */
+  saveQuotaStatusBarProvider(providerId: QuotaProviderId, visible: boolean): QuotaVisibility {
+    let visibility: QuotaVisibility = defaultQuotaVisibility();
+    this.mutateQuotaConfig((root) => {
+      visibility = normalizeQuotaVisibility(root.statusBar);
+      visibility[providerId] = visible;
+      root.statusBar = visibility;
+    });
+    return visibility;
   }
 }

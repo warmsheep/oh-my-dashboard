@@ -11,6 +11,7 @@ import {
   NETWORK_TIMEOUT_MESSAGE,
   NETWORK_UNAVAILABLE_MESSAGE,
   normalizeMimoCookie,
+  normalizeQuotaVisibility,
   providerHasDisplayData,
   QUOTA_PAUSE_AFTER_STREAK,
   quotaCycleFailed,
@@ -18,6 +19,7 @@ import {
   QuotaService,
   quotaShouldPauseAutoRefresh,
   quotaSnapshotDegraded,
+  readQuotaStatusBarVisibility,
   spliceStaleProviders,
   STALE_PROVIDER_MAX_AGE_MS,
   type ProviderQuota,
@@ -1417,6 +1419,177 @@ describe("QuotaService.saveMimoCookie", () => {
       }
     },
   );
+});
+
+describe("normalizeQuotaVisibility", () => {
+  it("absent/garbage source yields all-visible", () => {
+    const allVisible = { kimi: true, glm: true, mimo: true, deepseek: true };
+    expect(normalizeQuotaVisibility(undefined)).toEqual(allVisible);
+    expect(normalizeQuotaVisibility(null)).toEqual(allVisible);
+    expect(normalizeQuotaVisibility("nope")).toEqual(allVisible);
+    expect(normalizeQuotaVisibility([false, false])).toEqual(allVisible);
+    expect(normalizeQuotaVisibility({})).toEqual(allVisible);
+  });
+
+  it("only a strict false hides; true/absent/invalid values stay visible", () => {
+    expect(normalizeQuotaVisibility({ kimi: false })).toEqual({ kimi: false, glm: true, mimo: true, deepseek: true });
+    expect(normalizeQuotaVisibility({ kimi: "false", glm: 0 })).toEqual({
+      kimi: true,
+      glm: true,
+      mimo: true,
+      deepseek: true,
+    });
+    expect(normalizeQuotaVisibility({ unknown: false, mimo: false })).toEqual({
+      kimi: true,
+      glm: true,
+      mimo: false,
+      deepseek: true,
+    });
+  });
+});
+
+describe("readQuotaStatusBarVisibility", () => {
+  it("reads the persisted sparse map; missing file/keys/corrupt content → all visible", () => {
+    const dir = tmpDir();
+    const file = path.join(dir, "quota.json");
+
+    expect(readQuotaStatusBarVisibility(file, fs)).toEqual({ kimi: true, glm: true, mimo: true, deepseek: true });
+
+    fs.writeFileSync(file, JSON.stringify({ statusBar: { kimi: false, glm: true } }));
+    expect(readQuotaStatusBarVisibility(file, fs)).toEqual({ kimi: false, glm: true, mimo: true, deepseek: true });
+
+    fs.writeFileSync(file, "{ corrupt");
+    expect(readQuotaStatusBarVisibility(file, fs)).toEqual({ kimi: true, glm: true, mimo: true, deepseek: true });
+
+    fs.writeFileSync(file, JSON.stringify({ mimo: { cookie: "x" } }));
+    expect(readQuotaStatusBarVisibility(file, fs)).toEqual({ kimi: true, glm: true, mimo: true, deepseek: true });
+  });
+});
+
+describe("QuotaService.saveQuotaStatusBarProvider", () => {
+  function visSvc(dir: string): QuotaService {
+    return new QuotaService({
+      authFilePath: path.join(dir, "auth.json"),
+      quotaConfigPath: path.join(dir, "nested", "quota.json"),
+    });
+  }
+
+  it("persists the toggle while preserving the MiMo cookie and unknown keys; returns the full record", () => {
+    const dir = tmpDir();
+    fs.mkdirSync(path.join(dir, "nested"));
+    const file = path.join(dir, "nested", "quota.json");
+    fs.writeFileSync(
+      file,
+      JSON.stringify({
+        other: 1,
+        mimo: { cookie: "api-platform_serviceToken=abc; userId=42" },
+        statusBar: { glm: false },
+      }),
+    );
+    const svc = visSvc(dir);
+
+    const visibility = svc.saveQuotaStatusBarProvider("kimi", false);
+
+    expect(visibility).toEqual({ kimi: false, glm: false, mimo: true, deepseek: true });
+    const saved = JSON.parse(fs.readFileSync(file, "utf8"));
+    expect(saved.other).toBe(1);
+    expect(saved.mimo.cookie).toBe("api-platform_serviceToken=abc; userId=42");
+    expect(saved.statusBar).toEqual({ kimi: false, glm: false, mimo: true, deepseek: true });
+  });
+
+  it("creating the file fresh (mkdir on demand) and toggling back to visible round-trips", () => {
+    const dir = tmpDir();
+    const svc = visSvc(dir);
+
+    expect(svc.saveQuotaStatusBarProvider("mimo", false).mimo).toBe(false);
+    expect(svc.saveQuotaStatusBarProvider("mimo", true)).toEqual({
+      kimi: true,
+      glm: true,
+      mimo: true,
+      deepseek: true,
+    });
+    const saved = JSON.parse(fs.readFileSync(path.join(dir, "nested", "quota.json"), "utf8"));
+    expect(saved.statusBar).toEqual({ kimi: true, glm: true, mimo: true, deepseek: true });
+  });
+
+  it.skipIf(process.platform === "win32")("keeps the credential file owner-only (0600) after the atomic write", () => {
+    const dir = tmpDir();
+    const svc = visSvc(dir);
+
+    svc.saveQuotaStatusBarProvider("kimi", false);
+
+    const file = path.join(dir, "nested", "quota.json");
+    expect(fs.statSync(file).mode & 0o777).toBe(0o600);
+  });
+
+  it("heals a corrupt existing quota.json and readStatusBarVisibility sees the saved value", () => {
+    const dir = tmpDir();
+    fs.mkdirSync(path.join(dir, "nested"));
+    const file = path.join(dir, "nested", "quota.json");
+    fs.writeFileSync(file, "{ not json");
+    const svc = visSvc(dir);
+
+    svc.saveQuotaStatusBarProvider("glm", false);
+
+    expect(readQuotaStatusBarVisibility(file, fs).glm).toBe(false);
+  });
+
+  it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+    "throws CONFIG_UNREADABLE when quota.json exists but cannot be read",
+    () => {
+      const dir = tmpDir();
+      fs.mkdirSync(path.join(dir, "nested"));
+      const file = path.join(dir, "nested", "quota.json");
+      fs.writeFileSync(file, "{}");
+      fs.chmodSync(file, 0o000);
+      const svc = visSvc(dir);
+
+      try {
+        expect(() => svc.saveQuotaStatusBarProvider("kimi", false)).toThrow("CONFIG_UNREADABLE");
+      } finally {
+        fs.chmodSync(file, 0o600);
+      }
+    },
+  );
+});
+
+describe("QuotaService.fetchAll — provider subset", () => {
+  it("fetches only the requested providers; empty subset issues zero requests", async () => {
+    const dir = tmpDir();
+    fs.writeFileSync(
+      path.join(dir, "auth.json"),
+      JSON.stringify({
+        "kimi-for-coding": { type: "api", key: "k" },
+        "zhipuai-coding-plan": { type: "api", key: "g" },
+      }),
+    );
+    const urls: string[] = [];
+    const svc = new QuotaService({
+      authFilePath: path.join(dir, "auth.json"),
+      fetchFn: (input) => {
+        urls.push(String(input));
+        return Promise.resolve(jsonRes({ usage: { limit: 10, remaining: 5 } }));
+      },
+    });
+
+    const subset = await svc.fetchAll(["kimi"]);
+    expect(subset.providers.map((provider) => provider.providerId)).toEqual(["kimi"]);
+
+    const empty = await svc.fetchAll([]);
+    expect(empty.providers).toEqual([]);
+    expect(urls.every((url) => url.includes("api.kimi.com"))).toBe(true);
+  });
+
+  it("unknown ids in the subset are dropped", async () => {
+    const dir = tmpDir();
+    const svc = new QuotaService({
+      authFilePath: path.join(dir, "auth.json"),
+      fetchFn: () => Promise.resolve(jsonRes({})),
+    });
+
+    const snapshot = await svc.fetchAll(["nonsense" as QuotaProviderId, "deepseek"]);
+    expect(snapshot.providers.map((provider) => provider.providerId)).toEqual(["deepseek"]);
+  });
 });
 
 describe("deriveRemainingPercent", () => {
