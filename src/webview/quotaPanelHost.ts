@@ -24,10 +24,15 @@ export interface OpenQuotaPanelOptions {
 let openPanel: vscode.WebviewPanel | undefined;
 let openPanelReady = false;
 let openPanelFocus: QuotaProviderId | undefined;
+// Liveness probe for the open panel (see armLivenessProbe); module-level because
+// the panel itself is a singleton.
+let probeTimer: ReturnType<typeof setTimeout> | undefined;
+/** A booted-once page must answer quotaPing within this window or it is treated as dead. */
+const PROBE_TIMEOUT_MS = 1_500;
 
 /** Register the quota panel entry commands (status-bar click + MiMo config shortcut). */
 export function registerQuotaPanel(ctx: vscode.ExtensionContext, deps: QuotaPanelDeps): void {
-  // Same contract as commands.ts run(): a ready-timeout rejection must surface as a
+  // Same contract as commands.ts run(): an unexpected open failure must surface as a
   // Chinese message instead of escaping to the command system's English error log.
   const openSafely = (options: OpenQuotaPanelOptions = {}): Promise<void> =>
     openQuotaPanel(ctx, deps, options).catch((error: unknown) => {
@@ -53,25 +58,70 @@ export function postMessageToQuotaPanel(message: unknown): boolean {
   return true;
 }
 
+function clearLivenessProbe(): void {
+  if (probeTimer !== undefined) {
+    clearTimeout(probeTimer);
+    probeTimer = undefined;
+  }
+}
+
+/**
+ * Probe the open panel's webview and replace it when the page died silently.
+ * Long-idle code-server sessions can evict the webview's iframe (service-worker
+ * restarts, browser tab freezing) WITHOUT firing onDidDispose — the singleton
+ * then points at a tab whose JS context is gone: every later click only revealed
+ * a dead page that can never render data again. A booted-once page answers
+ * quotaPing with pong; silence for PROBE_TIMEOUT_MS means the panel is a zombie
+ * and is disposed + recreated fresh (the identity guard in onDidDispose keeps
+ * the replacement safe against the async dispose event).
+ */
+function armLivenessProbe(ctx: vscode.ExtensionContext, deps: QuotaPanelDeps, options: OpenQuotaPanelOptions): void {
+  const panel = openPanel;
+  if (panel === undefined) {
+    return;
+  }
+  clearLivenessProbe();
+  void panel.webview.postMessage({ type: "quotaPing" });
+  probeTimer = setTimeout(() => {
+    probeTimer = undefined;
+    if (openPanel !== panel) {
+      return; // already replaced or closed while the probe was pending
+    }
+    deps.log("quotaPanel: 面板页面无响应，已重建额度面板");
+    panel.dispose();
+    createQuotaPanel(ctx, deps, options);
+  }, PROBE_TIMEOUT_MS);
+}
+
 export async function openQuotaPanel(
   ctx: vscode.ExtensionContext,
   deps: QuotaPanelDeps,
   options: OpenQuotaPanelOptions = {},
 ): Promise<void> {
-  // A reveal while the webview is still booting must buffer the focus into the
-  // pending ready handler — posting before ready would silently drop the message.
   if (openPanel) {
     openPanel.reveal();
-    if (options.focusProvider !== undefined) {
-      openPanelFocus = options.focusProvider;
+    if (openPanelReady) {
       // Re-init is idempotent on the page side; carrying focusProvider re-targets the group.
-      if (openPanelReady) {
-        void openPanel.webview.postMessage(quotaInitMessage(deps, options.focusProvider));
+      if (options.focusProvider !== undefined) {
+        openPanelFocus = options.focusProvider;
       }
+      void openPanel.webview.postMessage(quotaInitMessage(deps, options.focusProvider));
+      // Clicking the quota surface always refreshes: it revives the auto-refresh
+      // circuit breaker (paused after transport-failure streaks while idle) the
+      // moment one manual cycle succeeds, healing a status bar stuck on "?".
+      void deps.statusBar.refresh();
+      armLivenessProbe(ctx, deps, options);
+    } else if (options.focusProvider !== undefined) {
+      // Still booting: buffer the focus into the pending ready handler — posting
+      // before ready would silently drop the message.
+      openPanelFocus = options.focusProvider;
     }
     return;
   }
+  createQuotaPanel(ctx, deps, options);
+}
 
+function createQuotaPanel(ctx: vscode.ExtensionContext, deps: QuotaPanelDeps, options: OpenQuotaPanelOptions): void {
   const html = readWebviewHtml(ctx, "quota.html", deps.log);
   if (html === undefined) {
     void vscode.window.showErrorMessage(
@@ -91,33 +141,25 @@ export async function openQuotaPanel(
   openPanelFocus = options.focusProvider;
   ctx.subscriptions.push(panel);
 
-  let resolveReady: () => void;
-  let rejectReady: (error: Error) => void;
-  let readySettled = false;
-  let readyTimer: ReturnType<typeof setTimeout> | undefined;
-  const ready = new Promise<void>((resolve, reject) => {
-    const settle = (fn: () => void): void => {
-      if (readySettled) {
-        return;
-      }
-      readySettled = true;
-      if (readyTimer !== undefined) {
-        clearTimeout(readyTimer);
-      }
-      fn();
-    };
-    resolveReady = () => settle(resolve);
-    rejectReady = (error: Error) => settle(() => reject(error));
-  });
-  // Timeout disposes the blank panel and clears the singleton (via onDidDispose):
-  // a webview that never booted must not squat on openPanel — later clicks would
-  // only reveal a dead tab forever. The user can simply click again to retry.
-  readyTimer = setTimeout(() => {
-    // settle() clears this timer, so firing here means the promise was unsettled —
-    // rejectReady settles it and the dispose below reaches the cleanup path.
-    rejectReady(new Error("额度面板初始化超时"));
-    panel.dispose();
+  // Boot watchdog, diagnostics ONLY. Opening is deliberately decoupled from the
+  // webview handshake: on degraded networks (code-server ships webview resources
+  // through the browser link / service worker) the page boots arbitrarily slowly,
+  // and the old await-ready + dispose-on-timeout design silently undid every click
+  // until the network healed — the status bar showed "?" and clicks did nothing.
+  // The tab now stays open and initializes whenever ready eventually lands; closing
+  // the tab resets the singleton via onDidDispose, so a later click opens fresh.
+  let bootWatchdog: ReturnType<typeof setTimeout> | undefined = setTimeout(() => {
+    bootWatchdog = undefined;
+    if (!openPanelReady && openPanel === panel) {
+      deps.log("quotaPanel: 额度面板 20 秒内未完成初始化（面板保持打开，就绪后自动加载）");
+    }
   }, 20_000);
+  const clearWatchdog = (): void => {
+    if (bootWatchdog !== undefined) {
+      clearTimeout(bootWatchdog);
+      bootWatchdog = undefined;
+    }
+  };
 
   const post = (message: unknown): void => {
     void panel.webview.postMessage(message);
@@ -156,11 +198,14 @@ export async function openQuotaPanel(
     switch (message.kind) {
       case "ready":
         openPanelReady = true;
+        clearWatchdog();
         post(quotaInitMessage(deps, openPanelFocus));
-        resolveReady();
         // Fresh data right after boot: the snapshot event subscription below forwards
         // the cycle result to the page without the user clicking anything.
         void runFullRefresh();
+        break;
+      case "pong":
+        clearLivenessProbe();
         break;
       case "refresh":
         void (message.providerId === undefined ? runFullRefresh() : runSoloRefresh(message.providerId));
@@ -191,6 +236,10 @@ export async function openQuotaPanel(
   });
 
   panel.onDidDispose(() => {
+    // Cancel any pending probe FIRST: the user closing the tab must never be
+    // "answered" 1.5s later by resurrecting a fresh panel they just closed.
+    clearLivenessProbe();
+    clearWatchdog();
     listener.dispose();
     snapshotSubscription.dispose();
     if (openPanel === panel) {
@@ -198,11 +247,11 @@ export async function openQuotaPanel(
       openPanelReady = false;
       openPanelFocus = undefined;
     }
-    resolveReady();
   });
 
   panel.webview.html = buildWebviewHtml(panel.webview, html, distWebviewUri);
-  await ready;
+  // No await on the handshake: the tab is already open, and the ready handler above
+  // drives init + first refresh whenever the webview finishes booting.
 }
 
 function quotaInitMessage(
@@ -217,7 +266,10 @@ function quotaInitMessage(
 }
 
 type ParsedMessage =
-  { kind: "ready" } | { kind: "refresh"; providerId?: QuotaProviderId } | { kind: "saveCookie"; cookie: string };
+  | { kind: "ready" }
+  | { kind: "pong" }
+  | { kind: "refresh"; providerId?: QuotaProviderId }
+  | { kind: "saveCookie"; cookie: string };
 
 /**
  * Validate an incoming webview message against the protocol shape. Returns
@@ -232,6 +284,8 @@ function parseMessage(raw: unknown): ParsedMessage | undefined {
   switch (msg.type) {
     case "ready":
       return { kind: "ready" };
+    case "pong":
+      return { kind: "pong" };
     case "quotaRefresh": {
       const providerId = (msg.payload as { providerId?: unknown } | undefined)?.providerId;
       if (providerId === undefined) {

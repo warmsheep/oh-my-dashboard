@@ -256,6 +256,9 @@ export default function QuotaApp() {
         setSnapshot(msg.payload.snapshot);
         setPending(new Set());
         setStaleError(null);
+      } else if (msg.type === "quotaPing") {
+        // Liveness probe: answering proves this page's JS is still running.
+        postToHost({ type: "pong" });
       } else if (msg.type === "quotaConfigSaved") {
         setSavingCookie(false);
         if (msg.payload.ok) {

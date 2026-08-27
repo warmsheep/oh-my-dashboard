@@ -81,6 +81,8 @@ export type ExtToWebview =
   | { type: "quotaSnapshot"; payload: { snapshot: QuotaSnapshot } }
   /** Reply to quotaSaveMimoCookie: ok carries no error, !ok carries the friendly Chinese message. */
   | { type: "quotaConfigSaved"; payload: { ok: boolean; error?: string } }
+  /** Liveness probe for the open quota panel: a booted-once page must answer with `pong`. */
+  | { type: "quotaPing" }
   /** Settings page boot payload AND external-change push (Settings-UI edits re-sync the open page). */
   | { type: "settingsInit"; payload: SettingsInitPayload }
   /** Reply to settingsSave: ok carries no error, !ok carries the friendly Chinese message. */
@@ -94,6 +96,8 @@ export type WebviewToExt =
   /** Manual refresh from the quota panel; providerId omitted (or undefined) means refresh all providers. */
   | { type: "quotaRefresh"; payload?: { providerId?: QuotaProviderId } }
   | { type: "quotaSaveMimoCookie"; payload: { cookie: string } }
+  /** Answer to quotaPing — proves the webview's JS context is still alive. */
+  | { type: "pong" }
   /** Persist the whole settings form (idempotent full-object save; values re-normalized host-side). */
   | { type: "settingsSave"; payload: { settings: AutoRefreshSettings } };
 
