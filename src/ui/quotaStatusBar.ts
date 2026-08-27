@@ -22,12 +22,14 @@ import type {
 } from "../core/quotaService";
 import {
   deriveRemainingPercent,
+  filterQuotaSnapshotByVisibility,
+  QUOTA_PROVIDER_IDS,
   QUOTA_REFRESH_DEFAULT_SECONDS,
   QUOTA_REFRESH_MAX_SECONDS,
   QUOTA_REFRESH_MIN_SECONDS,
   quotaWindowLabel,
 } from "../shared/protocol";
-import type { QuotaProviderId } from "../shared/protocol";
+import type { QuotaProviderId, QuotaVisibility } from "../shared/protocol";
 
 export interface QuotaStatusBarDeps {
   quotaService: QuotaService;
@@ -35,13 +37,21 @@ export interface QuotaStatusBarDeps {
 }
 
 /**
- * Status-bar surface consumed by the quota panel host: cached snapshot access,
+ * Status-bar surface consumed by the manager panel host: cached snapshot access,
  * single-flight refresh cycles, per-provider refresh with merge-back, and a
- * snapshot event the panel subscribes to while visible.
+ * snapshot event the panel subscribes to while visible. Refresh rounds are
+ * gated by per-provider visibility (hidden providers fetch only while the
+ * panel is open); the cached snapshot itself always carries every provider's
+ * last-known data.
  */
 export interface QuotaStatusBar extends vscode.Disposable {
   refresh(): Promise<void>;
   getSnapshot(): QuotaSnapshot | null;
+  getVisibility(): QuotaVisibility;
+  /** Swap the visibility record (after a persisted toggle) and re-render immediately. */
+  setVisibility(visibility: QuotaVisibility): void;
+  /** Panel visibility gate: while open, refresh rounds include hidden providers; the false→true transition kicks one round. */
+  setPanelVisible(visible: boolean): void;
   refreshProvider(providerId: QuotaProviderId): Promise<QuotaSnapshot | null>;
   onSnapshot: vscode.Event<QuotaSnapshot>;
 }
@@ -129,6 +139,10 @@ export function createQuotaStatusBar(deps: QuotaStatusBarDeps): QuotaStatusBar {
   let refreshPromise: Promise<void> | null = null;
   let failureStreak = 0;
   let disposed = false;
+  /** In-memory visibility cache (read once; the panel toggles update it via setVisibility). */
+  let visibility = deps.quotaService.readStatusBarVisibility();
+  /** While the manager panel is open, refresh rounds include hidden providers (the quota view shows all groups). */
+  let panelVisible = false;
   /** Last successful provider results, feeding spliceStaleProviders on failed cycles. */
   const lastGood = new Map<QuotaProviderId, LastGoodProvider>();
 
@@ -137,6 +151,9 @@ export function createQuotaStatusBar(deps: QuotaStatusBarDeps): QuotaStatusBar {
       lastGood.set(provider.providerId, { provider, fetchedAtMs: Date.now() });
     }
   };
+
+  /** Providers a refresh round should fetch: visible ones, plus hidden ones while the panel is open. */
+  const refreshTargets = (): QuotaProviderId[] => QUOTA_PROVIDER_IDS.filter((id) => visibility[id] || panelVisible);
 
   // One status-bar item per (provider, window) segment — VSCode items are single-colored, so
   // per-window colors require separate items. Higher priority sits further left (right-aligned).
@@ -148,15 +165,24 @@ export function createQuotaStatusBar(deps: QuotaStatusBarDeps): QuotaStatusBar {
     if (disposed) {
       return;
     }
-    const segments = snapshot ? formatQuotaBar(snapshot).segments : [];
-    const palette = segmentColors();
-    const rows = segments.length > 0 ? segments : [{ text: "Coding Plan", color: "neutral" as const }];
+    // Only VISIBLE providers reach the bar; the neutral "Coding Plan" fallback stays
+    // available for visible-but-unconfigured sets (click-to-configure affordance).
+    // When the user hid every provider the bar disappears entirely.
+    const visibleSnapshot = snapshot === null ? null : filterQuotaSnapshotByVisibility(snapshot, visibility);
+    const segments = visibleSnapshot === null ? [] : formatQuotaBar(visibleSnapshot).segments;
+    const anyVisible = QUOTA_PROVIDER_IDS.some((id) => visibility[id]);
+    const rows = !anyVisible
+      ? []
+      : segments.length > 0
+        ? segments
+        : [{ text: "Coding Plan", color: "neutral" as const }];
     const tooltip =
       segments.length === 0 && !snapshot
         ? "点击查询 Coding Plan 剩余额度"
-        : snapshot
-          ? tooltipMarkdown(snapshot)
+        : visibleSnapshot
+          ? tooltipMarkdown(visibleSnapshot)
           : undefined;
+    const palette = segmentColors();
     const base = 90 + rows.length;
     if (items.length !== rows.length) {
       for (const existing of items) {
@@ -179,40 +205,76 @@ export function createQuotaStatusBar(deps: QuotaStatusBarDeps): QuotaStatusBar {
   };
 
   // Single-flight via a shared promise: concurrent triggers (timer tick, panel refresh-all,
-  // config change) all await the SAME in-flight cycle instead of silently returning early.
+  // config change) whose targets are already covered by the in-flight cycle await the SAME
+  // promise instead of starting duplicates. EXPANDED targets (panel just opened / a hidden
+  // provider toggled on while a narrower round is in flight) are the one exception —
+  // coalescing them would leave the new providers unrefreshed for a full interval, so they
+  // start a concurrent round that takes over the shared slot (token ownership: only the
+  // newest cycle may clear the slot and re-arm; the RequestGate still bounds real network
+  // concurrency and per-provider merges are last-write-wins, so overlap is safe).
+  let inFlightTargets: ReadonlySet<QuotaProviderId> = new Set();
+  let cycleToken = 0;
+
+  const startCycle = (targets: readonly QuotaProviderId[]): Promise<void> => {
+    cycleToken += 1;
+    const token = cycleToken;
+    inFlightTargets = new Set(targets);
+    const cycle = (async () => {
+      try {
+        const fresh = await deps.quotaService.fetchAll(targets);
+        for (const provider of fresh.providers) {
+          rememberGoodProvider(provider);
+        }
+        // Streak/breaker evaluation runs on the FETCHED slice only — unfetched
+        // (hidden) providers in the cached snapshot must not mask real failures.
+        const fetchedSlice = spliceStaleProviders(fresh, lastGood, Date.now());
+        const failed = quotaCycleFailed(fetchedSlice);
+        failureStreak = failed ? failureStreak + 1 : 0;
+        if (!failed) {
+          pausedLogged = false;
+        }
+        let merged = snapshot ?? { providers: [], fetchedAt: fresh.fetchedAt };
+        for (const provider of fetchedSlice.providers) {
+          merged = mergeProviderSnapshot(merged, provider, fresh.fetchedAt);
+        }
+        snapshot = merged;
+        render();
+        if (!disposed) {
+          snapshotEmitter.fire(snapshot);
+        }
+      } catch (error) {
+        failureStreak += 1;
+        deps.log(`quota: 刷新失败: ${errorMessage(error)}`);
+      } finally {
+        if (token === cycleToken) {
+          refreshPromise = null;
+          inFlightTargets = new Set();
+          scheduleNext();
+        }
+      }
+    })();
+    refreshPromise = cycle;
+    return cycle;
+  };
+
   const refresh = (): Promise<void> => {
     if (disposed) {
       return Promise.resolve();
     }
-    if (!refreshPromise) {
-      refreshPromise = (async () => {
-        try {
-          const fresh = await deps.quotaService.fetchAll();
-          for (const provider of fresh.providers) {
-            rememberGoodProvider(provider);
-          }
-          // Stale-while-error overlay keeps the bar numeric (with a ~ marker) instead
-          // of "?" while the network is down; errors are retained for the breaker.
-          snapshot = spliceStaleProviders(fresh, lastGood, Date.now());
-          const failed = quotaCycleFailed(snapshot);
-          failureStreak = failed ? failureStreak + 1 : 0;
-          if (!failed) {
-            pausedLogged = false;
-          }
-          render();
-          if (!disposed) {
-            snapshotEmitter.fire(snapshot);
-          }
-        } catch (error) {
-          failureStreak += 1;
-          deps.log(`quota: 刷新失败: ${errorMessage(error)}`);
-        } finally {
-          refreshPromise = null;
-          scheduleNext();
-        }
-      })();
+    const targets = refreshTargets();
+    if (targets.length === 0) {
+      // Empty-target guard BEFORE any promise exists: an early-returning cycle body
+      // would skip the finally that clears refreshPromise, and the settled promise
+      // would squat on the slot forever — every later round silently coalesced into
+      // a no-op. Here: no network, no snapshot overwrite, no event; the cycle stays
+      // armed for when visibility or the panel changes.
+      scheduleNext();
+      return Promise.resolve();
     }
-    return refreshPromise;
+    if (refreshPromise !== null && targets.every((id) => inFlightTargets.has(id))) {
+      return refreshPromise;
+    }
+    return startCycle(targets);
   };
 
   const refreshSeconds = (): number => {
@@ -292,8 +354,13 @@ export function createQuotaStatusBar(deps: QuotaStatusBarDeps): QuotaStatusBar {
         lastGood,
         Date.now(),
       );
-      failureStreak = 0;
-      pausedLogged = false;
+      // Only a genuinely successful solo fetch heals the breaker: provider fetchers
+      // resolve error-carrying results on dead networks, and those must not re-arm
+      // the paused auto cycle (threadpool discipline).
+      if (provider.error === null) {
+        failureStreak = 0;
+        pausedLogged = false;
+      }
       scheduleNext();
       render();
     } catch (error) {
@@ -310,10 +377,19 @@ export function createQuotaStatusBar(deps: QuotaStatusBarDeps): QuotaStatusBar {
   // paused) and the bar may sit degraded. One cycle on focus heals both the moment
   // the network is back (success resets the streak). Degraded-only + a 10s floor
   // keep rapid alt-tabbing from pumping requests into a still-dead network.
+  // Degradation is judged among VISIBLE providers — a hidden provider's failure
+  // must not yank the window into refreshing on every focus.
   const FOCUS_REFRESH_MIN_INTERVAL_MS = 10_000;
   let lastFocusRefreshAt = 0;
   const focusListener = vscode.window.onDidChangeWindowState((state) => {
-    if (!state.focused || disposed || !quotaSnapshotDegraded(snapshot)) {
+    if (!state.focused || disposed) {
+      return;
+    }
+    const degraded =
+      snapshot === null
+        ? QUOTA_PROVIDER_IDS.some((id) => visibility[id])
+        : quotaSnapshotDegraded(filterQuotaSnapshotByVisibility(snapshot, visibility));
+    if (!degraded) {
       return;
     }
     const now = Date.now();
@@ -324,6 +400,22 @@ export function createQuotaStatusBar(deps: QuotaStatusBarDeps): QuotaStatusBar {
     void refresh();
   });
 
+  const setVisibility = (next: QuotaVisibility): void => {
+    visibility = next;
+    render();
+  };
+
+  const setPanelVisible = (visible: boolean): void => {
+    const wasVisible = panelVisible;
+    panelVisible = visible;
+    // Returning to the panel after it sat hidden behind other tabs: hidden providers
+    // went unrefreshed the whole time, so land one full round instead of waiting
+    // for the next scheduled tick (single-flight coalesces any overlap).
+    if (visible && !wasVisible && !disposed) {
+      void refresh();
+    }
+  };
+
   render();
   // Delayed first cycle: activation overlaps other extensions' startup IO (language
   // servers, git) — the gate already bounds concurrency, and a few seconds' delay
@@ -333,6 +425,9 @@ export function createQuotaStatusBar(deps: QuotaStatusBarDeps): QuotaStatusBar {
   return {
     refresh,
     getSnapshot: () => snapshot,
+    getVisibility: () => visibility,
+    setVisibility,
+    setPanelVisible,
     refreshProvider,
     onSnapshot: snapshotEmitter.event,
     dispose(): void {
