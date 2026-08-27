@@ -17,3 +17,4 @@ dist/test-e2e/**
 !dist-webview/**
 build/**
 .omo/**
+.codegraph
