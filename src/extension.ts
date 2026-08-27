@@ -21,13 +21,12 @@ import { registerCommands } from "./ui/commands";
 import { createQuotaStatusBar } from "./ui/quotaStatusBar";
 import { readAutoRefreshSettings, writeAutoRefreshSettings } from "./ui/settingsStore";
 import { createStatusBar } from "./ui/statusbar";
-import { notifyPresetEditorsModelsChanged, postMessageToPresetEditor } from "./webview/presetEditorHost";
-import { postMessageToQuotaPanel, registerQuotaPanel } from "./webview/quotaPanelHost";
 import {
-  postMessageToSettingsPanel,
-  pushSettingsToOpenPanel,
-  registerSettingsPanel,
-} from "./webview/settingsPanelHost";
+  postMessageToManagerPanel,
+  pushSettingsToManagerPanel,
+  registerManagerPanel,
+} from "./webview/managerPanelHost";
+import { notifyPresetEditorsModelsChanged, postMessageToPresetEditor } from "./webview/presetEditorHost";
 
 export function activate(ctx: vscode.ExtensionContext): void {
   const cfg = vscode.workspace.getConfiguration(CONFIG_SECTION);
@@ -106,7 +105,13 @@ export function activate(ctx: vscode.ExtensionContext): void {
   });
   const quotaStatusBar = createQuotaStatusBar({ quotaService, log });
   ctx.subscriptions.push(quotaStatusBar);
-  registerQuotaPanel(ctx, { quotaService, statusBar: quotaStatusBar, log });
+  registerManagerPanel(ctx, {
+    quotaService,
+    statusBar: quotaStatusBar,
+    readSettings: readAutoRefreshSettings,
+    saveSettings: writeAutoRefreshSettings,
+    log,
+  });
 
   // Watcher-driven refresh (debounced + content-deduped inside WatchManager). Kept separate
   // from `refreshAll` below so the watcher path does not re-open the explicit-refresh
@@ -241,15 +246,9 @@ export function activate(ctx: vscode.ExtensionContext): void {
   autoRefreshScheduler.reconfigure();
   ctx.subscriptions.push(autoRefreshScheduler);
 
-  registerSettingsPanel(ctx, {
-    readSettings: readAutoRefreshSettings,
-    saveSettings: writeAutoRefreshSettings,
-    log,
-  });
-
   // autoRefresh.* keys re-arm the polling scheduler; EXTERNAL settings changes
-  // (standard Settings UI, hand edits) re-sync the open settings page — own-save
-  // echoes are suppressed inside pushSettingsToOpenPanel so they can't revert
+  // (standard Settings UI, hand edits) re-sync the open manager page — own-save
+  // echoes are suppressed inside pushSettingsToManagerPanel so they can't revert
   // in-flight edits. quota.refreshSeconds is covered by quotaStatusBar's own
   // listener for re-scheduling; here it only refreshes the page display.
   const settingsListener = vscode.workspace.onDidChangeConfiguration((event) => {
@@ -258,7 +257,7 @@ export function activate(ctx: vscode.ExtensionContext): void {
       autoRefreshScheduler.reconfigure();
     }
     if (autoRefreshChanged || event.affectsConfiguration(CONFIG_KEY.quotaRefreshSeconds)) {
-      pushSettingsToOpenPanel(readAutoRefreshSettings);
+      pushSettingsToManagerPanel(readAutoRefreshSettings);
     }
   });
   ctx.subscriptions.push(settingsListener);
@@ -299,17 +298,19 @@ export function activate(ctx: vscode.ExtensionContext): void {
   // constants.ts). Deliberately NOT in package.json contributes (never user-visible
   // in the command palette) and registered only under ExtensionMode.Test:
   // (a) round-trip postMessage into the open preset editor panel,
-  // (b) read the preset status-bar text. See test/e2e/suite.
+  // (b) round-trip postMessage into the open manager panel (quota/settings legacy
+  //     aliases kept: both now forward into the same merged singleton),
+  // (c) read the preset status-bar text. See test/e2e/suite.
   if (ctx.extensionMode === vscode.ExtensionMode.Test) {
     ctx.subscriptions.push(
       vscode.commands.registerCommand(TEST_BRIDGE.presetEditorPostMessage, (name: string, message: unknown): boolean =>
         postMessageToPresetEditor(name, message),
       ),
       vscode.commands.registerCommand(TEST_BRIDGE.quotaPanelPostMessage, (message: unknown): boolean =>
-        postMessageToQuotaPanel(message),
+        postMessageToManagerPanel(message),
       ),
       vscode.commands.registerCommand(TEST_BRIDGE.settingsPanelPostMessage, (message: unknown): boolean =>
-        postMessageToSettingsPanel(message),
+        postMessageToManagerPanel(message),
       ),
       vscode.commands.registerCommand(TEST_BRIDGE.statusBarText, (): string => statusbar.text()),
       vscode.commands.registerCommand(TEST_BRIDGE.autoRefreshTicks, (): number => autoRefreshTicks),
