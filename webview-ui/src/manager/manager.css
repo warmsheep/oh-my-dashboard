@@ -1,0 +1,61 @@
+/* Manager page shell: a tab bar plus two always-mounted page bodies (CSS toggle —
+   unmounting would drop drafts, pending markers, and the pong probe answer). */
+
+.mtabs {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid var(--hairline);
+  margin-bottom: 18px;
+}
+
+.mtab {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--desc);
+  font: inherit;
+  font-size: var(--vscode-font-size, 13px);
+  padding: 8px 16px 9px;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+}
+
+.mtab:hover {
+  color: var(--fg);
+  background: rgba(128, 128, 128, 0.18);
+}
+
+.mtab[aria-selected="true"] {
+  color: var(--fg);
+  border-bottom-color: var(--btn-bg);
+  font-weight: 600;
+}
+
+.mtab-body[hidden] {
+  display: none;
+}
+
+/* Quota tab: snapshot freshness line (the page title lives on the manager shell). */
+.qpage-meta {
+  margin: 0 0 12px;
+  color: var(--desc);
+  font-size: var(--vscode-font-size, 13px);
+}
+
+/* Quota-view status-bar toggle (reuses the settings page's .s-switch track styles,
+   imported by the manager entry alongside this file). position:relative is REQUIRED:
+   .s-switch-input is an absolute inset:0 overlay, and without a positioned containing
+   block every group's invisible checkbox stacks over the whole page — the topmost
+   (last group) swallows ALL clicks. */
+.qstatus-toggle {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  white-space: nowrap;
+  color: var(--desc);
+  font-size: var(--vscode-font-size, 13px);
+  cursor: pointer;
+}
