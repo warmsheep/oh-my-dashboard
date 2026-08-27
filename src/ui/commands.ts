@@ -6,9 +6,17 @@ import * as vscode from "vscode";
 
 import { CMD, FILE_TEMPLATES, MODEL_ID_PATTERN, presetNameError } from "../constants";
 import type { BackupService } from "../core/backupService";
-import { addLocalModel, LOCAL_MODELS_FILE, removeLocalModel } from "../core/builtinModels";
+import {
+  addLocalModel,
+  BUILTIN_PROVIDERS,
+  ensureLocalModelsFile,
+  LOCAL_MODELS_FILE,
+  removeLocalModel,
+  updateLocalModelsFromCatalog,
+} from "../core/builtinModels";
 import type { ConfigStore } from "../core/configStore";
 import { errorMessage } from "../core/errors";
+import { fetchModelCatalogs } from "../core/modelCatalog";
 import type { PresetService } from "../core/presetService";
 import type { BackupEntry, Variant } from "../core/types";
 import { BACKUP_REASON_LABELS, KNOWN_AGENTS, KNOWN_CATEGORIES, VARIANTS } from "../core/types";
@@ -124,6 +132,9 @@ export function registerCommands(ctx: vscode.ExtensionContext, deps: ExtensionDe
     ),
     vscode.commands.registerCommand(CMD.deleteModel, (arg?: unknown) =>
       run(deps, "删除模型失败", () => deleteModel(deps, arg)),
+    ),
+    vscode.commands.registerCommand(CMD.updateModelCatalog, () =>
+      run(deps, "更新模型清单失败", () => updateModelCatalog(deps)),
     ),
     vscode.commands.registerCommand(CMD.openModelsFile, () =>
       run(deps, "打开模型清单失败", () => openModelsFile(deps)),
@@ -848,4 +859,46 @@ async function openModelsFile(deps: ExtensionDeps): Promise<void> {
     return;
   }
   await vscode.window.showTextDocument(vscode.Uri.file(filePath));
+}
+
+/**
+ * Fetch the latest per-provider model lists from models.dev (opencode's catalog)
+ * and merge them into the local models.json. Scope = the providers already present
+ * in the current model list; user-added custom models always survive the merge.
+ */
+async function updateModelCatalog(deps: ExtensionDeps): Promise<void> {
+  const currentProviders = [...new Set(deps.configStore.listModels().map((model) => model.provider))];
+  // Local models.json empty (fresh install before the activation seed landed, or
+  // offline first run): union in the builtin provider allowlist — the merged tree
+  // list alone would only cover opencode.json's providers. With a populated local
+  // catalog the scope stays exactly the current providers (deletions stick).
+  const localCatalogEmpty = ensureLocalModelsFile(deps.configStore.configDir).length === 0;
+  const providerIds = localCatalogEmpty ? [...new Set([...currentProviders, ...BUILTIN_PROVIDERS])] : currentProviders;
+  const fetched = await vscode.window.withProgress(
+    { location: vscode.ProgressLocation.Window, title: "正在从 models.dev 获取最新模型清单…" },
+    () => fetchModelCatalogs(providerIds),
+  );
+  const unknown = providerIds.filter((id) => !fetched.providers.has(id));
+  // Persist only when the catalog returned something: an all-unknown result must
+  // not re-serialize (stripping JSONC comments from) a hand-edited models.json.
+  const result =
+    fetched.providers.size > 0 || fetched.deprecatedIds.size > 0
+      ? updateLocalModelsFromCatalog(deps.configStore.configDir, fetched.providers, fetched.deprecatedIds)
+      : null;
+  deps.refreshAll();
+  const unknownNote = unknown.length > 0 ? `（models.dev 无可收录模型：${unknown.join("、")}）` : "";
+  const parts = [
+    ...(result && result.addedIds.length > 0 ? [`新增 ${result.addedIds.length} 个`] : []),
+    ...(result && result.refreshedIds.length > 0 ? [`刷新 ${result.refreshedIds.length} 个`] : []),
+    ...(result && result.prunedIds.length > 0 ? [`清理 ${result.prunedIds.length} 个已弃用`] : []),
+  ];
+  // Branch on the persisted outcome, not on providers.size: a deprecated-only fetch
+  // (every listed model retired) still changes the file via pruning.
+  const summary =
+    result === null
+      ? "models.dev 未收录当前清单中的任何供应商，模型清单未变更"
+      : parts.length === 0
+        ? "模型清单已是最新"
+        : `模型清单已更新：${parts.join("，")}`;
+  void vscode.window.showInformationMessage(`${summary}${unknownNote}`);
 }

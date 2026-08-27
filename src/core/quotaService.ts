@@ -215,8 +215,9 @@ function errorProvider(base: ProviderQuota, message: string): ProviderQuota {
  * "Unexpected end of JSON input" SyntaxError on empty/truncated bodies (half-broken
  * connections, gateways answering 200 with no payload). Those must surface as
  * friendly, actionable messages instead of leaking into status-bar tooltips.
+ * Shared by other core fetchers (model catalog) — single source of body handling.
  */
-async function readJsonBody(res: Response): Promise<unknown> {
+export async function readJsonBody(res: Response): Promise<unknown> {
   const text = await res.text();
   if (text.trim() === "") {
     throw new Error("接口返回了空响应");
@@ -238,8 +239,9 @@ export const NETWORK_UNAVAILABLE_MESSAGE = "网络不可用，请检查网络连
  * Chinese messages. AbortSignal.timeout aborts the fetch promise but cannot cancel a
  * getaddrinfo already parked on the libuv threadpool, so offline DNS hangs surface here.
  * API-level messages (HTTP codes, envelope errors, readJsonBody messages) pass through.
+ * Shared by other core fetchers (model catalog) — single source of error mapping.
  */
-function friendlyRequestError(error: unknown): string {
+export function friendlyRequestError(error: unknown): string {
   if (!(error instanceof Error)) {
     return String(error);
   }

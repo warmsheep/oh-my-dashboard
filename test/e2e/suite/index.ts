@@ -587,7 +587,7 @@ async function openQuotaPanelCaptured(commandId: string, arg?: unknown): Promise
     await withTimeout(
       Promise.resolve(vscode.commands.executeCommand(commandId, arg)),
       20_000,
-      `${commandId} must resolve once the quota panel webview is ready`,
+      `${commandId} must resolve once the quota panel tab is open`,
     );
   } finally {
     windowApi.createWebviewPanel = original;
@@ -598,8 +598,12 @@ async function openQuotaPanelCaptured(commandId: string, arg?: unknown): Promise
     assert.ok(quotaBridge, "quota panel reveal must reuse the previously captured bridge");
     return quotaBridge;
   }
-  assert.ok(
-    bridge.outbound.some((message) => message.type === "quotaInit"),
+  // Opening is decoupled from the webview handshake (bad-network regression): the
+  // command resolves at panel creation, so the boot handshake lands asynchronously.
+  const captured = bridge;
+  await pollUntil(
+    () => captured.outbound.some((message) => message.type === "quotaInit"),
+    20_000,
     "captured quota panel must have received the quotaInit message",
   );
   quotaBridge = bridge;
@@ -716,13 +720,87 @@ function tests(): TestCase[] {
           `added model ${id} not found in models.json`,
         );
         await executeDeleteModel(id);
-        const afterDelete = JSON.parse(fs.readFileSync(modelsFile, "utf8")) as {
+        // No bundled catalog anymore: removing the LAST entry deletes models.json
+        // (an empty local catalog is represented as file absence, never re-seeded).
+        assert.equal(fs.existsSync(modelsFile), false, "deleting the last model must remove models.json");
+      },
+    },
+    {
+      name: "updateModelCatalog merges fetched provider models, custom models survive",
+      fn: async () => {
+        const modelsFile = path.join(configDir, "models.json");
+        // A user-added custom model on a provider the fake catalog also returns: it must
+        // survive the merge (the catalog cannot know about hand-added models). Also
+        // seed a stale deprecated id to verify the update prunes it.
+        const customId = "deepseek/e2e-custom-model";
+        const staleId = "openai/gpt-4";
+        await withTimeout(
+          Promise.resolve(vscode.commands.executeCommand(CMD.addModel, customId)),
+          10_000,
+          "addModel must resolve",
+        );
+        await withTimeout(
+          Promise.resolve(vscode.commands.executeCommand(CMD.addModel, staleId)),
+          10_000,
+          "addModel (stale) must resolve",
+        );
+
+        // Intercept global fetch (the command resolves it at call time) with a minimal
+        // models.dev-shaped payload: deepseek + openai, including deprecated and
+        // non-tool entries that must never reach models.json.
+        const originalFetch = globalThis.fetch;
+        const fetchUrls: string[] = [];
+        globalThis.fetch = (async (url: string | URL | Request): Promise<Response> => {
+          fetchUrls.push(String(url));
+          return new Response(
+            JSON.stringify({
+              deepseek: {
+                id: "deepseek",
+                models: {
+                  "deepseek-v5-e2e": { name: "DeepSeek V5（e2e）", tool_call: true },
+                  "deepseek-chat": { name: "DeepSeek Chat", tool_call: true },
+                  "deepseek-tts": { name: "DeepSeek TTS", tool_call: false },
+                },
+              },
+              openai: {
+                id: "openai",
+                models: {
+                  "gpt-4": { name: "GPT-4", tool_call: true, status: "deprecated" },
+                },
+              },
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          );
+        }) as typeof fetch;
+        try {
+          await withTimeout(
+            Promise.resolve(vscode.commands.executeCommand(CMD.updateModelCatalog)),
+            20_000,
+            "updateModelCatalog must resolve against the patched fetch",
+          );
+        } finally {
+          globalThis.fetch = originalFetch;
+        }
+        assert.ok(
+          fetchUrls.some((url) => url.includes("models.dev")),
+          "the update must have fetched the models.dev catalog",
+        );
+        assert.ok(
+          fetchUrls.every((url) => url.includes("models.dev")),
+          "the patched window must not have answered any unrelated fetch (isolation)",
+        );
+
+        const after = JSON.parse(fs.readFileSync(modelsFile, "utf8")) as {
           models: { provider: string; model: string }[];
         };
-        assert.ok(
-          !afterDelete.models.some((m) => `${m.provider}/${m.model}` === id),
-          `deleted model ${id} still present in models.json`,
-        );
+        const ids = after.models.map((m) => `${m.provider}/${m.model}`);
+        assert.ok(ids.includes("deepseek/deepseek-v5-e2e"), "fresh upstream model must be merged in");
+        assert.ok(ids.includes(customId), "custom model must survive the update");
+        assert.ok(ids.includes("deepseek/deepseek-chat"), "replaced upstream entry must be present");
+        assert.ok(!ids.includes("deepseek/deepseek-tts"), "non-tool (TTS) model must be filtered out");
+        assert.ok(!ids.includes(staleId), "deprecated model must be pruned from the local list");
+
+        await executeDeleteModel(customId);
       },
     },
     {
@@ -1509,6 +1587,118 @@ function tests(): TestCase[] {
           patch.restore();
         }
         assert.equal(patch.engaged(), true, "showPresetQuickPick must have opened the QuickPick");
+      },
+    },
+    {
+      name: "quotaRefresh resolves even when the webview never boots (opening is never blocked)",
+      fn: async () => {
+        // Bad-network regression: on code-server a degraded browser link can keep the
+        // webview from booting arbitrarily long. The command used to await the ready
+        // handshake and dispose the panel after 20s — every status-bar click while the
+        // bar showed "?" was silently undone. Opening must resolve unconditionally.
+        const windowApi = vscode.window as unknown as {
+          createWebviewPanel: (...args: unknown[]) => vscode.WebviewPanel;
+        };
+        const original = windowApi.createWebviewPanel;
+        let deadPanel: vscode.WebviewPanel | undefined;
+        windowApi.createWebviewPanel = (...args: unknown[]) => {
+          const panel = original.apply(windowApi, args);
+          // Swallow the html assignment: no document, no scripts, ready never fires.
+          Object.defineProperty(panel.webview, "html", { get: () => "", set: () => undefined });
+          deadPanel = panel;
+          return panel;
+        };
+        try {
+          await withTimeout(
+            Promise.resolve(vscode.commands.executeCommand(CMD.quotaRefresh)),
+            5_000,
+            "quotaRefresh must resolve without waiting for the webview handshake",
+          );
+          assert.equal(deadPanel?.visible, true, "the never-booting panel must stay open, not be disposed");
+        } finally {
+          windowApi.createWebviewPanel = original;
+          deadPanel?.dispose(); // reset the singleton so the next quota test opens fresh
+        }
+      },
+    },
+    {
+      name: "quota panel zombie (booted once, page gone) is probed and recreated on click",
+      fn: async () => {
+        // Long-idle code-server regression: the webview iframe can die silently without
+        // onDidDispose, leaving the singleton pointing at a dead page — every later click
+        // only revealed a blank tab. Click must ping the page and recreate it on silence.
+        const windowApi = vscode.window as unknown as {
+          createWebviewPanel: (...args: unknown[]) => vscode.WebviewPanel;
+        };
+        const original = windowApi.createWebviewPanel;
+        const created: vscode.WebviewPanel[] = [];
+        const disposed = new Set<vscode.WebviewPanel>();
+        let bridge: PanelBridge | undefined;
+        windowApi.createWebviewPanel = (...args: unknown[]) => {
+          const panel = original.apply(windowApi, args);
+          // Kill the page: the html assignment is swallowed, so no real webview ever
+          // boots and nothing will answer the liveness ping.
+          Object.defineProperty(panel.webview, "html", { get: () => "", set: () => undefined });
+          panel.onDidDispose(() => disposed.add(panel));
+          const webview = panel.webview as unknown as {
+            onDidReceiveMessage: (listener: (raw: unknown) => void, ...rest: unknown[]) => vscode.Disposable;
+            postMessage: (message: unknown) => Thenable<boolean>;
+          };
+          const capture: PanelBridge = {
+            deliver: (): void => {
+              throw new Error("onDidReceiveMessage listener was never registered for the captured panel");
+            },
+            outbound: [],
+          };
+          const originalOnDid = webview.onDidReceiveMessage;
+          webview.onDidReceiveMessage = (listener: (raw: unknown) => void, ...rest: unknown[]) => {
+            capture.deliver = (raw: unknown): void => {
+              listener(raw);
+            };
+            return originalOnDid.call(webview, listener, ...rest);
+          };
+          const originalPost = webview.postMessage.bind(webview);
+          webview.postMessage = (message: unknown) => {
+            capture.outbound.push(message as PanelMessage);
+            return originalPost(message);
+          };
+          bridge = capture;
+          created.push(panel);
+          return panel;
+        };
+        try {
+          await withTimeout(
+            Promise.resolve(vscode.commands.executeCommand(CMD.quotaRefresh)),
+            5_000,
+            "first click must open the panel without waiting for the webview",
+          );
+          assert.equal(created.length, 1, "first click creates exactly one panel");
+          // Forge the one-time boot handshake: the singleton now believes the page is
+          // alive (openPanelReady=true) even though no real page exists.
+          bridge!.deliver({ type: "ready" });
+
+          await withTimeout(
+            Promise.resolve(vscode.commands.executeCommand(CMD.quotaRefresh)),
+            5_000,
+            "second click must reveal without blocking on the dead page",
+          );
+          assert.ok(
+            bridge!.outbound.some((message) => message.type === "quotaPing"),
+            "the reveal path must probe the booted-once page",
+          );
+          await pollUntil(
+            () => created.length === 2,
+            10_000,
+            "silent page must trigger dispose + fresh panel creation",
+          );
+          assert.ok(disposed.has(created[0]), "the zombie panel must be disposed");
+          assert.ok(!disposed.has(created[1]), "the replacement panel must stay open");
+        } finally {
+          windowApi.createWebviewPanel = original;
+          for (const panel of created) {
+            panel.dispose(); // reset the singleton so the next quota test opens fresh
+          }
+        }
       },
     },
     {

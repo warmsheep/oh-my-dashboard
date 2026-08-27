@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import {
   addLocalModel,
-  BUILTIN_MODELS,
+  BUILTIN_PROVIDERS,
   ensureLocalModelsFile,
   LOCAL_MODELS_FILE,
   mergeModelOptions,
@@ -28,20 +28,12 @@ function tmpConfigDir(): string {
   return dir;
 }
 
-describe("ensureLocalModelsFile", () => {
-  it("creates models.json from the builtin catalog on first use", () => {
+describe("ensureLocalModelsFile (pure read — no seeding, no writes)", () => {
+  it("returns [] when models.json is missing and creates nothing", () => {
     const dir = tmpConfigDir();
-    const models = ensureLocalModelsFile(dir);
-    expect(models.length).toBe(BUILTIN_MODELS.length);
-    const file = path.join(dir, LOCAL_MODELS_FILE);
-    expect(fs.existsSync(file)).toBe(true);
-    const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as { models: ModelOption[] };
-    expect(parsed.models.length).toBe(BUILTIN_MODELS.length);
-    expect(parsed.models[0]).toEqual({
-      provider: BUILTIN_MODELS[0].provider,
-      model: BUILTIN_MODELS[0].model,
-      label: BUILTIN_MODELS[0].label,
-    });
+    expect(ensureLocalModelsFile(dir)).toEqual([]);
+    expect(fs.existsSync(path.join(dir, LOCAL_MODELS_FILE))).toBe(false);
+    expect(fs.existsSync(path.join(dir, `${LOCAL_MODELS_FILE}.bak`))).toBe(false);
   });
 
   it("returns hand-edited entries from an existing file", () => {
@@ -64,80 +56,7 @@ describe("ensureLocalModelsFile", () => {
     expect(JSON.parse(fs.readFileSync(file, "utf8")).models.length).toBe(2);
   });
 
-  it("self-heals a corrupted file by rewriting the builtin catalog", () => {
-    const dir = tmpConfigDir();
-    const file = path.join(dir, LOCAL_MODELS_FILE);
-    fs.writeFileSync(file, "{ broken json");
-    const models = ensureLocalModelsFile(dir);
-    expect(models.length).toBe(BUILTIN_MODELS.length);
-    expect(JSON.parse(fs.readFileSync(file, "utf8")).models.length).toBe(BUILTIN_MODELS.length);
-  });
-
-  it("backs up the corrupted original to models.json.bak byte-identical before self-healing", () => {
-    const dir = tmpConfigDir();
-    const file = path.join(dir, LOCAL_MODELS_FILE);
-    const broken = '{\n  "models": [],\n  "note": "user hand-edit to recover"\n}';
-    fs.writeFileSync(file, broken); // parses to an empty models array → triggers the heal
-    ensureLocalModelsFile(dir);
-    expect(fs.readFileSync(`${file}.bak`, "utf8")).toBe(broken);
-    expect(JSON.parse(fs.readFileSync(file, "utf8")).models.length).toBe(BUILTIN_MODELS.length);
-  });
-
-  it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
-    "degrades read-only when models.json exists but is unreadable (no rewrite attempt)",
-    () => {
-      const dir = tmpConfigDir();
-      const file = path.join(dir, LOCAL_MODELS_FILE);
-      fs.writeFileSync(file, '{"models":[{"provider":"p","model":"m"}]}');
-      fs.chmodSync(file, 0o000);
-      const mtimeBefore = fs.statSync(file).mtimeMs;
-
-      const models = ensureLocalModelsFile(dir);
-
-      expect(models.length).toBe(BUILTIN_MODELS.length);
-      expect(fs.statSync(file).mtimeMs).toBe(mtimeBefore); // never rewritten, never healed
-      expect(fs.existsSync(`${file}.bak`)).toBe(false);
-    },
-  );
-
-  it("self-heals an empty models array", () => {
-    const dir = tmpConfigDir();
-    const file = path.join(dir, LOCAL_MODELS_FILE);
-    fs.writeFileSync(file, JSON.stringify({ models: [] }));
-    expect(ensureLocalModelsFile(dir).length).toBe(BUILTIN_MODELS.length);
-  });
-
-  it("healed file is not rewritten again: repeated calls leave mtime unchanged", () => {
-    const dir = tmpConfigDir();
-    const file = path.join(dir, LOCAL_MODELS_FILE);
-    fs.writeFileSync(file, "{ broken json");
-    ensureLocalModelsFile(dir);
-    const mtimeAfterHeal = fs.statSync(file).mtimeMs;
-    ensureLocalModelsFile(dir);
-    ensureLocalModelsFile(dir);
-    expect(fs.statSync(file).mtimeMs).toBe(mtimeAfterHeal);
-  });
-
-  it("builtin catalog covers all required families with unique ids", () => {
-    const families: Record<string, RegExp> = {
-      GLM: /^zhipuai-coding-plan\/glm-/,
-      Kimi: /^kimi-for-coding\//,
-      MiniMax: /^minimax-cn-coding-plan\/MiniMax-/,
-      Mimo: /^xiaomi-token-plan-cn\/mimo-/,
-      Deepseek: /^deepseek\/deepseek-/,
-      GPT: /^openai\/gpt-/,
-      Claude: /^anthropic\/claude-/,
-      Grok: /^xai\/grok-/,
-      Gemini: /^google\/gemini-/,
-    };
-    const ids = BUILTIN_MODELS.map((m) => m.id);
-    expect(new Set(ids).size).toBe(ids.length);
-    for (const pattern of Object.values(families)) {
-      expect(ids.some((id) => pattern.test(id))).toBe(true);
-    }
-  });
-
-  it("accepts hand-edited comments and trailing commas without a self-heal rewrite", () => {
+  it("accepts hand-edited JSONC comments and trailing commas without any rewrite", () => {
     const dir = tmpConfigDir();
     const file = path.join(dir, LOCAL_MODELS_FILE);
     const handEdited = `{
@@ -153,30 +72,74 @@ describe("ensureLocalModelsFile", () => {
     expect(fs.existsSync(`${file}.bak`)).toBe(false);
   });
 
-  it("self-heals when the parsed value is not an object or models is not an array", () => {
+  it("an empty models array is a valid empty catalog — [] with no .bak and no rewrite", () => {
+    const dir = tmpConfigDir();
+    const file = path.join(dir, LOCAL_MODELS_FILE);
+    const userBytes = '{ "models": [], "note": "cleared by hand" }\n';
+    fs.writeFileSync(file, userBytes);
+    expect(ensureLocalModelsFile(dir)).toEqual([]);
+    expect(fs.readFileSync(file, "utf8")).toBe(userBytes);
+    expect(fs.existsSync(`${file}.bak`)).toBe(false);
+  });
+
+  it("a shape-broken file degrades to [], keeps its bytes and backs them up once", () => {
+    const dir = tmpConfigDir();
+    const file = path.join(dir, LOCAL_MODELS_FILE);
+    const broken = '{ "models": "x", "note": "hand edit gone wrong" }\n';
+    fs.writeFileSync(file, broken);
+    expect(ensureLocalModelsFile(dir)).toEqual([]);
+    expect(fs.readFileSync(file, "utf8")).toBe(broken); // untouched until a network rebuild
+    expect(fs.readFileSync(`${file}.bak`, "utf8")).toBe(broken);
+
+    // Repeated reads never re-copy the .bak and never rewrite the file.
+    const mtime = fs.statSync(file).mtimeMs;
+    ensureLocalModelsFile(dir);
+    ensureLocalModelsFile(dir);
+    expect(fs.statSync(file).mtimeMs).toBe(mtime);
+    expect(fs.readFileSync(`${file}.bak`, "utf8")).toBe(broken);
+  });
+
+  it("degrades to [] for every shape-broken variant (syntax error / non-object / models not an array)", () => {
     const dir = tmpConfigDir();
     const file = path.join(dir, LOCAL_MODELS_FILE);
     for (const broken of ['"just a string"', "[1, 2]", '{ "models": "x" }']) {
       fs.writeFileSync(file, broken);
-      expect(ensureLocalModelsFile(dir).length).toBe(BUILTIN_MODELS.length);
-      expect(JSON.parse(fs.readFileSync(file, "utf8")).models.length).toBe(BUILTIN_MODELS.length);
+      expect(ensureLocalModelsFile(dir)).toEqual([]);
     }
   });
 
-  it("degrades to the in-memory builtin catalog when the seed write fails", () => {
-    const dir = tmpConfigDir();
-    const denied = new Error("EACCES: permission denied, open") as NodeJS.ErrnoException;
-    denied.code = "EACCES";
-    const failingWriteFs = {
-      ...fs,
-      openSync: () => {
-        throw denied;
-      },
-    } as typeof fs;
-    const models = ensureLocalModelsFile(dir, failingWriteFs);
-    expect(models.length).toBe(BUILTIN_MODELS.length);
-    expect(models[0]).toEqual(BUILTIN_MODELS[0]);
-    expect(fs.existsSync(path.join(dir, LOCAL_MODELS_FILE))).toBe(false);
+  it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+    "degrades read-only when models.json exists but is unreadable (no rewrite attempt)",
+    () => {
+      const dir = tmpConfigDir();
+      const file = path.join(dir, LOCAL_MODELS_FILE);
+      fs.writeFileSync(file, '{"models":[{"provider":"p","model":"m"}]}');
+      fs.chmodSync(file, 0o000);
+      const mtimeBefore = fs.statSync(file).mtimeMs;
+
+      expect(ensureLocalModelsFile(dir)).toEqual([]);
+
+      expect(fs.statSync(file).mtimeMs).toBe(mtimeBefore); // never rewritten
+      expect(fs.existsSync(`${file}.bak`)).toBe(false);
+    },
+  );
+
+  it("builtin provider allowlist is unique and covers every curated family", () => {
+    expect(new Set(BUILTIN_PROVIDERS).size).toBe(BUILTIN_PROVIDERS.length);
+    const required = [
+      "zhipuai-coding-plan",
+      "kimi-for-coding",
+      "minimax-cn-coding-plan",
+      "xiaomi-token-plan-cn",
+      "deepseek",
+      "openai",
+      "anthropic",
+      "xai",
+      "google",
+    ];
+    for (const provider of required) {
+      expect(BUILTIN_PROVIDERS).toContain(provider);
+    }
   });
 });
 
@@ -207,13 +170,12 @@ describe("addLocalModel / removeLocalModel", () => {
     ).toHaveLength(1);
   });
 
-  it("addLocalModel defaults the label to the model name and seeds the file when absent", () => {
+  it("addLocalModel defaults the label to the model name and creates the file with ONLY that entry when absent", () => {
     const dir = tmpConfigDir();
     const added = addLocalModel(dir, { provider: "p", model: "bare" });
     expect(added.label).toBe("bare");
     const models = JSON.parse(fs.readFileSync(path.join(dir, LOCAL_MODELS_FILE), "utf8")).models;
-    expect(models).toContainEqual({ provider: "p", model: "bare", label: "bare" });
-    expect(models.length).toBe(BUILTIN_MODELS.length + 1);
+    expect(models).toEqual([{ provider: "p", model: "bare", label: "bare" }]);
   });
 
   it("removing one of several entries keeps the file with the remaining entry", () => {
@@ -227,16 +189,14 @@ describe("addLocalModel / removeLocalModel", () => {
     expect(removeLocalModel(dir, "p/missing")).toBe(false);
   });
 
-  it("removing the LAST local model deletes models.json instead of writing an empty array", () => {
+  it("removing the LAST local model deletes models.json; reads then yield [] (no implicit re-seed)", () => {
     const dir = tmpConfigDir();
     const file = writeModels(dir, [{ provider: "p", model: "only", label: "only" }]);
     expect(removeLocalModel(dir, "p/only")).toBe(true);
     expect(fs.existsSync(file)).toBe(false);
     expect(fs.existsSync(`${file}.bak`)).toBe(false);
-
-    // next first-use re-seeds cleanly, still without a .bak
-    expect(ensureLocalModelsFile(dir).length).toBe(BUILTIN_MODELS.length);
-    expect(fs.existsSync(`${file}.bak`)).toBe(false);
+    expect(ensureLocalModelsFile(dir)).toEqual([]);
+    expect(fs.existsSync(file)).toBe(false); // reading still creates nothing
   });
 });
 

@@ -5,9 +5,11 @@ import * as path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { BackupService } from "../../src/core/backupService";
+import { updateLocalModelsFromCatalog } from "../../src/core/builtinModels";
 import { ConfigStore } from "../../src/core/configStore";
 import { applyEdits, getValue, JsoncSyntaxError, validate } from "../../src/core/jsoncEditor";
 import { PresetService } from "../../src/core/presetService";
+import type { ModelOption } from "../../src/core/types";
 
 const FIXTURES_DIR = path.resolve(process.cwd(), "test/fixtures");
 
@@ -315,23 +317,33 @@ describe("integration: core pipeline (capture → mutate → apply → backup �
     expect(readBytes(path.join(env.configDir, "skills", "one", "x.md"))).toEqual(Buffer.from(SKILL_X_SEED, "utf8"));
   });
 
-  it("scenario G: models.json seeds on first listModels, then corrupt hand-edits self-heal with a .bak of the user's bytes", async () => {
+  it("scenario G: models.json is never seeded implicitly; corrupt files degrade with a one-time .bak, and a catalog update rebuilds", async () => {
     const env = makeEnv({ now: seqNow("2026-08-23T09:00:00.000Z") });
     const modelsFile = path.join(env.configDir, "models.json");
     expect(fs.existsSync(modelsFile)).toBe(false);
 
-    const seeded = env.store.listModels();
-    expect(fs.existsSync(modelsFile)).toBe(true);
-    expect(seeded.length).toBeGreaterThan(0);
-    const seededFileModels = JSON.parse(readBytes(modelsFile).toString("utf8")).models;
+    // Reading the model list writes nothing — the network is the catalog's source of truth.
+    const before = env.store.listModels();
+    expect(before.length).toBeGreaterThan(0); // opencode.json fixture models only
+    expect(fs.existsSync(modelsFile)).toBe(false);
 
-    const userBytes = '{ "models": [], "note": "hand edit gone wrong" }\n';
+    const userBytes = '{ "models": "gone wrong", "note": "hand edit" }\n';
     fs.writeFileSync(modelsFile, userBytes);
+    const degraded = env.store.listModels();
+    expect(degraded).toEqual(before); // local catalog contributes nothing
+    expect(fs.readFileSync(modelsFile, "utf8")).toBe(userBytes); // untouched
+    expect(fs.readFileSync(`${modelsFile}.bak`, "utf8")).toBe(userBytes); // backed up once
 
-    const healed = env.store.listModels();
-    expect(healed.length).toBe(seeded.length); // merge with opencode.json providers is unchanged
-    expect(readBytes(`${modelsFile}.bak`).toString("utf8")).toBe(userBytes);
-    expect(JSON.parse(readBytes(modelsFile).toString("utf8")).models).toEqual(seededFileModels);
+    // A network-style update rebuilds the file from the fetched catalog.
+    const fetched = new Map<string, ModelOption[]>([
+      ["deepseek", [{ id: "deepseek/deepseek-v4", provider: "deepseek", model: "deepseek-v4", label: "DeepSeek V4" }]],
+    ]);
+    const result = updateLocalModelsFromCatalog(env.configDir, fetched, new Set());
+    expect(result.addedIds).toEqual(["deepseek/deepseek-v4"]);
+    expect(JSON.parse(fs.readFileSync(modelsFile, "utf8")).models).toEqual([
+      { provider: "deepseek", model: "deepseek-v4", label: "DeepSeek V4" },
+    ]);
+    expect(fs.readFileSync(`${modelsFile}.bak`, "utf8")).toBe(userBytes); // original preserved
   });
 
   it("scenario H: backup → exportZip → wipe machine → importZip → restore is byte-identical", async () => {

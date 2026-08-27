@@ -44,13 +44,8 @@ fi
 INSTALLED=$("$CODE_SERVER" --list-extensions 2>/dev/null | grep -i "opencode-config-manager" || true)
 [[ -n "$INSTALLED" ]] || fail "安装命令成功但扩展列表中未找到，请检查 code-server 扩展目录"
 
-# 覆盖旧的内置模型清单：删除本地 models.json，下次使用时按新版本内置清单重建
-OPENCODE_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/opencode"
-MODELS_FILE="$OPENCODE_DIR/models.json"
-if [[ -f "$MODELS_FILE" ]]; then
-  rm -f "$MODELS_FILE"
-  info "已重置内置模型清单: $MODELS_FILE（下次使用时按新版本重建）"
-fi
+# Invariant: never touch ~/.config/opencode/models.json — it is user data
+# (network updates + hand-added models) and must survive reinstalls/upgrades.
 
 info "完成: $INSTALLED"
 EXT_DIR="${CS_EXTENSIONS_DIR:-$HOME/.local/share/code-server/extensions}"

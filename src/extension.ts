@@ -9,6 +9,7 @@ import { BackupService } from "./core/backupService";
 import { ConfigStore } from "./core/configStore";
 import { errorMessage } from "./core/errors";
 import { validate } from "./core/jsoncEditor";
+import { seedLocalModelsFromCatalog } from "./core/modelCatalog";
 import { PresetService } from "./core/presetService";
 import { QuotaService } from "./core/quotaService";
 import type { DiscoveredConfig, JsoncError } from "./core/types";
@@ -264,13 +265,31 @@ export function activate(ctx: vscode.ExtensionContext): void {
 
   registerCommands(ctx, { configStore, backupService, presetService, refreshAll, log });
 
-  // Warmup's full discover (skills/plugin trees, models seed write) runs synchronously
-  // on the shared exthost event loop — defer it past the activation IO storm other
-  // extensions produce (language servers, git), then mark the seed write as seen so
-  // its fs.watch echo doesn't pay a second full scan.
+  // Warmup's full discover (skills/plugin trees) runs synchronously on the shared
+  // exthost event loop — defer it past the activation IO storm other extensions
+  // produce (language servers, git), then mark the seed write as seen so its
+  // fs.watch echo doesn't pay a second full scan.
   const warmupTimer = setTimeout(() => {
     void provider.warmup().then(
-      () => watchManager.noteExternalRefresh(),
+      async () => {
+        // Models are no longer bundled: seed the empty local catalog from models.dev
+        // (builtin provider allowlist) once per activation until it succeeds. Skipped
+        // under Test mode so the e2e sandbox never depends on real network.
+        if (ctx.extensionMode === vscode.ExtensionMode.Test) {
+          watchManager.noteExternalRefresh();
+          return;
+        }
+        try {
+          const seeded = await seedLocalModelsFromCatalog(paths.configDir);
+          if (seeded.length > 0) {
+            log(`models: 已从 models.dev 初始化模型清单（${seeded.length} 个模型）`);
+            watchManager.noteExternalRefresh();
+            refreshViews();
+          }
+        } catch (error) {
+          log(`models: 联网初始化模型清单失败: ${errorMessage(error)}`);
+        }
+      },
       () => undefined,
     );
   }, 2_000);

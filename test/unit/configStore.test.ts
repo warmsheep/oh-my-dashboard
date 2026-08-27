@@ -15,7 +15,6 @@ import * as path from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { BUILTIN_MODELS } from "../../src/core/builtinModels";
 import { ConfigStore, writeFileAtomic } from "../../src/core/configStore";
 import { getValue, JsoncSyntaxError, parseSafe, validate } from "../../src/core/jsoncEditor";
 
@@ -615,26 +614,22 @@ describe("writeFileAtomic", () => {
 });
 
 describe("ConfigStore.listModels", () => {
-  it("merges opencode.json providers with the local builtin catalog, deduplicated by id", () => {
+  it("returns exactly the opencode.json providers when models.json is absent (no implicit seeding)", () => {
     const dir = seedConfigDir({ opencode: true });
     const models = new ConfigStore({ configDirOverride: dir }).listModels();
 
-    // Dynamic: a hard-coded length breaks on every models.dev catalog bump (review P2-13).
+    // Dynamic: a hard-coded length breaks on every fixture change (review P2-13).
     const fixture = parseSafe<{ provider?: Record<string, { models?: Record<string, unknown> }> }>(
       readFileSync(path.join(FIXTURES_DIR, "opencode.jsonc"), "utf8"),
     );
     const fixtureIds = Object.entries(fixture.value?.provider ?? {}).flatMap(([provider, cfg]) =>
       Object.keys((cfg as { models?: Record<string, unknown> }).models ?? {}).map((model) => `${provider}/${model}`),
     );
-    const expectedIds = [...new Set([...fixtureIds, ...BUILTIN_MODELS.map((m) => m.id)])].sort((a, b) =>
-      a < b ? -1 : a > b ? 1 : 0,
-    );
+    const expectedIds = [...new Set(fixtureIds)].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
     expect(models.map((m) => m.id)).toEqual(expectedIds);
     const ids = models.map((m) => m.id);
     expect(ids).toContain("WindsurfAI/claude-opus-4.6");
     expect(ids).toContain("zhipuai-coding-plan/glm-5");
-    expect(ids).toContain("xai/grok-4.6");
-    expect(ids).toContain("google/gemini-3.7-flash");
     expect(new Set(ids).size).toBe(ids.length);
 
     const named = models.find((m) => m.id === "WindsurfAI/claude-opus-4.6");
@@ -645,15 +640,15 @@ describe("ConfigStore.listModels", () => {
     expect(unnamed?.label).toBe("glm-5");
     expect(unnamed?.provider).toBe("zhipuai-coding-plan");
 
-    expect(existsSync(path.join(dir, "models.json"))).toBe(true);
+    // listModels is a pure read now — the network is the catalog's source of truth.
+    expect(existsSync(path.join(dir, "models.json"))).toBe(false);
   });
 
-  it("falls back to the builtin catalog (via models.json) when opencode.json is missing", () => {
+  it("returns an empty list when both opencode.json and models.json are missing", () => {
     const dir = sandbox();
     const models = new ConfigStore({ configDirOverride: dir }).listModels();
-    expect(models.length).toBe(BUILTIN_MODELS.length);
-    expect(models.map((m) => m.id)).toContain("anthropic/claude-opus-5");
-    expect(existsSync(path.join(dir, "models.json"))).toBe(true);
+    expect(models).toEqual([]);
+    expect(existsSync(path.join(dir, "models.json"))).toBe(false);
   });
 });
 

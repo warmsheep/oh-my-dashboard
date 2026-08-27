@@ -26,6 +26,7 @@ export const CMD = {
   refreshTree: "opencode.refreshTree",
   addModel: "opencode.addModel",
   deleteModel: "opencode.deleteModel",
+  updateModelCatalog: "opencode.updateModelCatalog",
   openModelsFile: "opencode.openModelsFile",
   quotaRefresh: "opencode.quotaRefresh",
   quotaConfigureMimo: "opencode.quotaConfigureMimo",

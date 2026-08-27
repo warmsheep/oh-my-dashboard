@@ -8,151 +8,22 @@ import type { ModelOption } from "./types";
 export const LOCAL_MODELS_FILE = "models.json";
 
 /**
- * Built-in catalog of current mainstream models (GLM / Kimi / MiniMax / Mimo /
- * DeepSeek / GPT / Claude / Grok / Gemini), sourced from models.dev (the
- * opencode model catalog) on 2026-08-22. Seeded into <configDir>/models.json
- * on first use; edit that file to add or remove entries. Update this list and
- * repackage the extension to ship a newer catalog.
+ * Provider allowlist the plugin curates (coding-plan providers first, then
+ * mainstream ones). NO models are bundled: models.json is populated from
+ * models.dev (activation-time seeding + the 「更新模型清单」 command); with the
+ * network down a fresh install simply starts with an empty catalog.
  */
-export const BUILTIN_MODELS: readonly ModelOption[] = [
-  { id: "zhipuai-coding-plan/glm-5.3", provider: "zhipuai-coding-plan", model: "glm-5.3", label: "GLM-5.3" },
-  { id: "zhipuai-coding-plan/glm-5.2", provider: "zhipuai-coding-plan", model: "glm-5.2", label: "GLM-5.2" },
-  {
-    id: "zhipuai-coding-plan/glm-5.2-highspeed",
-    provider: "zhipuai-coding-plan",
-    model: "glm-5.2-highspeed",
-    label: "GLM-5.2 高速",
-  },
-  { id: "zhipuai-coding-plan/glm-5.1", provider: "zhipuai-coding-plan", model: "glm-5.1", label: "GLM-5.1" },
-  {
-    id: "zhipuai-coding-plan/glm-5-turbo",
-    provider: "zhipuai-coding-plan",
-    model: "glm-5-turbo",
-    label: "GLM-5 Turbo",
-  },
-  {
-    id: "zhipuai-coding-plan/glm-5v-turbo",
-    provider: "zhipuai-coding-plan",
-    model: "glm-5v-turbo",
-    label: "GLM-5V Turbo（视觉）",
-  },
-  { id: "zhipuai-coding-plan/glm-4.7", provider: "zhipuai-coding-plan", model: "glm-4.7", label: "GLM-4.7" },
-  { id: "zhipuai-coding-plan/glm-4.6v", provider: "zhipuai-coding-plan", model: "glm-4.6v", label: "GLM-4.6V（视觉）" },
-  { id: "kimi-for-coding/k3", provider: "kimi-for-coding", model: "k3", label: "Kimi K3" },
-  { id: "kimi-for-coding/k3-256k", provider: "kimi-for-coding", model: "k3-256k", label: "Kimi K3 256K" },
-  {
-    id: "kimi-for-coding/kimi-for-coding-highspeed",
-    provider: "kimi-for-coding",
-    model: "kimi-for-coding-highspeed",
-    label: "Kimi For Coding 高速",
-  },
-  {
-    id: "kimi-for-coding/kimi-for-coding",
-    provider: "kimi-for-coding",
-    model: "kimi-for-coding",
-    label: "Kimi For Coding",
-  },
-  {
-    id: "minimax-cn-coding-plan/MiniMax-M3",
-    provider: "minimax-cn-coding-plan",
-    model: "MiniMax-M3",
-    label: "MiniMax M3",
-  },
-  {
-    id: "minimax-cn-coding-plan/MiniMax-M2.7",
-    provider: "minimax-cn-coding-plan",
-    model: "MiniMax-M2.7",
-    label: "MiniMax M2.7",
-  },
-  {
-    id: "minimax-cn-coding-plan/MiniMax-M2.7-highspeed",
-    provider: "minimax-cn-coding-plan",
-    model: "MiniMax-M2.7-highspeed",
-    label: "MiniMax M2.7 高速",
-  },
-  {
-    id: "minimax-cn-coding-plan/MiniMax-M2.5",
-    provider: "minimax-cn-coding-plan",
-    model: "MiniMax-M2.5",
-    label: "MiniMax M2.5",
-  },
-  {
-    id: "minimax-cn-coding-plan/MiniMax-M2.5-highspeed",
-    provider: "minimax-cn-coding-plan",
-    model: "MiniMax-M2.5-highspeed",
-    label: "MiniMax M2.5 高速",
-  },
-  {
-    id: "minimax-cn-coding-plan/MiniMax-M2.1",
-    provider: "minimax-cn-coding-plan",
-    model: "MiniMax-M2.1",
-    label: "MiniMax M2.1",
-  },
-  {
-    id: "minimax-cn-coding-plan/MiniMax-M2",
-    provider: "minimax-cn-coding-plan",
-    model: "MiniMax-M2",
-    label: "MiniMax M2",
-  },
-  {
-    id: "xiaomi-token-plan-cn/mimo-v2.5-pro",
-    provider: "xiaomi-token-plan-cn",
-    model: "mimo-v2.5-pro",
-    label: "MiMo v2.5 Pro",
-  },
-  { id: "xiaomi-token-plan-cn/mimo-v2.5", provider: "xiaomi-token-plan-cn", model: "mimo-v2.5", label: "MiMo v2.5" },
-  {
-    id: "opencode/mimo-v2.5-free",
-    provider: "opencode",
-    model: "mimo-v2.5-free",
-    label: "MiMo v2.5 Free（opencode 免费）",
-  },
-  { id: "deepseek/deepseek-v4-pro", provider: "deepseek", model: "deepseek-v4-pro", label: "DeepSeek V4 Pro" },
-  { id: "deepseek/deepseek-v4-flash", provider: "deepseek", model: "deepseek-v4-flash", label: "DeepSeek V4 Flash" },
-  { id: "deepseek/deepseek-chat", provider: "deepseek", model: "deepseek-chat", label: "DeepSeek Chat" },
-  {
-    id: "deepseek/deepseek-reasoner",
-    provider: "deepseek",
-    model: "deepseek-reasoner",
-    label: "DeepSeek Reasoner（推理）",
-  },
-  { id: "openai/gpt-5.6", provider: "openai", model: "gpt-5.6", label: "GPT-5.6" },
-  { id: "openai/gpt-5.6-sol", provider: "openai", model: "gpt-5.6-sol", label: "GPT-5.6 Sol" },
-  { id: "openai/gpt-5.6-sol-fast", provider: "openai", model: "gpt-5.6-sol-fast", label: "GPT-5.6 Sol Fast" },
-  { id: "openai/gpt-5.6-luna", provider: "openai", model: "gpt-5.6-luna", label: "GPT-5.6 Luna" },
-  { id: "openai/gpt-5.6-luna-fast", provider: "openai", model: "gpt-5.6-luna-fast", label: "GPT-5.6 Luna Fast" },
-  { id: "openai/gpt-5.6-terra", provider: "openai", model: "gpt-5.6-terra", label: "GPT-5.6 Terra" },
-  { id: "openai/gpt-5.6-terra-fast", provider: "openai", model: "gpt-5.6-terra-fast", label: "GPT-5.6 Terra Fast" },
-  { id: "openai/gpt-5.5-pro", provider: "openai", model: "gpt-5.5-pro", label: "GPT-5.5 Pro" },
-  { id: "openai/gpt-5.5", provider: "openai", model: "gpt-5.5", label: "GPT-5.5" },
-  { id: "openai/gpt-5.5-fast", provider: "openai", model: "gpt-5.5-fast", label: "GPT-5.5 Fast" },
-  { id: "openai/gpt-5.4", provider: "openai", model: "gpt-5.4", label: "GPT-5.4" },
-  { id: "openai/gpt-5.4-fast", provider: "openai", model: "gpt-5.4-fast", label: "GPT-5.4 Fast" },
-  { id: "openai/gpt-5.4-mini", provider: "openai", model: "gpt-5.4-mini", label: "GPT-5.4 Mini" },
-  { id: "openai/gpt-5.4-mini-fast", provider: "openai", model: "gpt-5.4-mini-fast", label: "GPT-5.4 Mini Fast" },
-  { id: "openai/gpt-5.3-codex", provider: "openai", model: "gpt-5.3-codex", label: "GPT-5.3 Codex（代码）" },
-  {
-    id: "openai/gpt-5.3-codex-spark",
-    provider: "openai",
-    model: "gpt-5.3-codex-spark",
-    label: "GPT-5.3 Codex Spark（代码）",
-  },
-  { id: "anthropic/claude-opus-5", provider: "anthropic", model: "claude-opus-5", label: "Claude Opus 5" },
-  { id: "anthropic/claude-sonnet-5", provider: "anthropic", model: "claude-sonnet-5", label: "Claude Sonnet 5" },
-  { id: "anthropic/claude-opus-4-8", provider: "anthropic", model: "claude-opus-4-8", label: "Claude Opus 4.8" },
-  {
-    id: "anthropic/claude-haiku-4-5",
-    provider: "anthropic",
-    model: "claude-haiku-4-5",
-    label: "Claude Haiku 4.5（快速）",
-  },
-  { id: "xai/grok-4.6", provider: "xai", model: "grok-4.6", label: "Grok 4.6" },
-  { id: "xai/grok-4.5", provider: "xai", model: "grok-4.5", label: "Grok 4.5" },
-  { id: "xai/grok-4.3", provider: "xai", model: "grok-4.3", label: "Grok 4.3" },
-  { id: "google/gemini-3.7-flash", provider: "google", model: "gemini-3.7-flash", label: "Gemini 3.7 Flash" },
-  { id: "google/gemini-3.6-flash", provider: "google", model: "gemini-3.6-flash", label: "Gemini 3.6 Flash" },
-  { id: "google/gemini-3.1-pro-preview", provider: "google", model: "gemini-3.1-pro-preview", label: "Gemini 3.1 Pro" },
-  { id: "google/gemini-2.5-pro", provider: "google", model: "gemini-2.5-pro", label: "Gemini 2.5 Pro" },
+export const BUILTIN_PROVIDERS: readonly string[] = [
+  "zhipuai-coding-plan",
+  "kimi-for-coding",
+  "minimax-cn-coding-plan",
+  "xiaomi-token-plan-cn",
+  "opencode",
+  "deepseek",
+  "openai",
+  "anthropic",
+  "xai",
+  "google",
 ];
 
 function isModelOption(value: unknown): value is ModelOption {
@@ -185,55 +56,57 @@ function serialize(models: readonly ModelOption[]): string {
   );
 }
 
-function parseLocalModels(text: string): ModelOption[] {
-  // models.json is hand-editable: tolerate comments/trailing commas (jsonc parse)
-  // so a hand edit never triggers the self-heal rewrite. Self-heal triggers only
-  // on a broken SHAPE (value not an object / models not an array), not on syntax.
+function parseLocalModels(text: string): ModelOption[] | null {
+  // models.json is hand-editable: tolerate comments/trailing commas (jsonc parse).
+  // Returns null only for a broken SHAPE (value not an object / models not an
+  // array) — the caller treats that as "corrupt file" (one-time .bak, rebuild on
+  // the next network update); a valid empty array is a legitimate empty catalog.
   const { value } = parseSafe<{ models?: unknown }>(text);
-  if (typeof value !== "object" || value === null) {
-    return [];
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return null;
   }
-  const models = Array.isArray(value.models) ? value.models : [];
-  return models.map(normalize).filter((m): m is ModelOption => m !== null);
+  if (!Array.isArray(value.models)) {
+    return null;
+  }
+  return value.models.map(normalize).filter((m): m is ModelOption => m !== null);
+}
+
+function backupBrokenFile(file: string, fsMod: typeof defaultFs): ModelOption[] {
+  // The network rebuild overwrites the file wholesale, so keep the user's broken
+  // bytes as a one-time models.json.bak (repeated reads never re-copy).
+  try {
+    if (!fsMod.existsSync(`${file}.bak`)) {
+      fsMod.copyFileSync(file, `${file}.bak`);
+    }
+  } catch {
+    // best-effort backup; the empty-catalog degrade proceeds regardless
+  }
+  return [];
 }
 
 /**
- * Read the local model catalog from <configDir>/models.json, creating it from
- * BUILTIN_MODELS when missing or unreadable (self-healing: the file is a
- * regenerable cache that users may also hand-edit).
+ * Read the local model catalog from <configDir>/models.json. Pure read — nothing
+ * is written or seeded here: the catalog's source of truth is the network
+ * (models.dev, via activation-time seeding and the 「更新模型清单」 command), so a
+ * missing or empty file simply yields [] and installing/upgrading the extension
+ * never touches an existing models.json. A shape-broken file degrades to [] with
+ * a one-time .bak so the eventual rebuild cannot destroy the user's bytes.
  */
 export function ensureLocalModelsFile(configDir: string, fsMod: typeof defaultFs = defaultFs): ModelOption[] {
   const file = path.join(configDir, LOCAL_MODELS_FILE);
-  if (fsMod.existsSync(file)) {
-    let models: ModelOption[];
-    try {
-      models = parseLocalModels(fsMod.readFileSync(file, "utf8"));
-    } catch {
-      // Exists but unreadable (permissions/AV lock): degrade read-only — a rewrite
-      // would hit the same permission wall, and the built-in catalog keeps things working.
-      return BUILTIN_MODELS.map((m) => ({ ...m }));
-    }
-    if (models.length > 0) {
-      return models;
-    }
-    // Self-heal below rewrites the file wholesale — keep the user's (broken) edit as
-    // models.json.bak so custom entries are recoverable.
-    try {
-      fsMod.copyFileSync(file, `${file}.bak`);
-    } catch {
-      // best-effort backup; healing proceeds regardless
-    }
+  if (!fsMod.existsSync(file)) {
+    return [];
   }
+  let text: string;
   try {
-    fsMod.mkdirSync(configDir, { recursive: true });
-    writeFileAtomic(file, serialize(BUILTIN_MODELS), fsMod);
+    text = fsMod.readFileSync(file, "utf8");
   } catch {
-    // Seeding is a write side effect on a READ path: a read-only dir or a full
-    // disk must not kill the tree/commands — degrade to the in-memory builtin
-    // catalog this round (same as the unreadable-file branch above); next use retries.
-    return BUILTIN_MODELS.map((m) => ({ ...m }));
+    // Exists but unreadable (permissions/AV lock): degrade read-only — a rewrite
+    // would hit the same permission wall.
+    return [];
   }
-  return BUILTIN_MODELS.map((m) => ({ ...m }));
+  const models = parseLocalModels(text);
+  return models === null ? backupBrokenFile(file, fsMod) : models;
 }
 
 /**
@@ -288,8 +161,9 @@ export function addLocalModel(
 }
 
 /**
- * Remove a model by id from the local catalog. Removing the last entry deletes models.json
- * (an empty catalog would self-heal back to the builtins); returns false for unknown ids.
+ * Remove a model by id from the local catalog. Removing the last entry deletes
+ * models.json (absence = "not populated"; the next activation's network seed may
+ * fetch a fresh catalog); returns false for unknown ids.
  */
 export function removeLocalModel(configDir: string, id: string, fsMod: typeof defaultFs = defaultFs): boolean {
   const models = ensureLocalModelsFile(configDir, fsMod);
@@ -298,12 +172,83 @@ export function removeLocalModel(configDir: string, id: string, fsMod: typeof de
     return false;
   }
   if (next.length === 0) {
-    // Writing {"models":[]} would make ensureLocalModelsFile treat the file as
-    // corrupted and resurrect the builtins (+ a .bak). Delete instead; first
-    // use re-seeds a clean file.
+    // An empty models.json is valid (reads as an empty catalog), but deleting keeps
+    // the on-disk story simple: absence means "not populated" and the next
+    // activation's network seed may fetch a fresh catalog.
     fsMod.rmSync(path.join(configDir, LOCAL_MODELS_FILE), { force: true });
     return true;
   }
   writeLocalModels(configDir, next, fsMod);
   return true;
+}
+
+export interface CatalogMergeResult {
+  merged: ModelOption[];
+  /** Fresh ids that were not in the local catalog before. */
+  addedIds: string[];
+  /** Local ids whose fetched replacement differs in content (label/provider/model). */
+  refreshedIds: string[];
+  /** Local ids removed because models.dev marks them deprecated (upstream-retired). */
+  prunedIds: string[];
+}
+
+/**
+ * Pure merge of fetched catalog entries into the local list: fresh entries win on id
+ * collisions and append new ids; local entries whose id is NOT upstream survive —
+ * those are either the user's hand-added models (「添加模型…」) or ids the catalog no
+ * longer lists at all, and neither may be dropped silently. The ONE deletion path is
+ * `deprecatedIds`: ids models.dev explicitly marks retired are provably unusable, so
+ * they are pruned (a stale extra QuickPick option is harmless, but a retired model
+ * errors on every call — and the user cannot distinguish it from a working one).
+ * `refreshedIds` counts only CONTENT-differing replacements, so added+refreshed+
+ * pruned all empty ⟺ the catalog is byte-for-byte unchanged (order-insensitive).
+ */
+export function mergeCatalogIntoLocal(
+  local: readonly ModelOption[],
+  fetched: ReadonlyMap<string, ModelOption[]>,
+  deprecatedIds: ReadonlySet<string> = new Set(),
+): CatalogMergeResult {
+  const fresh = [...fetched.values()].flat();
+  const freshIds = new Set(fresh.map((m) => m.id));
+  const localById = new Map(local.map((m) => [m.id, m]));
+  const localIds = new Set(local.map((m) => m.id));
+  const merged = [...local.filter((m) => !freshIds.has(m.id) && !deprecatedIds.has(m.id)), ...fresh];
+  const contentDiffers = (fresh: ModelOption): boolean => {
+    const prev = localById.get(fresh.id);
+    return (
+      prev !== undefined &&
+      (prev.provider !== fresh.provider || prev.model !== fresh.model || prev.label !== fresh.label)
+    );
+  };
+  return {
+    merged,
+    addedIds: fresh.filter((m) => !localIds.has(m.id)).map((m) => m.id),
+    refreshedIds: fresh.filter((m) => localIds.has(m.id) && contentDiffers(m)).map((m) => m.id),
+    prunedIds: local.filter((m) => deprecatedIds.has(m.id)).map((m) => m.id),
+  };
+}
+
+/**
+ * Persist the fetched catalog into <configDir>/models.json (seed + merge + prune +
+ * atomic write); returns the merge result so the command layer can report counts.
+ * Writes only on a real change — identical content (order-insensitive) never
+ * re-serializes the file, so hand-edited JSONC comments survive no-op updates.
+ * A prune-to-empty deletes the file (absence is the canonical empty catalog, same
+ * as removeLocalModel).
+ */
+export function updateLocalModelsFromCatalog(
+  configDir: string,
+  fetched: ReadonlyMap<string, ModelOption[]>,
+  deprecatedIds: ReadonlySet<string> = new Set(),
+  fsMod: typeof defaultFs = defaultFs,
+): CatalogMergeResult {
+  const local = ensureLocalModelsFile(configDir, fsMod);
+  const result = mergeCatalogIntoLocal(local, fetched, deprecatedIds);
+  const changed = result.addedIds.length > 0 || result.refreshedIds.length > 0 || result.prunedIds.length > 0;
+  if (changed && result.merged.length === 0) {
+    fsMod.rmSync(path.join(configDir, LOCAL_MODELS_FILE), { force: true });
+  } else if (changed) {
+    writeLocalModels(configDir, result.merged, fsMod);
+  }
+  return result;
 }

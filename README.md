@@ -9,6 +9,7 @@ VSCode 扩展：管理 [opencode](https://opencode.ai) 与 [oh-my-opencode](http
   - `opencode.json`（JSONC，保留注释与尾逗号；`opencode.jsonc` 亦可识别）、`AGENTS.md`（全局+项目级）、`command/`、`skills/`
   - skills 兼容主流 agent 目录约定，家目录下显示为「全局」：全局扫描 `~/.agents/skills`、`~/.claude/skills`、配置目录 `skills/` 等，项目级扫描 `.agents/`、`.claude/`、`.opencode/` 等下的 `skills/`（完整候选序见 AGENTS.md）；跟随符号链接，需含 `SKILL.md`，仅显示实际存在的目录
   - agent/category 节点点击 → QuickPick 选模型与 variant，程序化写回（omo 目标写 `reasoning` 键，同时清理冲突的 `variant`/`models` 链）
+- **模型**：清单分组展示（opencode.json / models.json 来源标注）；不内置模型，仅内置供应商白名单，激活后自动从 models.dev 联网初始化空清单；「模型」标题右侧行内按钮：添加模型、**更新模型清单**（从 models.dev 获取当前清单所涉供应商的最新模型并合并进来，用户手动添加的模型不会被覆盖删除）、打开清单文件
 - **模板**：从当前配置捕获；Webview 矩阵编辑器（批量设模型、逐行 variant）；应用采用合并语义（模板未列出的键不动）
 - **插件**：列出 opencode.json `plugin` 数组声明的插件（npm 包名可带 `@版本`，或 `~/` `./` `/` `file://` 本地路径），按 opencode 运行时缓存布局解析（兼容旧版平铺缓存），回退配置目录；展示安装版本 / 未安装 / 本地路径 / 缺失状态；点击标题打开配置文件，展开浏览插件目录文件（排除嵌套 `node_modules` 与 `.git`），单击文件即可预览编辑
 - **备份**：手动「立即备份」会要求输入备份名称（名称仅用于展示，时间戳自动附带且不入名称）；历史备份可右键「重命名备份」；manifest 记录原因；与当前配置 diff 对比；恢复时明确警告覆盖（应用/恢复不自动产生备份）
@@ -40,7 +41,9 @@ code --install-extension build/packages/opencode-config-manager-<版本>.vsix
 
 ### 模型清单
 
-内置清单定义在 `src/core/builtinModels.ts`（数据来源 models.dev），首次调用模型列表时写入 `~/.config/opencode/models.json`（可手动编辑，损坏自愈，重建前原文件备份为 `models.json.bak`）。展示顺序：`opencode.json` 条目优先，按 id 排序去重。
+插件**不内置模型**，仅内置供应商白名单（`src/core/builtinModels.ts` 的 `BUILTIN_PROVIDERS`：GLM / Kimi / MiniMax / MiMo / DeepSeek / GPT / Claude / Grok / Gemini 等）。本地清单存于 `~/.config/opencode/models.json`：为空（新装或被清空）时扩展激活后会自动从 models.dev 按白名单拉取初始化（联网失败则保持为空，之后点「更新模型清单」即可）；已有文件**安装/升级插件不会覆盖**。文件可手动编辑；损坏时降级为空清单（原文件一次性备份为 `models.json.bak`），下次成功的网络更新会重建。展示顺序：`opencode.json` 条目优先，按 id 排序去重。
+
+模型分区标题右侧的「更新模型清单」按钮（或命令面板 `OpenCode: 更新模型清单（从 models.dev）`）会拉取 models.dev 的最新目录，取当前清单所涉供应商的最新模型合并进 `models.json`：新模型追加、同名模型以最新数据刷新、用户手动添加的自定义模型保留不删；清单为空时按内置供应商白名单全量拉取；未收录的供应商会在结果提示中说明。**只收录可用作编码代理的模型**（支持工具调用且未被上游标记弃用——TTS/图像/视频/embedding 及已退役旧世代一律过滤），上游已标记弃用的存量条目也会在更新时自动清理。
 
 ### 设置
 
