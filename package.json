@@ -2,7 +2,7 @@
   "name": "opencode-config-manager",
   "displayName": "OpenCode 配置管理器",
   "description": "管理 opencode / oh-my-opencode 配置：结构化修改、备份、恢复、命名模板一键切换",
-  "version": "0.30.1",
+  "version": "0.31.3",
   "publisher": "local",
   "license": "MIT",
   "icon": "media/icon.png",
