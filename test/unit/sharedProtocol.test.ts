@@ -22,7 +22,9 @@ import {
   AUTO_REFRESH_MIN_INTERVAL_SECONDS,
   autoRefreshCategoryLabel,
   balanceColor,
+  defaultQuotaVisibility,
   deriveRemainingPercent,
+  filterQuotaSnapshotByVisibility,
   formatQuotaResetTime,
   KNOWN_AGENTS,
   KNOWN_CATEGORIES,
@@ -36,7 +38,7 @@ import {
   VARIANT_ORDER,
   VARIANTS,
 } from "../../src/shared/protocol";
-import type { AutoRefreshSettings, ModelOption, QuotaWindow, Variant } from "../../src/shared/protocol";
+import type { AutoRefreshSettings, ModelOption, QuotaSnapshot, QuotaWindow, Variant } from "../../src/shared/protocol";
 
 const PROTOCOL_SRC = path.resolve(process.cwd(), "src/shared/protocol.ts");
 
@@ -235,5 +237,45 @@ describe("shared/protocol settings canon (auto-refresh contract)", () => {
     });
     expect(settings.categories.plugins.enabled).toBe(true);
     expect(settings.quotaRefreshSeconds).toBe(120);
+  });
+});
+
+describe("quota visibility helpers", () => {
+  const snapshot: QuotaSnapshot = {
+    fetchedAt: "t",
+    providers: [
+      { providerId: "kimi", label: "Kimi", plan: null, windows: [], balances: null, configured: true, error: null },
+      { providerId: "glm", label: "GLM", plan: null, windows: [], balances: null, configured: true, error: "x" },
+      { providerId: "mimo", label: "MiMo", plan: null, windows: [], balances: null, configured: false, error: null },
+      {
+        providerId: "deepseek",
+        label: "DeepSeek",
+        plan: null,
+        windows: [],
+        balances: null,
+        configured: true,
+        error: null,
+      },
+    ],
+  };
+
+  it("defaultQuotaVisibility marks every provider visible", () => {
+    expect(defaultQuotaVisibility()).toEqual({
+      kimi: true,
+      glm: true,
+      mimo: true,
+      deepseek: true,
+    });
+  });
+
+  it("filterQuotaSnapshotByVisibility keeps visible providers and preserves fetchedAt", () => {
+    const filtered = filterQuotaSnapshotByVisibility(snapshot, { kimi: true, glm: false, mimo: false, deepseek: true });
+    expect(filtered.providers.map((provider) => provider.providerId)).toEqual(["kimi", "deepseek"]);
+    expect(filtered.fetchedAt).toBe("t");
+  });
+
+  it("filterQuotaSnapshotByVisibility with everything visible is an identity pass-through", () => {
+    const filtered = filterQuotaSnapshotByVisibility(snapshot, defaultQuotaVisibility());
+    expect(filtered.providers).toHaveLength(4);
   });
 });

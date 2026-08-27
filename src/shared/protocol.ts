@@ -75,15 +75,20 @@ export type ExtToWebview =
   | { type: "initFailed"; payload: { error: string } }
   | { type: "modelsUpdated"; payload: { models: ModelOption[] } }
   | { type: "result"; payload: { action: "save" | "apply"; ok: boolean; error?: string } }
-  /** Quota panel boot payload: cached snapshot (null before the first refresh cycle) + optional focus target. */
+  /** Quota view boot payload: cached snapshot (null before the first refresh cycle), per-provider
+   *  status-bar visibility, and an optional focus target. */
   | { type: "quotaInit"; payload: QuotaInitPayload }
   /** Fresh quota data — manual refresh results and auto-refresh cycle pushes share this channel. */
   | { type: "quotaSnapshot"; payload: { snapshot: QuotaSnapshot } }
   /** Reply to quotaSaveMimoCookie: ok carries no error, !ok carries the friendly Chinese message. */
   | { type: "quotaConfigSaved"; payload: { ok: boolean; error?: string } }
-  /** Liveness probe for the open quota panel: a booted-once page must answer with `pong`. */
+  /** Reply to quotaSetStatusBar: ok echoes the persisted full visibility record; !ok carries the error. */
+  | { type: "quotaStatusBarSaved"; payload: { ok: boolean; visibility?: QuotaVisibility; error?: string } }
+  /** Liveness probe for the open manager panel: a booted-once page must answer with `pong`. */
   | { type: "quotaPing" }
-  /** Settings page boot payload AND external-change push (Settings-UI edits re-sync the open page). */
+  /** Switch the manager page to a tab (command entry points land on their target tab). */
+  | { type: "managerNavigate"; payload: ManagerNavigatePayload }
+  /** Settings view boot payload AND external-change push (Settings-UI edits re-sync the open page). */
   | { type: "settingsInit"; payload: SettingsInitPayload }
   /** Reply to settingsSave: ok carries no error, !ok carries the friendly Chinese message. */
   | { type: "settingsSaved"; payload: { ok: boolean; error?: string } };
@@ -93,18 +98,21 @@ export type WebviewToExt =
   | { type: "dirty"; payload: boolean }
   | { type: "cancel" }
   | { type: "save"; payload: { name: string; description?: string; rows: PresetRow[]; apply: boolean } }
-  /** Manual refresh from the quota panel; providerId omitted (or undefined) means refresh all providers. */
+  /** Manual refresh from the quota view; providerId omitted (or undefined) means refresh all providers. */
   | { type: "quotaRefresh"; payload?: { providerId?: QuotaProviderId } }
   | { type: "quotaSaveMimoCookie"; payload: { cookie: string } }
+  /** Toggle one provider's status-bar visibility (persisted into quota.json by the host). */
+  | { type: "quotaSetStatusBar"; payload: { providerId: QuotaProviderId; visible: boolean } }
   /** Answer to quotaPing — proves the webview's JS context is still alive. */
   | { type: "pong" }
   /** Persist the whole settings form (idempotent full-object save; values re-normalized host-side). */
   | { type: "settingsSave"; payload: { settings: AutoRefreshSettings } };
 
 // ---------------------------------------------------------------------------
-// Quota panel contract — data shapes consumed by BOTH the extension host
-// (quotaService) and the quota webview bundle (quota.html), so they live here
-// instead of core (which the webview must not pull in: node:fs dependencies).
+// Quota view contract — data shapes consumed by BOTH the extension host
+// (quotaService) and the manager webview bundle (manager.html, 额度 tab), so
+// they live here instead of core (which the webview must not pull in:
+// node:fs dependencies).
 // ---------------------------------------------------------------------------
 
 export type QuotaProviderId = "kimi" | "glm" | "mimo" | "deepseek";
@@ -143,6 +151,41 @@ export interface QuotaSnapshot {
 /** Canonical provider order: fetchAll iteration and every quota UI group. */
 export const QUOTA_PROVIDER_IDS: readonly QuotaProviderId[] = ["kimi", "glm", "mimo", "deepseek"];
 
+/**
+ * Per-provider status-bar visibility. Persisted as the `statusBar` block inside
+ * quota.json (full record on write; reads accept sparse maps too — an absent
+ * key counts as visible); always held fully materialized in memory so consumers
+ * never deal with partial records.
+ */
+export type QuotaVisibility = Record<QuotaProviderId, boolean>;
+
+/** Manager page tabs — the quota view and the settings view live in one panel. */
+export type ManagerTab = "quota" | "settings";
+
+/** Switch the manager page to a tab; focusProvider scrolls one quota group into view. */
+export interface ManagerNavigatePayload {
+  tab: ManagerTab;
+  focusProvider?: QuotaProviderId;
+}
+
+/** All-visible default used when quota.json carries no visibility block. */
+export function defaultQuotaVisibility(): QuotaVisibility {
+  return { kimi: true, glm: true, mimo: true, deepseek: true };
+}
+
+/**
+ * Drop providers hidden from the status bar. Pure: the caller (status bar text,
+ * tooltip, degraded check) renders only what the user chose to see; the quota
+ * view itself never filters — it always shows all four groups so the toggles
+ * stay reachable.
+ */
+export function filterQuotaSnapshotByVisibility(snapshot: QuotaSnapshot, visibility: QuotaVisibility): QuotaSnapshot {
+  return {
+    providers: snapshot.providers.filter((provider) => visibility[provider.providerId] !== false),
+    fetchedAt: snapshot.fetchedAt,
+  };
+}
+
 /** Canonical quota-window display order (status-bar segments, panel rows): 5h → weekly → monthly. */
 export const QUOTA_WINDOW_ORDER: readonly QuotaWindowKind[] = ["5h", "weekly", "monthly"];
 
@@ -158,9 +201,11 @@ export function quotaProviderLabel(id: QuotaProviderId): string {
   return QUOTA_PROVIDER_LABELS[id];
 }
 
-/** Boot payload of the quota panel; focusProvider scrolls one group into view (MiMo config entry point). */
+/** Boot payload of the quota view; focusProvider scrolls one group into view (MiMo config entry point). */
 export interface QuotaInitPayload {
   snapshot: QuotaSnapshot | null;
+  /** Current per-provider status-bar visibility (host-normalized full record). */
+  visibility?: QuotaVisibility;
   focusProvider?: QuotaProviderId;
 }
 
@@ -219,11 +264,11 @@ export function formatQuotaResetTime(iso: string | null): string {
 }
 
 // ---------------------------------------------------------------------------
-// Settings page contract — per-category tree auto-refresh polling plus the
+// Settings view contract — per-category tree auto-refresh polling plus the
 // Coding Plan refresh interval. Consumed by BOTH the extension host
-// (settingsStore read/write, autoRefreshScheduler, settingsPanelHost) and the
-// settings webview bundle (settings.html), so the shapes, bounds and the
-// normalizer live here as the single source of truth.
+// (settingsStore read/write, autoRefreshScheduler, managerPanelHost) and the
+// manager webview bundle (manager.html, 设置 tab), so the shapes, bounds and
+// the normalizer live here as the single source of truth.
 // ---------------------------------------------------------------------------
 
 /** Tree sections that support timed auto-refresh polling, in settings-page display order. */
