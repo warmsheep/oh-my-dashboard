@@ -1,5 +1,11 @@
-import type { ExtToWebview, ProviderQuota, QuotaInitPayload, QuotaSnapshot } from "@shared/protocol";
-import { formatQuotaResetTime, QUOTA_PROVIDER_IDS, quotaProviderLabel, quotaWindowLabel } from "@shared/protocol";
+import type { ExtToWebview, ProviderQuota, QuotaInitPayload, QuotaSnapshot, QuotaVisibility } from "@shared/protocol";
+import {
+  defaultQuotaVisibility,
+  formatQuotaResetTime,
+  QUOTA_PROVIDER_IDS,
+  quotaProviderLabel,
+  quotaWindowLabel,
+} from "@shared/protocol";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { hasVSCodeApi, postToHost } from "../vscode";
@@ -73,23 +79,27 @@ function ProviderGroup({
   providerId,
   provider,
   refreshing,
+  statusBarVisible,
   cookie,
   cookieError,
   savingCookie,
   onCookieChange,
   onSaveCookie,
   onRefresh,
+  onToggleStatusBar,
   groupRef,
 }: {
   providerId: ProviderQuota["providerId"];
   provider: ProviderQuota | null;
   refreshing: boolean;
+  statusBarVisible: boolean;
   cookie: string;
   cookieError: string | null;
   savingCookie: boolean;
   onCookieChange(value: string): void;
   onSaveCookie(): void;
   onRefresh(): void;
+  onToggleStatusBar(visible: boolean): void;
   groupRef(el: HTMLElement | null): void;
 }) {
   const label = provider?.label ?? quotaProviderLabel(providerId);
@@ -123,6 +133,20 @@ function ProviderGroup({
           </span>
         )}
         <span className={`qbadge ${provider?.configured ? "on" : ""}`}>{badge}</span>
+        <label
+          className="qstatus-toggle"
+          title="关闭后状态栏不显示该供应商，也不再定时刷新其额度；本页打开期间仍会刷新"
+        >
+          <span aria-hidden="true">状态栏</span>
+          <input
+            type="checkbox"
+            className="s-switch-input"
+            aria-label={`在状态栏显示${label}`}
+            checked={statusBarVisible}
+            onChange={(e) => onToggleStatusBar(e.currentTarget.checked)}
+          />
+          <span className="s-switch-track" aria-hidden="true" />
+        </label>
         <button type="button" className="btn secondary qrefresh" disabled={refreshing} onClick={onRefresh}>
           ⟳ 刷新
         </button>
@@ -232,7 +256,9 @@ function ProviderGroup({
 
 export default function QuotaApp() {
   const [snapshot, setSnapshot] = useState<QuotaSnapshot | null>(null);
+  const [visibility, setVisibility] = useState<QuotaVisibility>(defaultQuotaVisibility);
   const [pending, setPending] = useState<ReadonlySet<string>>(new Set());
+  const [togglePending, setTogglePending] = useState(false);
   const [cookie, setCookie] = useState("");
   const [savingCookie, setSavingCookie] = useState(false);
   const [cookieError, setCookieError] = useState<string | null>(null);
@@ -243,6 +269,9 @@ export default function QuotaApp() {
 
   const handleInit = useCallback((payload: QuotaInitPayload) => {
     setSnapshot(payload.snapshot);
+    if (payload.visibility !== undefined) {
+      setVisibility(payload.visibility);
+    }
     setPending(new Set());
     setSavingCookie(false);
     setCookieError(null);
@@ -267,9 +296,6 @@ export default function QuotaApp() {
         setSnapshot(msg.payload.snapshot);
         setPending(new Set());
         setStaleError(null);
-      } else if (msg.type === "quotaPing") {
-        // Liveness probe: answering proves this page's JS is still running.
-        postToHost({ type: "pong" });
       } else if (msg.type === "quotaConfigSaved") {
         setSavingCookie(false);
         if (msg.payload.ok) {
@@ -279,10 +305,18 @@ export default function QuotaApp() {
         } else {
           setCookieError(msg.payload.error ?? "保存失败，请重试");
         }
+      } else if (msg.type === "quotaStatusBarSaved") {
+        setTogglePending(false);
+        if (msg.payload.ok && msg.payload.visibility !== undefined) {
+          // Optimistic UI reconciled with the persisted truth.
+          setVisibility(msg.payload.visibility);
+          setToast("状态栏显示已更新");
+        } else if (!msg.payload.ok) {
+          setStaleError(msg.payload.error ?? "保存失败，请重试");
+        }
       }
     };
     window.addEventListener("message", onMessage);
-    postToHost({ type: "ready" });
     if (!hasVSCodeApi()) {
       const t = window.setTimeout(() => handleInit({ snapshot: DEV_SNAPSHOT }), 60);
       return () => {
@@ -298,16 +332,17 @@ export default function QuotaApp() {
   // legitimate request (MiMo = 3 sequential requests × 10s timeout + margin) — a page-
   // level transient banner, never the MiMo-scoped cookieError.
   useEffect(() => {
-    if (pending.size === 0 && !savingCookie) {
+    if (pending.size === 0 && !savingCookie && !togglePending) {
       return;
     }
     const t = window.setTimeout(() => {
       setPending(new Set());
       setSavingCookie(false);
+      setTogglePending(false);
       setStaleError("请求无响应，请重试");
     }, 35_000);
     return () => window.clearTimeout(t);
-  }, [pending, savingCookie]);
+  }, [pending, savingCookie, togglePending]);
 
   useEffect(() => {
     if (!toast) {
@@ -332,6 +367,13 @@ export default function QuotaApp() {
     postToHost({ type: "quotaSaveMimoCookie", payload: { cookie: value } });
   }, [cookie, savingCookie]);
 
+  /** Optimistically flip the switch; the quotaStatusBarSaved reply reconciles with persisted truth. */
+  const toggleStatusBar = useCallback((providerId: ProviderQuota["providerId"], visible: boolean) => {
+    setVisibility((current) => ({ ...current, [providerId]: visible }));
+    setTogglePending(true);
+    postToHost({ type: "quotaSetStatusBar", payload: { providerId, visible } });
+  }, []);
+
   const byId = useMemo(() => {
     const map = new Map<ProviderQuota["providerId"], ProviderQuota>();
     for (const provider of snapshot?.providers ?? []) {
@@ -341,50 +383,47 @@ export default function QuotaApp() {
   }, [snapshot]);
 
   return (
-    <main className="app">
-      <div className="page quota-page">
-        <header className="page-head">
-          <h1>Coding Plan 额度</h1>
-          <p>{snapshot ? formatFetchedAt(snapshot.fetchedAt) : "正在加载…"}</p>
-        </header>
+    <div className="qtab">
+      <p className="qpage-meta">{snapshot ? formatFetchedAt(snapshot.fetchedAt) : "正在加载…"}</p>
 
-        {staleError && (
-          <div className="banner-error" role="alert">
-            <span className="banner-icon" aria-hidden="true">
-              ⛔
-            </span>
-            {staleError}
-          </div>
-        )}
-
-        {QUOTA_PROVIDER_IDS.map((id) => (
-          <ProviderGroup
-            key={id}
-            providerId={id}
-            provider={byId.get(id) ?? null}
-            refreshing={pending.has(id) || pending.has(ALL_PENDING_KEY)}
-            cookie={id === "mimo" ? cookie : ""}
-            cookieError={id === "mimo" ? cookieError : null}
-            savingCookie={savingCookie}
-            onCookieChange={setCookie}
-            onSaveCookie={saveCookie}
-            onRefresh={() => requestRefresh(id)}
-            groupRef={(el) => {
-              groupRefs.current[id] = el;
-            }}
-          />
-        ))}
-
-        <div className="qfooter">
-          <button
-            type="button"
-            className="btn primary"
-            disabled={pending.has(ALL_PENDING_KEY)}
-            onClick={() => requestRefresh()}
-          >
-            ⟳ 刷新全部
-          </button>
+      {staleError && (
+        <div className="banner-error" role="alert">
+          <span className="banner-icon" aria-hidden="true">
+            ⛔
+          </span>
+          {staleError}
         </div>
+      )}
+
+      {QUOTA_PROVIDER_IDS.map((id) => (
+        <ProviderGroup
+          key={id}
+          providerId={id}
+          provider={byId.get(id) ?? null}
+          refreshing={pending.has(id) || pending.has(ALL_PENDING_KEY)}
+          statusBarVisible={visibility[id] ?? true}
+          cookie={id === "mimo" ? cookie : ""}
+          cookieError={id === "mimo" ? cookieError : null}
+          savingCookie={savingCookie}
+          onCookieChange={setCookie}
+          onSaveCookie={saveCookie}
+          onRefresh={() => requestRefresh(id)}
+          onToggleStatusBar={(visible) => toggleStatusBar(id, visible)}
+          groupRef={(el) => {
+            groupRefs.current[id] = el;
+          }}
+        />
+      ))}
+
+      <div className="qfooter">
+        <button
+          type="button"
+          className="btn primary"
+          disabled={pending.has(ALL_PENDING_KEY)}
+          onClick={() => requestRefresh()}
+        >
+          ⟳ 刷新全部
+        </button>
       </div>
 
       {toast && (
@@ -392,6 +431,6 @@ export default function QuotaApp() {
           ✓&ensp;{toast}
         </output>
       )}
-    </main>
+    </div>
   );
 }

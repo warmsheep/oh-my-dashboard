@@ -103,7 +103,6 @@ export default function SettingsApp() {
       }
     };
     window.addEventListener("message", onMessage);
-    postToHost({ type: "ready" });
     if (!hasVSCodeApi()) {
       const t = window.setTimeout(() => adoptSettings(DEV_SETTINGS), 60);
       return () => {
@@ -229,106 +228,97 @@ export default function SettingsApp() {
   const dirty = form !== null && saved !== null && isSettingsDirty(form, saved);
 
   return (
-    <main className="app">
-      <div className="page settings-page">
-        <header className="page-head">
-          <h1>设置</h1>
-          <p>自动刷新与 Coding Plan 刷新频率</p>
-        </header>
+    <div className="stab">
+      {saveError && (
+        <div className="banner-error" role="alert">
+          <span className="banner-icon" aria-hidden="true">
+            ⛔
+          </span>
+          {saveError}
+        </div>
+      )}
 
-        {saveError && (
-          <div className="banner-error" role="alert">
-            <span className="banner-icon" aria-hidden="true">
-              ⛔
-            </span>
-            {saveError}
-          </div>
-        )}
-
-        {form === null ? (
-          <div className="boot">正在加载…</div>
-        ) : (
-          <>
-            <section className="s-section">
-              <header className="s-section-head">
-                <h2>分区自动刷新</h2>
-              </header>
-              <div className="s-section-body">
-                {AUTO_REFRESH_CATEGORIES.map((category) => {
-                  const categorySetting = form.categories[category];
-                  return (
-                    <div className="s-row" key={category}>
-                      <span className="s-row-label">{autoRefreshCategoryLabel(category)}</span>
-                      <div className="s-controls">
-                        <label className="s-switch">
-                          <input
-                            type="checkbox"
-                            className="s-switch-input"
-                            aria-label={`启用${autoRefreshCategoryLabel(category)}自动刷新`}
-                            checked={categorySetting.enabled}
-                            onChange={() => handleToggle(category)}
-                          />
-                          <span className="s-switch-track" aria-hidden="true" />
-                        </label>
-                        <div className={`s-num-group${categorySetting.enabled ? "" : " off"}`}>
-                          {renderNumberField(
-                            category,
-                            drafts[category] ?? String(categorySetting.intervalSeconds),
-                            AUTO_REFRESH_MIN_INTERVAL_SECONDS,
-                            AUTO_REFRESH_MAX_INTERVAL_SECONDS,
-                            `${autoRefreshCategoryLabel(category)}刷新间隔（秒）`,
-                            !categorySetting.enabled,
-                          )}
-                          <span className="s-unit">秒</span>
-                        </div>
+      {form === null ? (
+        <div className="boot">正在加载…</div>
+      ) : (
+        <>
+          <section className="s-section">
+            <header className="s-section-head">
+              <h2>分区自动刷新</h2>
+            </header>
+            <div className="s-section-body">
+              {AUTO_REFRESH_CATEGORIES.map((category) => {
+                const categorySetting = form.categories[category];
+                return (
+                  <div className="s-row" key={category}>
+                    <span className="s-row-label">{autoRefreshCategoryLabel(category)}</span>
+                    <div className="s-controls">
+                      <label className="s-switch">
+                        <input
+                          type="checkbox"
+                          className="s-switch-input"
+                          aria-label={`启用${autoRefreshCategoryLabel(category)}自动刷新`}
+                          checked={categorySetting.enabled}
+                          onChange={() => handleToggle(category)}
+                        />
+                        <span className="s-switch-track" aria-hidden="true" />
+                      </label>
+                      <div className={`s-num-group${categorySetting.enabled ? "" : " off"}`}>
+                        {renderNumberField(
+                          category,
+                          drafts[category] ?? String(categorySetting.intervalSeconds),
+                          AUTO_REFRESH_MIN_INTERVAL_SECONDS,
+                          AUTO_REFRESH_MAX_INTERVAL_SECONDS,
+                          `${autoRefreshCategoryLabel(category)}刷新间隔（秒）`,
+                          !categorySetting.enabled,
+                        )}
+                        <span className="s-unit">秒</span>
                       </div>
                     </div>
-                  );
-                })}
-              </div>
-            </section>
-
-            <section className="s-section">
-              <header className="s-section-head">
-                <h2>Coding Plan 额度</h2>
-              </header>
-              <div className="s-section-body">
-                <div className="s-row">
-                  <span className="s-row-label">刷新频率（秒）</span>
-                  <div className="s-controls">
-                    {renderNumberField(
-                      QUOTA_FIELD,
-                      drafts[QUOTA_FIELD] ?? String(form.quotaRefreshSeconds),
-                      QUOTA_REFRESH_MIN_SECONDS,
-                      QUOTA_REFRESH_MAX_SECONDS,
-                      "Coding Plan 刷新频率（秒）",
-                      false,
-                    )}
                   </div>
-                </div>
-                <p className="s-hint">0 = 关闭自动刷新；网络故障时自动退避重试</p>
-              </div>
-            </section>
-
-            <p className="s-hint s-footnote">
-              开启后按设定间隔轮询刷新树视图；文件变更监听始终生效，手动刷新不受影响。
-            </p>
-
-            <div className="s-footer">
-              <button type="button" className="btn primary" disabled={!dirty || saving} onClick={save}>
-                {saving ? "保存中…" : "保存设置"}
-              </button>
-              {dirty && !saving && <span className="s-dirty-hint">有未保存的更改</span>}
+                );
+              })}
             </div>
-          </>
-        )}
-      </div>
+          </section>
+
+          <section className="s-section">
+            <header className="s-section-head">
+              <h2>Coding Plan 额度</h2>
+            </header>
+            <div className="s-section-body">
+              <div className="s-row">
+                <span className="s-row-label">刷新频率（秒）</span>
+                <div className="s-controls">
+                  {renderNumberField(
+                    QUOTA_FIELD,
+                    drafts[QUOTA_FIELD] ?? String(form.quotaRefreshSeconds),
+                    QUOTA_REFRESH_MIN_SECONDS,
+                    QUOTA_REFRESH_MAX_SECONDS,
+                    "Coding Plan 刷新频率（秒）",
+                    false,
+                  )}
+                </div>
+              </div>
+              <p className="s-hint">0 = 关闭自动刷新；网络故障时自动退避重试</p>
+            </div>
+          </section>
+
+          <p className="s-hint s-footnote">开启后按设定间隔轮询刷新树视图；文件变更监听始终生效，手动刷新不受影响。</p>
+
+          <div className="s-footer">
+            <button type="button" className="btn primary" disabled={!dirty || saving} onClick={save}>
+              {saving ? "保存中…" : "保存设置"}
+            </button>
+            {dirty && !saving && <span className="s-dirty-hint">有未保存的更改</span>}
+          </div>
+        </>
+      )}
 
       {toast && (
         <output className="toast" aria-live="polite">
           ✓&ensp;{toast}
         </output>
       )}
-    </main>
+    </div>
   );
 }

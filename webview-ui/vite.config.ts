@@ -18,11 +18,11 @@ export default defineConfig({
     outDir: "build",
     assetsDir: "./",
     rollupOptions: {
-      // Three standalone webview pages: the preset matrix editor, the quota panel, the settings page.
+      // Two standalone webview pages: the preset matrix editor and the merged
+      // manager page (额度 + 设置 tabs).
       input: {
         index: path.resolve(rootDir, "webview-ui/index.html"),
-        quota: path.resolve(rootDir, "webview-ui/quota.html"),
-        settings: path.resolve(rootDir, "webview-ui/settings.html"),
+        manager: path.resolve(rootDir, "webview-ui/manager.html"),
       },
       output: {
         entryFileNames: "[name].js",
