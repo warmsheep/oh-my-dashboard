@@ -11,12 +11,17 @@ import {
   NETWORK_TIMEOUT_MESSAGE,
   NETWORK_UNAVAILABLE_MESSAGE,
   normalizeMimoCookie,
+  providerHasDisplayData,
   QUOTA_PAUSE_AFTER_STREAK,
   quotaCycleFailed,
   quotaRetryDelayMs,
   QuotaService,
   quotaShouldPauseAutoRefresh,
+  quotaSnapshotDegraded,
+  spliceStaleProviders,
+  STALE_PROVIDER_MAX_AGE_MS,
   type ProviderQuota,
+  type QuotaProviderId,
   type QuotaSnapshot,
   type QuotaWindow,
 } from "../../src/core/quotaService";
@@ -1175,6 +1180,172 @@ describe("formatQuotaBar", () => {
     });
     expect(errored.segments).toEqual([{ text: "Kimi ?", color: "neutral" }]);
     expect(formatQuotaBar({ fetchedAt: "x", providers: [] }).segments).toEqual([]);
+  });
+
+  it("renders staleFetchedAt providers with a ~ marker instead of ? (windows and balances)", () => {
+    const bar = formatQuotaBar({
+      fetchedAt: "2026-08-22T00:10:00.000Z",
+      providers: [
+        {
+          providerId: "kimi",
+          label: "Kimi",
+          plan: null,
+          configured: true,
+          error: "网络不可用，请检查网络连接",
+          staleFetchedAt: "2026-08-22T00:00:00.000Z",
+          windows: [
+            {
+              kind: "5h",
+              usedPercent: 45,
+              remainingPercent: 55,
+              used: null,
+              limit: null,
+              remaining: null,
+              resetAt: null,
+            },
+          ],
+          balances: null,
+        },
+        {
+          providerId: "deepseek",
+          label: "DeepSeek",
+          plan: null,
+          configured: true,
+          error: "网络不可用，请检查网络连接",
+          staleFetchedAt: "2026-08-22T00:00:00.000Z",
+          windows: [],
+          balances: { total: 110, currency: "CNY" },
+        },
+      ],
+    });
+    expect(bar.segments.map((seg) => [seg.text, seg.color])).toEqual([
+      ["Kimi ~55%/5h", "yellow"],
+      ["DeepSeek ~¥110", "green"],
+    ]);
+  });
+});
+
+describe("spliceStaleProviders — stale-while-error overlay", () => {
+  const errored = (providerId: QuotaProviderId, error: string): ProviderQuota => ({
+    providerId,
+    label: providerId,
+    plan: null,
+    configured: true,
+    error,
+    windows: [],
+    balances: null,
+  });
+  const good = (providerId: QuotaProviderId): ProviderQuota => ({
+    providerId,
+    label: providerId,
+    plan: "pro",
+    configured: true,
+    error: null,
+    windows: [
+      { kind: "5h", usedPercent: 20, remainingPercent: 80, used: null, limit: null, remaining: null, resetAt: null },
+    ],
+    balances: null,
+  });
+
+  it("restores cached windows under an errored provider, keeping the fresh error and fetchedAt", () => {
+    const now = Date.parse("2026-08-22T00:10:00.000Z");
+    const lastGood = new Map([["kimi" as QuotaProviderId, { provider: good("kimi"), fetchedAtMs: now - 60_000 }]]);
+    const fresh: QuotaSnapshot = {
+      fetchedAt: "2026-08-22T00:10:00.000Z",
+      providers: [errored("kimi", "网络不可用，请检查网络连接")],
+    };
+    const spliced = spliceStaleProviders(fresh, lastGood, now);
+    expect(spliced.fetchedAt).toBe(fresh.fetchedAt);
+    expect(spliced.providers[0]).toEqual({
+      ...good("kimi"),
+      error: "网络不可用，请检查网络连接",
+      staleFetchedAt: "2026-08-22T00:09:00.000Z",
+    });
+  });
+
+  it("keeps the bare error once the cache exceeds the age cap, and for contentless caches", () => {
+    const now = Date.parse("2026-08-22T02:00:00.000Z");
+    const tooOld = new Map([
+      ["kimi" as QuotaProviderId, { provider: good("kimi"), fetchedAtMs: now - STALE_PROVIDER_MAX_AGE_MS - 1 }],
+    ]);
+    const contentless = new Map([
+      ["glm" as QuotaProviderId, { provider: { ...errored("glm", "x"), error: null }, fetchedAtMs: now }],
+    ]);
+    const fresh: QuotaSnapshot = {
+      fetchedAt: "2026-08-22T02:00:00.000Z",
+      providers: [errored("kimi", "网络不可用，请检查网络连接"), errored("glm", "网络不可用，请检查网络连接")],
+    };
+    const spliced = spliceStaleProviders(fresh, new Map([...tooOld, ...contentless]), now);
+    expect(spliced.providers[0]).toEqual(fresh.providers[0]); // too old → untouched
+    expect(spliced.providers[1]).toEqual(fresh.providers[1]); // no windows/balances → untouched
+  });
+
+  it("leaves clean providers untouched", () => {
+    const now = Date.parse("2026-08-22T00:10:00.000Z");
+    const clean = good("kimi");
+    const spliced = spliceStaleProviders({ fetchedAt: "t", providers: [clean] }, new Map(), now);
+    expect(spliced.providers[0]).toBe(clean);
+  });
+
+  it("normalizes: a previously overlaid entry whose cache aged out degrades to the error-only form", () => {
+    const now = Date.parse("2026-08-22T02:00:00.000Z");
+    const lastGood = new Map([
+      ["kimi" as QuotaProviderId, { provider: good("kimi"), fetchedAtMs: now - STALE_PROVIDER_MAX_AGE_MS - 1 }],
+    ]);
+    // Snapshot carrying an earlier overlay (solo-refresh paths keep old siblings).
+    const overlaid: QuotaSnapshot = {
+      fetchedAt: "2026-08-22T02:00:00.000Z",
+      providers: [
+        {
+          ...errored("kimi", "网络不可用，请检查网络连接"),
+          plan: "pro",
+          windows: good("kimi").windows,
+          staleFetchedAt: "2026-08-22T00:00:00.000Z",
+        },
+      ],
+    };
+    const spliced = spliceStaleProviders(overlaid, lastGood, now);
+    expect(spliced.providers[0]).toEqual(errored("kimi", "网络不可用，请检查网络连接"));
+  });
+});
+
+describe("providerHasDisplayData / quotaSnapshotDegraded", () => {
+  const base = (overrides: Partial<ProviderQuota>): ProviderQuota => ({
+    providerId: "kimi",
+    label: "Kimi",
+    plan: null,
+    configured: true,
+    error: null,
+    windows: [],
+    balances: null,
+    ...overrides,
+  });
+  const nullWindow = {
+    kind: "5h" as const,
+    usedPercent: null,
+    remainingPercent: null,
+    used: null,
+    limit: null,
+    remaining: null,
+    resetAt: null,
+  };
+  const realWindow = { ...nullWindow, usedPercent: 10, remainingPercent: 90 };
+
+  it("accepts windows with derivable percents and real balances; rejects contentless shapes", () => {
+    expect(providerHasDisplayData(base({ windows: [nullWindow] }))).toBe(false);
+    expect(providerHasDisplayData(base({ windows: [realWindow] }))).toBe(true);
+    // MiMo success with missing balance fields: balances present but empty → not display data.
+    expect(providerHasDisplayData(base({ balances: { total: null, currency: null } }))).toBe(false);
+    expect(providerHasDisplayData(base({ balances: { total: 12.34, currency: "CNY" } }))).toBe(true);
+    expect(providerHasDisplayData(base({}))).toBe(false);
+  });
+
+  it("degraded = no snapshot, or any configured provider with an error (unconfigured errors do not count)", () => {
+    expect(quotaSnapshotDegraded(null)).toBe(true);
+    expect(quotaSnapshotDegraded({ fetchedAt: "t", providers: [] })).toBe(false);
+    expect(quotaSnapshotDegraded({ fetchedAt: "t", providers: [base({})] })).toBe(false);
+    expect(quotaSnapshotDegraded({ fetchedAt: "t", providers: [base({ error: "x" })] })).toBe(true);
+    expect(quotaSnapshotDegraded({ fetchedAt: "t", providers: [base({ configured: false })] })).toBe(false);
   });
 });
 

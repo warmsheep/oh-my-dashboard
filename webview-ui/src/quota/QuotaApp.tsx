@@ -93,8 +93,18 @@ function ProviderGroup({
   groupRef(el: HTMLElement | null): void;
 }) {
   const label = provider?.label ?? quotaProviderLabel(providerId);
-  const badge = refreshing ? "刷新中…" : provider === null ? "待加载" : provider.configured ? "已配置" : "未配置";
-  const balance = provider !== null && provider.error === null ? balanceText(provider.balances) : null;
+  const stale = provider?.staleFetchedAt !== undefined;
+  const badge = refreshing
+    ? "刷新中…"
+    : provider === null
+      ? "待加载"
+      : stale
+        ? "数据较旧"
+        : provider.configured
+          ? "已配置"
+          : "未配置";
+  const showData = provider !== null && (provider.error === null || stale);
+  const balance = showData ? balanceText(provider.balances) : null;
   const credHint =
     providerId === "mimo" || provider === null
       ? null
@@ -124,12 +134,13 @@ function ProviderGroup({
             <span className="banner-icon" aria-hidden="true">
               ⛔
             </span>
-            {provider.error}
+            {provider.staleFetchedAt !== undefined
+              ? `显示 ${new Date(provider.staleFetchedAt).toLocaleString("zh-CN", { hour12: false })} 的旧数据：${provider.error}`
+              : provider.error}
           </div>
         )}
 
-        {provider !== null &&
-          provider.error === null &&
+        {showData &&
           orderedWindows(provider.windows).map((window) => {
             const remaining = windowRemaining(window);
             const fill = progressPercent(window);
@@ -161,9 +172,9 @@ function ProviderGroup({
             );
           })}
 
-        {provider !== null && provider.error === null && balance !== null && (
+        {showData && balance !== null && (
           <div className="qrow">
-            <span className="qrow-label">余额</span>
+            <span className="qrow-label">余额{stale ? "（旧）" : ""}</span>
             <span className={`qpct ${balanceTone(provider.balances!.total!)}`}>{balance}</span>
             <span className="qdetail">
               <span>按量计费</span>

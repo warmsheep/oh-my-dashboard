@@ -5,11 +5,21 @@ import { errorMessage } from "../core/errors";
 import {
   formatQuotaBar,
   mergeProviderSnapshot,
+  providerHasDisplayData,
   quotaCycleFailed,
   quotaRetryDelayMs,
   quotaShouldPauseAutoRefresh,
+  quotaSnapshotDegraded,
+  spliceStaleProviders,
 } from "../core/quotaService";
-import type { QuotaSegmentColor, QuotaService, QuotaSnapshot, QuotaWindow } from "../core/quotaService";
+import type {
+  LastGoodProvider,
+  ProviderQuota,
+  QuotaSegmentColor,
+  QuotaService,
+  QuotaSnapshot,
+  QuotaWindow,
+} from "../core/quotaService";
 import {
   deriveRemainingPercent,
   QUOTA_REFRESH_DEFAULT_SECONDS,
@@ -46,7 +56,7 @@ function describeWindow(window: QuotaWindow): string {
 function tooltipMarkdown(snap: QuotaSnapshot): vscode.MarkdownString {
   const md = new vscode.MarkdownString();
   for (const provider of snap.providers) {
-    if (provider.error !== null) {
+    if (provider.error !== null && provider.staleFetchedAt === undefined) {
       // Error text is remote-controlled (API messages) — appendText escapes markdown so
       // links/images can never be injected into the hover.
       md.appendMarkdown(`- **${provider.label}**：`);
@@ -77,6 +87,12 @@ function tooltipMarkdown(snap: QuotaSnapshot): vscode.MarkdownString {
       md.appendMarkdown(`）`);
     }
     md.appendMarkdown(`：${body}\n`);
+    if (provider.staleFetchedAt !== undefined && provider.error !== null) {
+      const at = new Date(provider.staleFetchedAt).toLocaleString("zh-CN", { hour12: false });
+      md.appendMarkdown(`  - ⚠ 显示 ${at} 的旧数据（`);
+      md.appendText(provider.error);
+      md.appendMarkdown(`）\n`);
+    }
   }
   md.appendMarkdown(`\n更新于 ${new Date(snap.fetchedAt).toLocaleString("zh-CN", { hour12: false })} · 点击查看详情`);
   return md;
@@ -113,6 +129,14 @@ export function createQuotaStatusBar(deps: QuotaStatusBarDeps): QuotaStatusBar {
   let refreshPromise: Promise<void> | null = null;
   let failureStreak = 0;
   let disposed = false;
+  /** Last successful provider results, feeding spliceStaleProviders on failed cycles. */
+  const lastGood = new Map<QuotaProviderId, LastGoodProvider>();
+
+  const rememberGoodProvider = (provider: ProviderQuota): void => {
+    if (provider.error === null && provider.configured && providerHasDisplayData(provider)) {
+      lastGood.set(provider.providerId, { provider, fetchedAtMs: Date.now() });
+    }
+  };
 
   // One status-bar item per (provider, window) segment — VSCode items are single-colored, so
   // per-window colors require separate items. Higher priority sits further left (right-aligned).
@@ -163,7 +187,13 @@ export function createQuotaStatusBar(deps: QuotaStatusBarDeps): QuotaStatusBar {
     if (!refreshPromise) {
       refreshPromise = (async () => {
         try {
-          snapshot = await deps.quotaService.fetchAll();
+          const fresh = await deps.quotaService.fetchAll();
+          for (const provider of fresh.providers) {
+            rememberGoodProvider(provider);
+          }
+          // Stale-while-error overlay keeps the bar numeric (with a ~ marker) instead
+          // of "?" while the network is down; errors are retained for the breaker.
+          snapshot = spliceStaleProviders(fresh, lastGood, Date.now());
           const failed = quotaCycleFailed(snapshot);
           failureStreak = failed ? failureStreak + 1 : 0;
           if (!failed) {
@@ -256,7 +286,12 @@ export function createQuotaStatusBar(deps: QuotaStatusBarDeps): QuotaStatusBar {
     }
     try {
       const provider = await deps.quotaService.fetchProvider(providerId);
-      snapshot = mergeProviderSnapshot(snapshot, provider, new Date().toISOString());
+      rememberGoodProvider(provider);
+      snapshot = spliceStaleProviders(
+        mergeProviderSnapshot(snapshot, provider, new Date().toISOString()),
+        lastGood,
+        Date.now(),
+      );
       failureStreak = 0;
       pausedLogged = false;
       scheduleNext();
@@ -269,6 +304,25 @@ export function createQuotaStatusBar(deps: QuotaStatusBarDeps): QuotaStatusBar {
     }
     return snapshot;
   };
+
+  // Coming back to a long-idle code-server window: suspend/VPN/DNS blips during the
+  // idle window have usually tripped the transport circuit breaker (auto-refresh
+  // paused) and the bar may sit degraded. One cycle on focus heals both the moment
+  // the network is back (success resets the streak). Degraded-only + a 10s floor
+  // keep rapid alt-tabbing from pumping requests into a still-dead network.
+  const FOCUS_REFRESH_MIN_INTERVAL_MS = 10_000;
+  let lastFocusRefreshAt = 0;
+  const focusListener = vscode.window.onDidChangeWindowState((state) => {
+    if (!state.focused || disposed || !quotaSnapshotDegraded(snapshot)) {
+      return;
+    }
+    const now = Date.now();
+    if (now - lastFocusRefreshAt < FOCUS_REFRESH_MIN_INTERVAL_MS) {
+      return;
+    }
+    lastFocusRefreshAt = now;
+    void refresh();
+  });
 
   render();
   // Delayed first cycle: activation overlaps other extensions' startup IO (language
@@ -291,6 +345,7 @@ export function createQuotaStatusBar(deps: QuotaStatusBarDeps): QuotaStatusBar {
       }
       configListener.dispose();
       themeListener.dispose();
+      focusListener.dispose();
       snapshotEmitter.dispose();
     },
   };

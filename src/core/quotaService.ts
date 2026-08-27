@@ -264,6 +264,87 @@ function isTransportError(message: string): boolean {
   return message === NETWORK_TIMEOUT_MESSAGE || message === NETWORK_UNAVAILABLE_MESSAGE;
 }
 
+/** Cached last-successful provider for stale-while-error display (see spliceStaleProviders). */
+export interface LastGoodProvider {
+  provider: ProviderQuota;
+  fetchedAtMs: number;
+}
+
+/**
+ * Max age for overlaying cached data under an errored provider. Beyond this the
+ * status bar falls back to "?" — 5h windows reset frequently enough that day-old
+ * numbers would be actively misleading.
+ */
+export const STALE_PROVIDER_MAX_AGE_MS = 30 * 60_000;
+
+/**
+ * True when the provider carries renderable quota content: a window with a
+ * derivable remaining percent, or a payable balance. Shared eligibility gate for
+ * the stale-while-error cache — entries without display data must neither be
+ * cached nor overlaid (they would render zero status-bar segments and silently
+ * shrink the bar instead of degrading to "?").
+ */
+export function providerHasDisplayData(provider: ProviderQuota): boolean {
+  if (provider.balances?.total != null && provider.balances.currency) {
+    return true;
+  }
+  return provider.windows.some((window) => deriveRemainingPercent(window) !== null);
+}
+
+/**
+ * True when the quota surface is degraded and should refresh on window focus:
+ * no snapshot yet, or any configured provider carrying an error (unconfigured
+ * providers never carry one, so the check is cheap and precise).
+ */
+export function quotaSnapshotDegraded(snapshot: QuotaSnapshot | null): boolean {
+  return snapshot === null || snapshot.providers.some((provider) => provider.configured && provider.error !== null);
+}
+
+/**
+ * Stale-while-error overlay: keep a failed provider displayable by restoring its
+ * windows/balances/plan from the last successful fetch (error retained so the
+ * breaker/backoff logic and the panel's error banner stay truthful). Normalizing:
+ * entries whose cache is gone, aged past STALE_PROVIDER_MAX_AGE_MS, or contentless
+ * degrade to the error-only form — including previously overlaid entries, so an
+ * aged-out "~" can never linger on refresh paths that keep running. Eligible
+ * overlays carry staleFetchedAt so renderers can mark them (~ / 旧数据).
+ */
+export function spliceStaleProviders(
+  fresh: QuotaSnapshot,
+  lastGood: ReadonlyMap<QuotaProviderId, LastGoodProvider>,
+  nowMs: number,
+): QuotaSnapshot {
+  const providers = fresh.providers.map((provider) => {
+    if (provider.error === null) {
+      return provider;
+    }
+    const cached = lastGood.get(provider.providerId);
+    if (
+      cached === undefined ||
+      nowMs - cached.fetchedAtMs > STALE_PROVIDER_MAX_AGE_MS ||
+      !providerHasDisplayData(cached.provider)
+    ) {
+      return provider.staleFetchedAt === undefined
+        ? provider
+        : {
+            providerId: provider.providerId,
+            label: provider.label,
+            plan: null,
+            windows: [],
+            balances: null,
+            configured: provider.configured,
+            error: provider.error,
+          };
+    }
+    return {
+      ...cached.provider,
+      error: provider.error,
+      staleFetchedAt: new Date(cached.fetchedAtMs).toISOString(),
+    };
+  });
+  return { providers, fetchedAt: fresh.fetchedAt };
+}
+
 /**
  * True when a refresh cycle should count as failed (for backoff): every configured
  * provider errored AND at least one is a transport-class error. Pure HTTP/API failures
@@ -309,25 +390,29 @@ export interface QuotaBar {
   segments: QuotaBarSegment[];
 }
 
-function balanceSegmentText(label: string, total: number, currency: string): string {
+function balanceSegmentText(label: string, total: number, currency: string, stale = false): string {
   const symbol = quotaCurrencySymbol(currency);
   const trimmed = Math.round(total * 100) / 100;
-  return `${label} ${symbol}${trimmed}`;
+  return `${label} ${stale ? "~" : ""}${symbol}${trimmed}`;
 }
 
 /**
  * Pure status-bar builder: one segment per (provider, window) so each window gets its own
  * color — "Kimi 100%/5h", "72%/7d", "GLM 91%/5h" in 5h → 7d → 30d order (remaining percent,
- * provider name only on its first segment). Errored providers collapse to a neutral "?" segment;
- * windowless providers with a balance render a neutral "DeepSeek ¥110" currency segment.
+ * provider name only on its first segment). Errored providers collapse to a neutral "?"
+ * segment unless stale data is available (staleFetchedAt set), in which case the cached
+ * numbers render with a leading "~"; windowless providers with a balance render a
+ * "DeepSeek ¥110" currency segment ("~" before the amount when stale).
  */
 export function formatQuotaBar(snapshot: QuotaSnapshot): QuotaBar {
   const segments: QuotaBarSegment[] = [];
   for (const provider of snapshot.providers) {
-    if (provider.error !== null) {
+    const stale = provider.staleFetchedAt !== undefined;
+    if (provider.error !== null && !stale) {
       segments.push({ text: `${provider.label} ?`, color: "neutral" });
       continue;
     }
+    const marker = stale ? "~" : "";
     let first = true;
     for (const kind of QUOTA_WINDOW_ORDER) {
       const window = provider.windows.find((w) => w.kind === kind);
@@ -339,14 +424,14 @@ export function formatQuotaBar(snapshot: QuotaSnapshot): QuotaBar {
         continue;
       }
       segments.push({
-        text: `${first ? `${provider.label} ` : ""}${Math.round(remaining)}%/${WINDOW_SHORT_LABELS[kind]}`,
+        text: `${first ? `${provider.label} ` : ""}${marker}${Math.round(remaining)}%/${WINDOW_SHORT_LABELS[kind]}`,
         color: remainingColor(remaining),
       });
       first = false;
     }
     if (first && provider.balances?.total != null && provider.balances.currency) {
       segments.push({
-        text: balanceSegmentText(provider.label, provider.balances.total, provider.balances.currency),
+        text: balanceSegmentText(provider.label, provider.balances.total, provider.balances.currency, stale),
         color: balanceColor(provider.balances.total),
       });
     }

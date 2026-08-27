@@ -128,6 +128,11 @@ export interface ProviderQuota {
   balances: { total: number | null; currency: string | null } | null;
   configured: boolean;
   error: string | null;
+  /**
+   * ISO time of the last successful fetch, present only when windows/balances are
+   * stale data kept for display while `error` carries the latest failure reason.
+   */
+  staleFetchedAt?: string;
 }
 
 export interface QuotaSnapshot {
