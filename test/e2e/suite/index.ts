@@ -415,17 +415,19 @@ function deliverSave(
 }
 
 // ---------------------------------------------------------------------------
-// Quota panel webview bridge — same capture technique as the preset editor,
-// driven by the singleton quota panel (quotaRefresh / quotaConfigureMimo).
+// Manager panel webview bridge — same capture technique as the preset editor,
+// driven by the singleton manager panel (quotaRefresh / quotaConfigureMimo /
+// openSettings all reveal the SAME merged 额度/设置 panel).
 // ---------------------------------------------------------------------------
 
-let quotaBridge: PanelBridge | undefined;
+let managerBridge: PanelBridge | undefined;
 
 interface QuotaSnapshotMessage {
   snapshot: {
     providers: { providerId: string; configured: boolean; error: string | null; windows: unknown[] }[];
     fetchedAt: string;
   };
+  visibility?: Record<string, boolean>;
 }
 
 function quotaSnapshots(bridge: PanelBridge): QuotaSnapshotMessage[] {
@@ -441,11 +443,9 @@ function quotaSnapshots(bridge: PanelBridge): QuotaSnapshotMessage[] {
 }
 
 // ---------------------------------------------------------------------------
-// Settings panel webview bridge — same capture technique as the quota panel,
-// driven by the singleton settings page (openSettings).
+// Settings view assertions — the manager panel carries the settings tab, so
+// settingsInit rides the SAME bridge as the quota messages.
 // ---------------------------------------------------------------------------
-
-let settingsBridge: PanelBridge | undefined;
 
 interface SettingsInitMessage {
   settings: {
@@ -492,13 +492,18 @@ async function pollConfigValue(key: string, expected: unknown, message: string):
   );
 }
 
-/** Open (or reveal) the settings panel while capturing its bridge; asserts the boot handshake. */
+/** Open (or reveal) the manager panel on the 设置 tab while capturing its bridge; polls for the boot settingsInit. */
 async function openSettingsPanelCaptured(commandId: string): Promise<PanelBridge> {
   const windowApi = vscode.window as unknown as {
     createWebviewPanel: (...args: unknown[]) => vscode.WebviewPanel;
   };
   const original = windowApi.createWebviewPanel;
   let bridge: PanelBridge | undefined;
+  // Snapshot the ALREADY-open panel's stream BEFORE the command: the reveal posts
+  // (managerNavigate/settingsInit) land during executeCommand, so counting after
+  // it resolves would slice them out of the "new messages" window forever.
+  const heldBefore = managerBridge;
+  const heldCount = heldBefore?.outbound.length ?? 0;
   windowApi.createWebviewPanel = (...args: unknown[]) => {
     const panel = original.apply(windowApi, args);
     const webview = panel.webview as unknown as {
@@ -507,7 +512,7 @@ async function openSettingsPanelCaptured(commandId: string): Promise<PanelBridge
     };
     const capture: PanelBridge = {
       deliver: (): void => {
-        throw new Error("onDidReceiveMessage listener was never registered for the captured settings panel");
+        throw new Error("onDidReceiveMessage listener was never registered for the captured manager panel");
       },
       outbound: [],
     };
@@ -530,7 +535,7 @@ async function openSettingsPanelCaptured(commandId: string): Promise<PanelBridge
     await withTimeout(
       Promise.resolve(vscode.commands.executeCommand(commandId)),
       20_000,
-      `${commandId} must resolve once the settings panel webview is ready`,
+      `${commandId} must resolve once the manager panel tab is open`,
     );
   } finally {
     windowApi.createWebviewPanel = original;
@@ -538,14 +543,30 @@ async function openSettingsPanelCaptured(commandId: string): Promise<PanelBridge
   // Reveal of an ALREADY-open singleton panel never calls createWebviewPanel — reuse
   // the held bridge instead (the settingsInit re-push lands there).
   if (bridge === undefined) {
-    assert.ok(settingsBridge, "settings panel reveal must reuse the previously captured bridge");
-    return settingsBridge;
+    assert.ok(heldBefore, "manager panel reveal must reuse the previously captured bridge");
+    await pollUntil(
+      () =>
+        heldBefore.outbound
+          .slice(heldCount)
+          .some(
+            (message) =>
+              message.type === "managerNavigate" &&
+              (message.payload as { tab?: unknown } | undefined)?.tab === "settings",
+          ),
+      10_000,
+      "openSettings reveal must navigate the manager panel to the settings tab",
+    );
+    return heldBefore;
   }
-  assert.ok(
-    bridge.outbound.some((message) => message.type === "settingsInit"),
-    "captured settings panel must have received the settingsInit message",
+  // Opening is decoupled from the webview handshake (merged-panel policy): the
+  // settingsInit push lands asynchronously after the page boots.
+  const captured = bridge;
+  await pollUntil(
+    () => captured.outbound.some((message) => message.type === "settingsInit"),
+    20_000,
+    "captured manager panel must have received the settingsInit message",
   );
-  settingsBridge = bridge;
+  managerBridge = bridge;
   return bridge;
 }
 
@@ -595,8 +616,8 @@ async function openQuotaPanelCaptured(commandId: string, arg?: unknown): Promise
   // Reveal of an ALREADY-open singleton panel never calls createWebviewPanel — reuse
   // the held bridge instead (quotaInit lands there).
   if (bridge === undefined) {
-    assert.ok(quotaBridge, "quota panel reveal must reuse the previously captured bridge");
-    return quotaBridge;
+    assert.ok(managerBridge, "manager panel reveal must reuse the previously captured bridge");
+    return managerBridge;
   }
   // Opening is decoupled from the webview handshake (bad-network regression): the
   // command resolves at panel creation, so the boot handshake lands asynchronously.
@@ -604,9 +625,9 @@ async function openQuotaPanelCaptured(commandId: string, arg?: unknown): Promise
   await pollUntil(
     () => captured.outbound.some((message) => message.type === "quotaInit"),
     20_000,
-    "captured quota panel must have received the quotaInit message",
+    "captured manager panel must have received the quotaInit message",
   );
-  quotaBridge = bridge;
+  managerBridge = bridge;
   return bridge;
 }
 
@@ -1717,11 +1738,22 @@ function tests(): TestCase[] {
           15_000,
           "quota panel boot must push a 4-provider snapshot",
         );
-        const boot = quotaSnapshots(bridge)[0];
+        // Boot assertions read the quotaInit MESSAGE specifically: the panel-open
+        // visibility kick fires a quotaSnapshot FIRST (before the webview handshake),
+        // so a positional [0] over the mixed stream could hit the wrong message.
+        const bootInit = bridge.outbound.find((message) => message.type === "quotaInit") as
+          { payload: QuotaSnapshotMessage } | undefined;
+        assert.ok(bootInit, "captured manager panel must have received quotaInit");
+        const boot = bootInit.payload;
         for (const provider of boot.snapshot.providers) {
           assert.equal(provider.configured, false, `${provider.providerId} must report unconfigured`);
           assert.equal(provider.error, null, `${provider.providerId} must carry no error`);
         }
+        assert.deepEqual(
+          boot.visibility,
+          { kimi: true, glm: true, mimo: true, deepseek: true },
+          "boot quotaInit must carry the all-visible default",
+        );
         assert.equal(fs.existsSync(authFile), false, "no credentials may be created by a credential-free refresh");
 
         // Solo refresh of one provider through the panel protocol.
@@ -1742,8 +1774,8 @@ function tests(): TestCase[] {
     {
       name: "quotaSaveMimoCookie roundtrip: invalid rejected, valid persisted + mimo refresh",
       fn: async () => {
-        assert.ok(quotaBridge, "quota panel must still be open from the previous step");
-        const bridge = quotaBridge;
+        assert.ok(managerBridge, "manager panel must still be open from the previous step");
+        const bridge = managerBridge;
         const quotaJson = path.join(configDir, "quota.json");
 
         // "garbage" fails normalizeMimoCookie → MIMO_COOKIE_INVALID → friendly Chinese error.
@@ -1806,7 +1838,7 @@ function tests(): TestCase[] {
     {
       name: "quotaConfigureMimo reveals the panel focused on the MiMo group",
       fn: async () => {
-        assert.ok(quotaBridge, "quota panel must still be open from the previous step");
+        assert.ok(managerBridge, "manager panel must still be open from the previous step");
         const bridge = await openQuotaPanelCaptured(CMD.quotaConfigureMimo);
         await pollUntil(
           () =>
@@ -1823,13 +1855,159 @@ function tests(): TestCase[] {
       },
     },
     {
+      name: "quotaSetStatusBar roundtrip: toggle persisted, cookie preserved, mode 0600",
+      fn: async () => {
+        assert.ok(managerBridge, "manager panel must still be open from the previous step");
+        const bridge = managerBridge;
+        const quotaJson = path.join(configDir, "quota.json");
+
+        bridge.deliver({ type: "quotaSetStatusBar", payload: { providerId: "kimi", visible: false } });
+        await pollUntil(
+          () =>
+            bridge.outbound.some(
+              (message) =>
+                message.type === "quotaStatusBarSaved" &&
+                typeof message.payload === "object" &&
+                message.payload !== null &&
+                (message.payload as { ok?: unknown }).ok === true &&
+                (message.payload as { visibility?: { kimi?: unknown } }).visibility?.kimi === false,
+            ),
+          10_000,
+          "toggling kimi off must produce a quotaStatusBarSaved(ok) reply carrying the record",
+        );
+
+        const saved = JSON.parse(fs.readFileSync(quotaJson, "utf8")) as {
+          statusBar?: Record<string, boolean>;
+          mimo?: { cookie?: string };
+        };
+        assert.equal(saved.statusBar?.kimi, false, "quota.json must persist the hidden provider");
+        assert.equal(
+          saved.mimo?.cookie,
+          "api-platform_serviceToken=abc; userId=42",
+          "the visibility merge must preserve the MiMo cookie",
+        );
+        assert.deepEqual(
+          saved.statusBar,
+          { kimi: false, glm: true, mimo: true, deepseek: true },
+          "the persisted record must be the full normalized visibility",
+        );
+        if (process.platform !== "win32") {
+          // writeFileAtomic renames a fresh tmp file — the visibility save must re-apply
+          // chmod 0600 or the credential-bearing quota.json drops to the umask default.
+          assert.equal(fs.statSync(quotaJson).mode & 0o777, 0o600, "quota.json must stay owner-only (0600)");
+        }
+
+        // Toggle back on so later rounds/tests start from the default visible set.
+        bridge.deliver({ type: "quotaSetStatusBar", payload: { providerId: "kimi", visible: true } });
+        await pollUntil(
+          () =>
+            bridge.outbound.some(
+              (message) =>
+                message.type === "quotaStatusBarSaved" &&
+                (message.payload as { visibility?: { kmi?: unknown; kimi?: unknown } }).visibility?.kimi === true,
+            ),
+          10_000,
+          "toggling kimi back on must echo the restored record",
+        );
+
+        // Malformed toggles are dropped without a reply.
+        const repliesBefore = bridge.outbound.filter((message) => message.type === "quotaStatusBarSaved").length;
+        bridge.deliver({ type: "quotaSetStatusBar", payload: { providerId: "nonsense", visible: false } });
+        bridge.deliver({ type: "quotaSetStatusBar", payload: { providerId: "kimi", visible: "yes" } });
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        assert.equal(
+          bridge.outbound.filter((message) => message.type === "quotaStatusBarSaved").length,
+          repliesBefore,
+          "malformed quotaSetStatusBar payloads must be ignored",
+        );
+      },
+    },
+    {
+      name: "all-hidden + closed panel survives the empty-target cycle (refresh chain stays alive)",
+      fn: async () => {
+        assert.ok(managerBridge, "manager panel must still be open from the previous step");
+        const bridge = managerBridge;
+
+        // 1s auto-refresh so the empty-target timer path actually fires within the test.
+        const userConfig = vscode.workspace.getConfiguration("opencodeConfigManager");
+        await userConfig.update("quota.refreshSeconds", 1, vscode.ConfigurationTarget.Global);
+        await pollConfigValue("quota.refreshSeconds", 1, "1s quota interval must be active");
+
+        // Hide ALL four providers (panel open → rounds still fetch all).
+        for (const providerId of ["kimi", "glm", "mimo", "deepseek"] as const) {
+          bridge.deliver({ type: "quotaSetStatusBar", payload: { providerId, visible: false } });
+        }
+        await pollUntil(
+          () => {
+            const saved = JSON.parse(fs.readFileSync(path.join(configDir, "quota.json"), "utf8")) as {
+              statusBar?: Record<string, boolean>;
+            };
+            return (
+              Object.values(saved.statusBar ?? {}).length === 4 && Object.values(saved.statusBar!).every((v) => !v)
+            );
+          },
+          10_000,
+          "all four hidden toggles must persist to quota.json",
+        );
+
+        // Close the panel: with everything hidden AND no open panel, refresh rounds
+        // have EMPTY targets. A leaked single-flight promise here (the regression)
+        // permanently freezes every later full refresh.
+        await vscode.commands.executeCommand("workbench.action.closeAllEditors");
+        // Give the 1s timer at least one empty-target tick.
+        await new Promise((resolve) => setTimeout(resolve, 2_500));
+
+        // Re-show one provider through a REOPENED panel and prove the chain works:
+        // the fresh panel's boot refresh must push NEW quotaSnapshot messages.
+        const reopened = await openQuotaPanelCaptured(CMD.quotaRefresh);
+        const reopenedBase = reopened.outbound.length;
+        await pollUntil(
+          () => reopened.outbound.slice(reopenedBase).filter((message) => message.type === "quotaSnapshot").length > 0,
+          15_000,
+          "post-reopen boot refresh must produce fresh quotaSnapshot pushes (empty-target cycle must not freeze the chain)",
+        );
+
+        // Restore: all visible + default interval.
+        reopened.deliver({ type: "quotaSetStatusBar", payload: { providerId: "kimi", visible: true } });
+        reopened.deliver({ type: "quotaSetStatusBar", payload: { providerId: "glm", visible: true } });
+        reopened.deliver({ type: "quotaSetStatusBar", payload: { providerId: "mimo", visible: true } });
+        reopened.deliver({ type: "quotaSetStatusBar", payload: { providerId: "deepseek", visible: true } });
+        await pollUntil(
+          () =>
+            reopened.outbound.some(
+              (message) =>
+                message.type === "quotaStatusBarSaved" &&
+                (message.payload as { visibility?: Record<string, boolean> }).visibility?.deepseek === true,
+            ),
+          10_000,
+          "visibility restore must be acknowledged",
+        );
+        await userConfig.update("quota.refreshSeconds", 30, vscode.ConfigurationTarget.Global);
+        await pollConfigValue("quota.refreshSeconds", 30, "quota interval must be restored");
+      },
+    },
+    {
       name: "openSettings boots with defaults; save persists clamped config and re-syncs the page",
       fn: async () => {
         const bridge = await openSettingsPanelCaptured(CMD.openSettings);
 
         // Boot payload reflects the package.json defaults: every category off at 30s, quota 30s.
-        const boot = settingsInits(bridge)[0];
-        assert.ok(boot, "captured settings panel must have received the settingsInit message");
+        // Anchor on the LAST settings-tab navigation from THIS entry point (earlier pushes —
+        // panel boot during the all-hidden test, quota-era reveals — legitimately carried
+        // other state); its immediately-following settingsInit is the boot payload.
+        const navigateIdx = bridge.outbound.reduce(
+          (last, message, index) =>
+            message.type === "managerNavigate" && (message.payload as { tab?: unknown })?.tab === "settings"
+              ? index
+              : last,
+          -1,
+        );
+        assert.ok(navigateIdx >= 0, "openSettings must navigate the panel to the settings tab");
+        const bootMessage = bridge.outbound
+          .slice(navigateIdx + 1)
+          .find((message) => message.type === "settingsInit") as { payload: SettingsInitMessage } | undefined;
+        assert.ok(bootMessage, "the settings navigation must be followed by a settingsInit push");
+        const boot = bootMessage.payload;
         for (const category of ["config", "presets", "backups", "models", "plugins"]) {
           assert.deepEqual(
             boot.settings.categories[category],
@@ -1841,6 +2019,9 @@ function tests(): TestCase[] {
 
         // Save a partial payload — the host normalizes (missing categories → defaults,
         // out-of-range interval → clamp) and persists every key.
+        // Echo baseline = stream length AT SAVE TIME: the merged panel pushed earlier
+        // settingsInits (panel boot, quota-era reveals) carrying legit PRE-save state.
+        const echoBaseline = settingsInits(bridge).length;
         bridge.deliver({
           type: "settingsSave",
           payload: {
@@ -1866,10 +2047,11 @@ function tests(): TestCase[] {
 
         // Own-save config events must NOT echo settingsInit carrying PARTIAL state
         // back to the page — mid-flight echoes were the visible "rapid edits revert"
-        // regression. Any echo that arrives (incl. a harmless post-settle no-op) must
-        // carry the FINAL persisted state, never a pre-save value.
+        // regression. Any echo that arrives AFTER the save (incl. a harmless
+        // post-settle no-op) must carry the FINAL persisted state, never a pre-save
+        // value.
         await new Promise((resolve) => setTimeout(resolve, 1500));
-        for (const echo of settingsInits(bridge).slice(1)) {
+        for (const echo of settingsInits(bridge).slice(echoBaseline)) {
           assert.equal(
             echo.settings.categories.presets?.enabled,
             true,
@@ -1922,9 +2104,9 @@ function tests(): TestCase[] {
     {
       name: "settings panel reveal reuses the singleton and malformed messages are ignored",
       fn: async () => {
-        assert.ok(settingsBridge, "settings panel must still be open from the previous step");
+        assert.ok(managerBridge, "manager panel must still be open from the previous step");
         const bridge = await openSettingsPanelCaptured(CMD.openSettings);
-        assert.equal(bridge, settingsBridge, "reveal must reuse the captured singleton bridge");
+        assert.equal(bridge, managerBridge, "reveal must reuse the captured singleton bridge");
 
         // Malformed payloads are dropped without a reply or a crash…
         bridge.deliver({ type: "settingsSave", payload: {} });
