@@ -16,7 +16,8 @@ VSCode 扩展：管理 [opencode](https://opencode.ai) 与 [oh-my-opencode](http
   - **导入/导出**：备份可导出为 zip（跨平台纯 JS 实现三平台通用，含中文名时置 UTF-8 标志位）；导入时校验 manifest、防目录遍历/zip 炸弹（解压前按头部声明尺寸限流），同名已存在时自动加 `-import-N` 后缀
 - **状态栏**：显示当前模板，点击快速切换（`Ctrl+Alt+P`）
 - **Coding Plan 额度**（状态栏右侧）：实时显示 Kimi / GLM / MiMo / DeepSeek 剩余额度（5 小时额度、周额度；MiMo 为月额度+余额；DeepSeek 为按量计费余额）
-  - 点击打开**额度面板**（类设置页的编辑器窗口）：按供应商分组展示各窗口进度条、剩余百分比与重置时间，每组可单独「刷新」，底部「刷新全部」；面板打开期间跟随自动刷新实时更新
+  - 点击打开**管理面板**（类设置页的编辑器窗口，与「打开设置」同页），「额度/设置」选项卡切换；额度页按供应商分组展示各窗口进度条、剩余百分比与重置时间，每组可单独「刷新」，底部「刷新全部」；面板打开期间跟随自动刷新实时更新
+  - 每个供应商分组头部有**「状态栏」开关**：关闭后状态栏不再显示该供应商，也不再定时刷新其额度（仅在管理面板打开期间刷新，节省请求）；开关状态存于 `quota.json` 的 `statusBar` 块
   - Kimi / GLM / DeepSeek 自动读取 opencode 凭据（`~/.local/share/opencode/auth.json`），面板内只读显示检测状态，更换请运行 `opencode auth login`；DeepSeek 官方仅提供余额接口，显示 `¥余额` 与币种
   - MiMo 官方仅提供 Dashboard API：在其分组内粘贴 `platform.xiaomimimo.com` 的浏览器 Cookie 保存（存入 `quota.json`，留空不改动；也可经「Coding Plan 额度：配置 MiMo Cookie…」直达该分组）
   - 网络故障时自动指数退避（30s → 最长 2 分钟），恢复后回到正常间隔，面板内可随时手动重试；**切回窗口时若额度显示异常会自动刷新一轮**（挂机期间熔断的自动刷新随网络恢复即刻自愈；此聚焦刷新不受「0 = 关闭自动刷新」影响——仅额度异常时触发，属于恢复动作）；刷新失败时 30 分钟内沿用最近成功的旧数据并加 `~` 标记（悬停可见数据时间与失败原因），超过 30 分钟才回退为 `?`
@@ -47,10 +48,10 @@ code --install-extension build/packages/opencode-config-manager-<版本>.vsix
 
 ### 设置
 
-入口：侧边栏面板标题栏的齿轮按钮（或命令面板「OpenCode: 打开设置」），打开类设置页的编辑器窗口：
+入口：侧边栏面板标题栏的齿轮按钮（或命令面板「OpenCode: 打开设置」），打开「OpenCode 管理」面板并切到**设置选项卡**（与状态栏额度点击打开的额度选项卡同页，页面顶部选项卡随时切换）：
 
 - **分区自动刷新**：配置 / 模板 / 备份 / 模型 / 插件五个分区各自独立开关（切换按钮），开启后可配置轮询间隔（秒，默认 30，范围 1–3600）；关闭（默认）时仅保留文件变更监听 + 手动刷新
-- **Coding Plan 额度刷新频率**：默认 30 秒（0 = 关闭自动刷新），与状态栏/额度面板同源生效，更改后立即按新频率查询
+- **Coding Plan 额度刷新频率**：默认 30 秒（0 = 关闭自动刷新），与状态栏/额度页同源生效，更改后立即按新频率查询
 - 修改为本地编辑：点击「保存设置」才一次性写入全部设置（未保存时按钮禁用并提示）
 
 | 键 | 默认 | 说明 |
@@ -73,8 +74,8 @@ src/core/      纯逻辑（无 vscode 依赖，vitest 单测）
   atomicFile / pathSafety / errors / watchManager  基础设施
 src/tree/      树节点纯构建器 + 单一分区 Explorer
 src/ui/        命令 / QuickPick / 状态栏（模板 + 额度）/ 设置读写
-src/webview/   Webview 宿主（模板编辑器 + 额度面板 + 设置页；CSP + postMessage 协议）
-webview-ui/    React 前端（Vite 多入口：模板矩阵表单 + 额度设置页 + 设置页，VSCode CSS 变量主题）
+src/webview/   Webview 宿主（模板编辑器 + 管理面板〔额度/设置选项卡〕；CSP + postMessage 协议）
+webview-ui/    React 前端（Vite 多入口：模板矩阵表单 + 管理页〔额度/设置选项卡〕，VSCode CSS 变量主题）
 ```
 
 数据位置：模板 `~/.config/opencode/presets/*.json`；备份 `~/.config/opencode/backups/<ISO时间戳>-manual/`（含 `manifest.json` 与展示名称，覆盖检测到的实际配置文件与 `~/.agents/skills`）。模板应用/捕获的写入目标由本机检测结果决定（`~/.omo/omo.jsonc` 或旧版 `oh-my-opencode.json[c]`）。
