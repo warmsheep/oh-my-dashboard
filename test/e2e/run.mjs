@@ -33,9 +33,9 @@ function fail(message) {
  * <extensionRoot>/dist-webview/*.html and rewrite every local asset reference). */
 function prepareWebviewAssets() {
   const buildDir = path.join(repoRoot, "webview-ui", "build");
-  // Check EVERY page entry — a partial build (index.html without quota.html) must
+  // Check EVERY page entry — a partial build (index.html without manager.html) must
   // trigger a rebuild, not fail later with a missing-asset error.
-  if (!["index.html", "quota.html", "settings.html"].every((page) => fs.existsSync(path.join(buildDir, page)))) {
+  if (!["index.html", "manager.html"].every((page) => fs.existsSync(path.join(buildDir, page)))) {
     console.log("[e2e:runner] webview-ui/build missing — running npm run build:webview");
     const result = spawnSync("npm", ["run", "build:webview"], {
       cwd: repoRoot,
