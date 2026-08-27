@@ -68,11 +68,12 @@ export const CONFIG_LEAF = {
 
 export const PRESET_EDITOR_VIEW_TYPE = "opencode.presetEditor";
 
-/** Webview panel view type of the quota settings page (quota.html bundle). */
-export const QUOTA_PANEL_VIEW_TYPE = "opencode.quotaPanel";
-
-/** Webview panel view type of the extension settings page (settings.html bundle). */
-export const SETTINGS_PANEL_VIEW_TYPE = "opencode.settingsPanel";
+/**
+ * Webview panel view type of the manager page (manager.html bundle): the merged
+ * 额度/设置 tabbed panel — entry points are the status-bar quota click, the
+ * MiMo-cookie shortcut, and the tree gear / 打开设置 command.
+ */
+export const MANAGER_PANEL_VIEW_TYPE = "opencode.managerPanel";
 
 /**
  * Preset name validation is owned by src/core/pathSafety.ts (single source for the
