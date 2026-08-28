@@ -159,8 +159,8 @@ export const QUOTA_PROVIDER_IDS: readonly QuotaProviderId[] = ["kimi", "glm", "m
  */
 export type QuotaVisibility = Record<QuotaProviderId, boolean>;
 
-/** Manager page tabs — the quota view and the settings view live in one panel. */
-export type ManagerTab = "quota" | "settings";
+/** Manager page tabs — the preset editor, quota view, and settings view live in one panel. */
+export type ManagerTab = "preset" | "quota" | "settings";
 
 /** Switch the manager page to a tab; focusProvider scrolls one quota group into view. */
 export interface ManagerNavigatePayload {
