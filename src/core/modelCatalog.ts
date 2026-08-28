@@ -2,6 +2,7 @@ import * as defaultFs from "node:fs";
 
 import { BUILTIN_PROVIDERS, ensureLocalModelsFile, updateLocalModelsFromCatalog } from "./builtinModels";
 import { friendlyRequestError, readJsonBody } from "./quotaService";
+import { resilientFetch } from "./resilientFetch";
 import type { ModelOption } from "./types";
 
 /** opencode's official model catalog — the single source of model data (nothing is bundled). */
@@ -14,7 +15,11 @@ export const MODELS_DEV_API_URL = "https://models.dev/api.json";
  */
 export const MODEL_CATALOG_TIMEOUT_MS = 30_000;
 
-/** Fetch injection for tests and the timeout override (default 30s). */
+/**
+ * Fetch injection for tests and the timeout override (default 30s). Defaults to
+ * the c-ares resilientFetch so a DNS black-hole can never park libuv threadpool
+ * threads (see resilientFetch.ts).
+ */
 export interface ModelCatalogFetchOptions {
   fetchFn?: typeof fetch;
   timeoutMs?: number;
@@ -41,7 +46,7 @@ export async function fetchModelCatalogs(
   providerIds: readonly string[],
   opts: ModelCatalogFetchOptions = {},
 ): Promise<FetchedCatalog> {
-  const fetchFn = opts.fetchFn ?? fetch;
+  const fetchFn = opts.fetchFn ?? resilientFetch;
   const result: FetchedCatalog = { providers: new Map(), deprecatedIds: new Set() };
   if (providerIds.length === 0) {
     return result;

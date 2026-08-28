@@ -22,6 +22,7 @@ import type {
   QuotaWindowKind,
 } from "../shared/protocol";
 import { writeFileAtomic } from "./atomicFile";
+import { resilientFetch } from "./resilientFetch";
 
 // Quota data shapes + shared display helpers live in shared/protocol.ts (single source,
 // also consumed by the quota webview bundle); re-exported here so existing imports
@@ -41,6 +42,10 @@ export interface QuotaServiceOptions {
   authFilePath?: string;
   /** Extension-owned quota config (<configDir>/quota.json) carrying the MiMo dashboard cookie. */
   quotaConfigPath?: string;
+  /**
+   * Fetch injection for tests. Defaults to the c-ares resilientFetch so a DNS
+   * black-hole can never park libuv threadpool threads (see resilientFetch.ts).
+   */
   fetchFn?: typeof fetch;
   now?: () => Date;
   timeoutMs?: number;
@@ -559,7 +564,7 @@ export class QuotaService {
     const dataHome = process.env.XDG_DATA_HOME?.trim() || path.join(os.homedir(), ".local", "share");
     this.authFilePath = opts.authFilePath ?? path.join(dataHome, "opencode", "auth.json");
     this.quotaConfigPath = opts.quotaConfigPath ?? "";
-    this.fetchFn = opts.fetchFn ?? fetch;
+    this.fetchFn = opts.fetchFn ?? resilientFetch;
     this.now = opts.now ?? (() => new Date());
     this.timeoutMs = opts.timeoutMs ?? 10_000;
     this.fsMod = opts.fs ?? defaultFs;
