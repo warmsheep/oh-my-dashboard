@@ -7,12 +7,14 @@ import {
   agentModelRequestFromArg,
   agentTargetFromArg,
   backupEntryFromArg,
+  backupNowRequestFromArg,
   exportBackupRequestFromArg,
   exportPresetRequestFromArg,
   isAllowedExportTarget,
   presetNameFromArg,
   renameBackupRequestFromArg,
   renamePresetRequestFromArg,
+  restoreBackupRequestFromArg,
 } from "../../src/ui/commandArgs";
 
 // ---------------------------------------------------------------------------
@@ -149,6 +151,76 @@ describe("renameBackupRequestFromArg", () => {
 
   it("accepts a valid request and trims the display name", () => {
     expect(renameBackupRequestFromArg({ dirName: "x", name: " y " })).toEqual({ dirName: "x", name: "y" });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// backupNowRequestFromArg / restoreBackupRequestFromArg — scoped backup contracts
+// ---------------------------------------------------------------------------
+
+describe("backupNowRequestFromArg", () => {
+  it("returns undefined without intent (tree nodes never carry name/scopes)", () => {
+    expect(backupNowRequestFromArg(undefined)).toBeUndefined();
+    expect(backupNowRequestFromArg(null)).toBeUndefined();
+    expect(backupNowRequestFromArg("手动备份")).toBeUndefined();
+    expect(backupNowRequestFromArg([])).toBeUndefined();
+    expect(backupNowRequestFromArg({ kind: "backup", id: "backup:x", label: "x" })).toBeUndefined();
+  });
+
+  it("either key is intent; accepts full and partial requests, trims the name", () => {
+    expect(backupNowRequestFromArg({ name: " 升级前 ", scopes: ["presets", "models"] })).toEqual({
+      name: "升级前",
+      scopes: ["presets", "models"],
+    });
+    expect(backupNowRequestFromArg({ scopes: ["config"] })).toEqual({ scopes: ["config"] });
+    expect(backupNowRequestFromArg({ name: "x" })).toEqual({ name: "x" });
+  });
+
+  it("rejects present-but-invalid name shapes in Chinese", () => {
+    expect(backupNowRequestFromArg({ name: 123, scopes: ["config"] })).toEqual({
+      error: "参数须为 { name?: 非空字符串, scopes?: config/presets/models 数组 }",
+    });
+    expect(backupNowRequestFromArg({ name: "   " })).toEqual({ error: "名称不能为空" });
+  });
+
+  it("rejects invalid scope shapes and values", () => {
+    const error = { error: "scopes 须为 config/presets/models 的非空数组" };
+    expect(backupNowRequestFromArg({ scopes: "presets" })).toEqual(error);
+    expect(backupNowRequestFromArg({ scopes: [] })).toEqual(error);
+    expect(backupNowRequestFromArg({ name: "x", scopes: ["config", "bogus"] })).toEqual(error);
+    expect(backupNowRequestFromArg({ name: "x", scopes: [1] })).toEqual(error);
+  });
+});
+
+describe("restoreBackupRequestFromArg", () => {
+  it("returns undefined without intent (tree nodes never carry dirName/scopes)", () => {
+    expect(restoreBackupRequestFromArg(undefined)).toBeUndefined();
+    expect(restoreBackupRequestFromArg("2026-manual")).toBeUndefined();
+    expect(restoreBackupRequestFromArg({ kind: "backup", id: "backup:x", label: "x", filePath: "/b" })).toBeUndefined();
+  });
+
+  it("either key is intent; partial dirName-only shapes error instead of reaching the picker", () => {
+    expect(restoreBackupRequestFromArg({ scopes: ["presets"] })).toEqual({
+      error: "参数须为 { dirName: 非空字符串, scopes?: config/presets/models 数组 }",
+    });
+    expect(restoreBackupRequestFromArg({ dirName: "" })).toEqual({
+      error: "参数须为 { dirName: 非空字符串, scopes?: config/presets/models 数组 }",
+    });
+  });
+
+  it("accepts valid requests with and without scopes", () => {
+    expect(restoreBackupRequestFromArg({ dirName: "2026-manual" })).toEqual({ dirName: "2026-manual" });
+    expect(restoreBackupRequestFromArg({ dirName: "2026-manual", scopes: ["config", "models"] })).toEqual({
+      dirName: "2026-manual",
+      scopes: ["config", "models"],
+    });
+  });
+
+  it("rejects invalid scope shapes and values", () => {
+    const error = { error: "scopes 须为 config/presets/models 的非空数组" };
+    expect(restoreBackupRequestFromArg({ dirName: "x", scopes: "config" })).toEqual(error);
+    expect(restoreBackupRequestFromArg({ dirName: "x", scopes: [] })).toEqual(error);
+    expect(restoreBackupRequestFromArg({ dirName: "x", scopes: ["nope"] })).toEqual(error);
   });
 });
 

@@ -6,6 +6,7 @@ import * as vscode from "vscode";
 import { CONFIG_KEY, CONFIG_LEAF, CONFIG_SECTION, OUTPUT_CHANNEL_NAME, TEST_BRIDGE, VIEW } from "./constants";
 import { AutoRefreshScheduler } from "./core/autoRefreshScheduler";
 import { BackupService } from "./core/backupService";
+import { LOCAL_MODELS_FILE } from "./core/builtinModels";
 import { ConfigStore } from "./core/configStore";
 import { errorMessage } from "./core/errors";
 import { validate } from "./core/jsoncEditor";
@@ -73,6 +74,8 @@ export function activate(ctx: vscode.ExtensionContext): void {
     managedFiles: [paths.opencodeJson, paths.agentConfig.path, path.join(paths.configDir, "AGENTS.md")],
     // User-level skills live outside configDir; project skills are excluded (they live in the user's repo).
     extraDirs: [{ label: "skills-user", src: configStore.userSkillsDir }],
+    // The "models" backup scope snapshots the local model catalog.
+    modelsFile: path.join(paths.configDir, LOCAL_MODELS_FILE),
   });
   const presetService = new PresetService({
     presetsDir: paths.presetsDir,

@@ -18,13 +18,22 @@ import type { ConfigStore } from "../core/configStore";
 import { errorMessage } from "../core/errors";
 import { fetchModelCatalogs } from "../core/modelCatalog";
 import type { PresetService } from "../core/presetService";
-import type { BackupEntry, Variant } from "../core/types";
-import { BACKUP_REASON_LABELS, KNOWN_AGENTS, KNOWN_CATEGORIES, VARIANTS } from "../core/types";
+import type { BackupEntry, BackupScope, Variant } from "../core/types";
+import {
+  BACKUP_REASON_LABELS,
+  BACKUP_SCOPE_DETAILS,
+  BACKUP_SCOPE_LABELS,
+  BACKUP_SCOPES,
+  KNOWN_AGENTS,
+  KNOWN_CATEGORIES,
+  VARIANTS,
+} from "../core/types";
 import { CURRENT_PRESET_BADGE } from "../tree/nodes";
 import {
   agentModelRequestFromArg,
   agentTargetFromArg,
   backupEntryFromArg,
+  backupNowRequestFromArg,
   exportBackupRequestFromArg,
   exportPresetRequestFromArg,
   idSuffix,
@@ -32,6 +41,7 @@ import {
   presetNameFromArg,
   renameBackupRequestFromArg,
   renamePresetRequestFromArg,
+  restoreBackupRequestFromArg,
   toNode,
 } from "./commandArgs";
 import type { AgentTarget } from "./commandArgs";
@@ -205,18 +215,41 @@ interface BackupPickItem extends vscode.QuickPickItem {
   entry: BackupEntry;
 }
 
+/** One checkable row in the create/restore scope pickers (all rows start picked). */
+interface ScopePickItem extends vscode.QuickPickItem {
+  scope: BackupScope;
+}
+
+function scopePickItems(scopes: readonly BackupScope[]): ScopePickItem[] {
+  return scopes.map((scope) => ({
+    label: BACKUP_SCOPE_LABELS[scope],
+    detail: BACKUP_SCOPE_DETAILS[scope],
+    scope,
+    picked: true,
+  }));
+}
+
+/** Labels joined for summaries: ["config","presets"] → "配置/模板". */
+function scopeSlash(scopes: readonly BackupScope[]): string {
+  return scopes.map((scope) => BACKUP_SCOPE_LABELS[scope]).join("/");
+}
+
 async function pickBackup(deps: ExtensionDeps, placeHolder: string): Promise<BackupEntry | undefined> {
   const entries = [...deps.backupService.list()].sort((a, b) => (a.dirName < b.dirName ? 1 : -1));
   if (entries.length === 0) {
     void vscode.window.showInformationMessage("暂无备份");
     return undefined;
   }
-  const items: BackupPickItem[] = entries.map((entry) => ({
-    label: entry.dirName,
-    description: BACKUP_REASON_LABELS[entry.manifest.reason] ?? entry.manifest.reason,
-    detail: `创建于 ${entry.manifest.createdAt}，共 ${entry.manifest.fileCount} 个文件`,
-    entry,
-  }));
+  const items: BackupPickItem[] = entries.map((entry) => {
+    const available = deps.backupService.availableScopes(entry.dirName);
+    const scopeNote = available.length > 0 ? ` · ${scopeSlash(available)}` : "";
+    return {
+      label: entry.dirName,
+      description: BACKUP_REASON_LABELS[entry.manifest.reason] ?? entry.manifest.reason,
+      detail: `创建于 ${entry.manifest.createdAt}，共 ${entry.manifest.fileCount} 个文件${scopeNote}`,
+      entry,
+    };
+  });
   const picked = await vscode.window.showQuickPick(items, { placeHolder });
   return picked?.entry;
 }
@@ -609,14 +642,31 @@ async function exportPreset(deps: ExtensionDeps, arg: unknown): Promise<void> {
   void vscode.window.showInformationMessage(`已导出模板 ${name} → ${target.fsPath}`);
 }
 
+/** InputBox default and fallback name for programmatic object-form creates without a name. */
+const DEFAULT_BACKUP_NAME = "手动备份";
+
 async function backupNow(deps: ExtensionDeps, arg: unknown): Promise<void> {
-  // Programmatic name (e2e / command-line style invocation) bypasses the input box.
-  let name: string | undefined = typeof arg === "string" && arg.trim().length > 0 ? arg.trim() : undefined;
-  if (name === undefined) {
+  // Programmatic object form (e2e / scripts): { name?, scopes? } — skips all pickers.
+  const request = backupNowRequestFromArg(arg);
+  if (request && "error" in request) {
+    void vscode.window.showErrorMessage(`创建备份失败: ${request.error}`);
+    return;
+  }
+  // Programmatic plain string = name only, all scopes, no pickers (existing e2e contract).
+  const programmaticName = typeof arg === "string" && arg.trim().length > 0 ? arg.trim() : undefined;
+
+  let name: string | undefined;
+  let scopes: readonly BackupScope[] | undefined;
+  if (request) {
+    name = request.name ?? DEFAULT_BACKUP_NAME;
+    scopes = request.scopes; // omitted = all scopes
+  } else if (programmaticName !== undefined) {
+    name = programmaticName;
+  } else {
     const input = await vscode.window.showInputBox({
       title: "创建备份",
       prompt: "为这次备份起个名字，便于以后识别",
-      value: "手动备份",
+      value: DEFAULT_BACKUP_NAME,
       ignoreFocusOut: true,
       validateInput: (value) => (value.trim().length === 0 ? "名称不能为空" : undefined),
     });
@@ -624,8 +674,21 @@ async function backupNow(deps: ExtensionDeps, arg: unknown): Promise<void> {
       return;
     }
     name = input.trim();
+    const picked = await vscode.window.showQuickPick<ScopePickItem>(scopePickItems(BACKUP_SCOPES), {
+      title: "选择备份内容",
+      canPickMany: true,
+      ignoreFocusOut: true,
+    });
+    if (picked === undefined) {
+      return;
+    }
+    if (picked.length === 0) {
+      void vscode.window.showInformationMessage("至少选择一项备份内容");
+      return;
+    }
+    scopes = picked.map((item) => item.scope);
   }
-  deps.backupService.create("manual", { name });
+  deps.backupService.create("manual", { name }, scopes);
   deps.refreshAll();
   void vscode.window.showInformationMessage(`已创建备份「${name}」`);
 }
@@ -667,19 +730,71 @@ async function renameBackup(deps: ExtensionDeps, arg: unknown): Promise<void> {
 }
 
 async function restoreBackup(deps: ExtensionDeps, arg: unknown): Promise<void> {
+  // Programmatic object form (e2e / scripts): { dirName, scopes? } — no pickers, no
+  // modal (calling programmatically is the consent); scopes omitted = everything
+  // available, provided values are intersected with actual availability.
+  const request = restoreBackupRequestFromArg(arg);
+  if (request && "error" in request) {
+    void vscode.window.showErrorMessage(`恢复备份失败: ${request.error}`);
+    return;
+  }
+  if (request) {
+    const entry = deps.backupService.list().find((e) => e.dirName === request.dirName);
+    if (!entry) {
+      void vscode.window.showErrorMessage(`恢复备份失败: 未找到备份 ${request.dirName}`);
+      return;
+    }
+    const available = deps.backupService.availableScopes(entry.dirName);
+    if (available.length === 0) {
+      void vscode.window.showWarningMessage("该备份不包含可恢复的内容");
+      return;
+    }
+    const scopes =
+      request.scopes === undefined ? undefined : request.scopes.filter((scope) => available.includes(scope));
+    deps.backupService.restore(entry.dirName, scopes);
+    deps.refreshAll();
+    void vscode.window.showInformationMessage(`已恢复备份 ${entry.dirName}`);
+    return;
+  }
   const entry = backupEntryFromArg(arg, deps.backupService.list()) ?? (await pickBackup(deps, "选择要恢复的备份"));
   if (!entry) {
     return;
   }
+  const available = deps.backupService.availableScopes(entry.dirName);
+  if (available.length === 0) {
+    void vscode.window.showWarningMessage("该备份不包含可恢复的内容");
+    return;
+  }
+  let scopes: readonly BackupScope[] | undefined;
+  if (typeof arg === "string") {
+    // Plain string dirName (existing e2e contract): full restore, no scope picker.
+    scopes = undefined;
+  } else {
+    // Interactive (tree node or no arg): offer ONLY what the backup actually holds.
+    const picked = await vscode.window.showQuickPick<ScopePickItem>(scopePickItems(available), {
+      title: "选择要恢复的内容",
+      canPickMany: true,
+      ignoreFocusOut: true,
+    });
+    if (picked === undefined) {
+      return;
+    }
+    if (picked.length === 0) {
+      void vscode.window.showInformationMessage("至少选择一项恢复内容");
+      return;
+    }
+    scopes = picked.map((item) => item.scope);
+  }
+  const labels = (scopes ?? available).map((scope) => BACKUP_SCOPE_LABELS[scope]).join("、");
   const confirm = await vscode.window.showWarningMessage(
     `恢复备份 ${entry.dirName}？当前配置将被覆盖且无法撤销`,
-    { modal: true, detail: "恢复前可先「立即备份」留存当前配置" },
+    { modal: true, detail: `将恢复：${labels}\n恢复前可先「立即备份」留存当前配置` },
     "恢复",
   );
   if (confirm !== "恢复") {
     return;
   }
-  deps.backupService.restore(entry.dirName);
+  deps.backupService.restore(entry.dirName, scopes);
   deps.refreshAll();
   void vscode.window.showInformationMessage(`已恢复备份 ${entry.dirName}`);
 }

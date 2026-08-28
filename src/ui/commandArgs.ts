@@ -1,8 +1,8 @@
 import * as path from "node:path";
 
 import { MODEL_ID_PATTERN, presetNameError } from "../constants";
-import type { BackupEntry } from "../core/types";
-import { VARIANTS } from "../core/types";
+import type { BackupEntry, BackupScope } from "../core/types";
+import { BACKUP_SCOPES, VARIANTS } from "../core/types";
 
 /**
  * Pure, vscode-free decoding/validation of command arguments (tree nodes passed by
@@ -203,6 +203,81 @@ export function renameBackupRequestFromArg(arg: unknown): RenameBackupRequest | 
     return { error: "名称不能为空" };
   }
   return { dirName: o.dirName, name: next };
+}
+
+/** Shared scopes validation: non-empty array, every value a known BackupScope. */
+function scopeListError(value: unknown): string | undefined {
+  const known = BACKUP_SCOPES as readonly string[];
+  if (!Array.isArray(value) || value.length === 0 || value.some((v) => typeof v !== "string" || !known.includes(v))) {
+    return "scopes 须为 config/presets/models 的非空数组";
+  }
+  return undefined;
+}
+
+/** Validated programmatic backupNow request (name trimmed; scopes checked against BACKUP_SCOPES). */
+export interface BackupNowRequest {
+  name?: string;
+  /** Omitted = all scopes (the command decides, not the parser). */
+  scopes?: BackupScope[];
+}
+
+/** Decode `{ name?, scopes? }` — either key (own-property) marks intent. */
+export function backupNowRequestFromArg(arg: unknown): BackupNowRequest | { error: string } | undefined {
+  if (typeof arg !== "object" || arg === null || Array.isArray(arg)) {
+    return undefined;
+  }
+  const o = arg as Record<string, unknown>;
+  if (!Object.hasOwn(o, "name") && !Object.hasOwn(o, "scopes")) {
+    return undefined;
+  }
+  if (o.name !== undefined && typeof o.name !== "string") {
+    return { error: "参数须为 { name?: 非空字符串, scopes?: config/presets/models 数组 }" };
+  }
+  const name = typeof o.name === "string" ? o.name.trim() : undefined;
+  if (name !== undefined && name.length === 0) {
+    return { error: "名称不能为空" };
+  }
+  if (Object.hasOwn(o, "scopes")) {
+    const error = scopeListError(o.scopes);
+    if (error !== undefined) {
+      return { error };
+    }
+  }
+  return {
+    ...(name !== undefined ? { name } : {}),
+    ...(Array.isArray(o.scopes) ? { scopes: o.scopes as BackupScope[] } : {}),
+  };
+}
+
+/** Validated programmatic restoreBackup request (scopes checked against BACKUP_SCOPES). */
+export interface RestoreBackupRequest {
+  dirName: string;
+  /** Omitted = restore everything available; the command intersects with availability. */
+  scopes?: BackupScope[];
+}
+
+/** Decode `{ dirName, scopes? }` — either key (own-property) marks intent. */
+export function restoreBackupRequestFromArg(arg: unknown): RestoreBackupRequest | { error: string } | undefined {
+  if (typeof arg !== "object" || arg === null || Array.isArray(arg)) {
+    return undefined;
+  }
+  const o = arg as Record<string, unknown>;
+  if (!Object.hasOwn(o, "dirName") && !Object.hasOwn(o, "scopes")) {
+    return undefined;
+  }
+  if (typeof o.dirName !== "string" || o.dirName.length === 0) {
+    return { error: "参数须为 { dirName: 非空字符串, scopes?: config/presets/models 数组 }" };
+  }
+  if (Object.hasOwn(o, "scopes")) {
+    const error = scopeListError(o.scopes);
+    if (error !== undefined) {
+      return { error };
+    }
+  }
+  return {
+    dirName: o.dirName,
+    ...(Array.isArray(o.scopes) ? { scopes: o.scopes as BackupScope[] } : {}),
+  };
 }
 
 /** Validated programmatic exportPreset request. */
