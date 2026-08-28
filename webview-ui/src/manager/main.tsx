@@ -7,6 +7,7 @@ import ManagerApp from "./ManagerApp";
 // The quota/settings page styles load here too: both tab contents stay mounted in
 // one page (CSS toggle), so their classes must exist in the manager bundle.
 import "../main.css";
+import "../config/config.css";
 import "../quota/quota.css";
 import "../settings/settings.css";
 import "./manager.css";

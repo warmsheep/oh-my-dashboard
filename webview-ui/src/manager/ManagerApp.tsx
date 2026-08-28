@@ -2,6 +2,7 @@ import type { ExtToWebview, ManagerTab } from "@shared/protocol";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import App from "../App";
+import ConfigApp from "../config/ConfigApp";
 import QuotaApp from "../quota/QuotaApp";
 import SettingsApp from "../settings/SettingsApp";
 import { getVSCodeApi, hasVSCodeApi, postToHost, setManagerTabState } from "../vscode";
@@ -16,10 +17,10 @@ function readPersistedTab(): ManagerTab {
   }
 }
 
-const TAB_LABELS: Record<ManagerTab, string> = { quota: "额度", settings: "设置", preset: "模板" };
+const TAB_LABELS: Record<ManagerTab, string> = { config: "配置", quota: "额度", settings: "设置", preset: "模板" };
 
 /**
- * Merged manager page: one tab bar, three always-mounted bodies (模板/额度/设置).
+ * Merged manager page: one tab bar, four always-mounted bodies (配置/额度/设置/模板).
  * The ROOT listener owns the `ready` handshake (sent once) and the `pong`
  * liveness answer — both must work regardless of the active tab, which is also
  * why the tab contents are CSS-toggled instead of unmounted (preset drafts,
@@ -85,7 +86,7 @@ export default function ManagerApp() {
       <div className="page manager-page">
         <header className="page-head">
           <h1>OpenCode 管理</h1>
-          <p>模板矩阵编辑 · Coding Plan 额度 · 插件设置</p>
+          <p>配置总览 · 模板矩阵编辑 · Coding Plan 额度 · 插件设置</p>
         </header>
 
         <div className="mtabs" role="tablist" aria-label="管理页分区" onKeyDown={onTablistKeyDown}>
@@ -109,6 +110,15 @@ export default function ManagerApp() {
           ))}
         </div>
 
+        <div
+          id="mpanel-config"
+          className="mtab-body"
+          role="tabpanel"
+          aria-labelledby="mtab-config"
+          hidden={tab !== "config"}
+        >
+          <ConfigApp />
+        </div>
         <div
           id="mpanel-quota"
           className="mtab-body"
