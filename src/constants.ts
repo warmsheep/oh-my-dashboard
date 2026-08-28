@@ -66,12 +66,10 @@ export const CONFIG_LEAF = {
   quotaRefreshSeconds: "quota.refreshSeconds",
 } as const;
 
-export const PRESET_EDITOR_VIEW_TYPE = "opencode.presetEditor";
-
 /**
  * Webview panel view type of the manager page (manager.html bundle): the merged
- * 额度/设置 tabbed panel — entry points are the status-bar quota click, the
- * MiMo-cookie shortcut, and the tree gear / 打开设置 command.
+ * 模板/额度/设置 tabbed panel — entry points are the preset editor command, the
+ * status-bar quota click, the MiMo-cookie shortcut, and the tree gear command.
  */
 export const MANAGER_PANEL_VIEW_TYPE = "opencode.managerPanel";
 
