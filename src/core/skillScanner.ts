@@ -1,7 +1,8 @@
 import * as defaultFs from "node:fs";
 import * as path from "node:path";
 
-import type { DirEntry, SkillDirLocation } from "./types";
+import type { SkillSummary } from "../shared/protocol";
+import type { DirEntry, SkillDirLocation, SkillLocation } from "./types";
 
 /**
  * Project-level skills dir conventions, in display order: the cross-tool standard
@@ -151,6 +152,88 @@ export function skillNamesFromTree(tree: DirEntry[]): string[] {
     .filter((entry) => entry.isDir && isSkillMdFile(entry.path))
     .map((entry) => entry.name)
     .sort();
+}
+
+const SKILL_DESCRIPTION_READ_LIMIT = 8 * 1024;
+const SKILL_DESCRIPTION_MAX_CHARS = 300;
+
+/**
+ * Extract the `description` value from SKILL.md text: only a `description:` key at
+ * column 0 inside the leading `---` fenced block matches (nested/body occurrences
+ * are ignored). Accepts quoted ("…" or '…') or bare single-line values; quotes are
+ * stripped, whitespace collapsed.
+ */
+function frontmatterDescription(text: string): string {
+  // BOM-prefixed files intentionally yield "": the leading fence is no longer the
+  // first line, so no frontmatter block is recognized.
+  const lines = text.split(/\r?\n/);
+  if (lines[0] !== "---") {
+    return "";
+  }
+  for (let i = 1; i < lines.length; i += 1) {
+    const line = lines[i];
+    if (line === "---" || line === "...") {
+      return "";
+    }
+    const match = /^description:[ \t]*(.*)$/.exec(line);
+    if (match === null) {
+      continue;
+    }
+    // Multi-line folded styles (>- etc.) are NOT unfolded — the remainder of the
+    // description line is taken as-is (documented limitation).
+    const raw = match[1].trim();
+    const unquoted =
+      raw.length >= 2 && ((raw.startsWith('"') && raw.endsWith('"')) || (raw.startsWith("'") && raw.endsWith("'")))
+        ? raw.slice(1, -1)
+        : raw;
+    const collapsed = unquoted.replace(/\s+/g, " ").trim();
+    return collapsed.length > SKILL_DESCRIPTION_MAX_CHARS
+      ? `${collapsed.slice(0, SKILL_DESCRIPTION_MAX_CHARS)}…`
+      : collapsed;
+  }
+  return "";
+}
+
+/**
+ * Read a skill's frontmatter description from `<skillDir>/SKILL.md`: "" when the
+ * file is missing, has no leading `---` frontmatter block (BOM included), or
+ * carries no `description:` key. Bounded to the first 8 KiB; value capped at 300
+ * chars ("…" appended when truncated).
+ */
+export function readSkillDescription(skillDir: string, fsMod: typeof defaultFs = defaultFs): string {
+  try {
+    const text = fsMod.readFileSync(path.join(skillDir, "SKILL.md"), "utf8");
+    return frontmatterDescription(text.slice(0, SKILL_DESCRIPTION_READ_LIMIT));
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Flat read-only skill rows for the manager panel's 配置 tab: every location × its
+ * skill dir names, description via {@link readSkillDescription}, scope + display
+ * label carried from the location. Sorted by locationLabel then name for a
+ * stable display order.
+ */
+export function skillSummaries(
+  locations: readonly SkillLocation[],
+  fsMod: typeof defaultFs = defaultFs,
+): SkillSummary[] {
+  const rows: SkillSummary[] = [];
+  for (const loc of locations) {
+    for (const name of loc.skillNames) {
+      rows.push({
+        name,
+        description: readSkillDescription(path.join(loc.dir, name), fsMod),
+        scope: loc.scope,
+        locationLabel: loc.label,
+      });
+    }
+  }
+  rows.sort((a, b) =>
+    a.locationLabel === b.locationLabel ? a.name.localeCompare(b.name) : a.locationLabel.localeCompare(b.locationLabel),
+  );
+  return rows;
 }
 
 /** NTFS and default APFS are case-insensitive: compare folded, display original. */
