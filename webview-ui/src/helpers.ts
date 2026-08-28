@@ -102,3 +102,19 @@ export function groupModelsByProvider(models: readonly ModelOption[]): Map<strin
 export function countConfigured(rows: readonly PresetRow[]): number {
   return rows.reduce((n, r) => (r.model !== null ? n + 1 : n), 0);
 }
+
+/**
+ * Locale-independent short date (YYYY-MM-DD) for preset list meta lines;
+ * missing/garbage values degrade to "—" — never "Invalid Date".
+ */
+export function formatPresetDate(iso: string | null): string {
+  if (!iso) {
+    return "—";
+  }
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) {
+    return "—";
+  }
+  const pad = (n: number): string => String(n).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}

@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   countConfigured,
+  formatPresetDate,
   groupModelsByProvider,
   isDirty,
   isDirtyRisingEdge,
@@ -239,5 +240,26 @@ describe("groupModelsByProvider", () => {
 
   it("returns an empty map for no models", () => {
     expect(groupModelsByProvider([]).size).toBe(0);
+  });
+});
+
+describe("formatPresetDate", () => {
+  it("formats an ISO timestamp as a zero-padded local YYYY-MM-DD date", () => {
+    const date = new Date(2026, 7, 28, 9, 30);
+    expect(formatPresetDate(date.toISOString())).toBe("2026-08-28");
+  });
+
+  it("pads single-digit months and days", () => {
+    const date = new Date(2026, 0, 5, 0, 0);
+    expect(formatPresetDate(date.toISOString())).toBe("2026-01-05");
+  });
+
+  it("degrades null and empty strings to the em dash", () => {
+    expect(formatPresetDate(null)).toBe("—");
+    expect(formatPresetDate("")).toBe("—");
+  });
+
+  it("degrades garbage input instead of rendering Invalid Date", () => {
+    expect(formatPresetDate("not-a-date")).toBe("—");
   });
 });

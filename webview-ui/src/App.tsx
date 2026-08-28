@@ -1,4 +1,4 @@
-import type { ExtToWebview, PresetRow, WebviewInitPayload } from "@shared/protocol";
+import type { ExtToWebview, PresetListEntry, PresetRow, WebviewInitPayload, WebviewToExt } from "@shared/protocol";
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { SECTIONS, VARIANT_ORDER } from "./constants";
@@ -15,6 +15,7 @@ import {
   type FormState,
   type ModelOption,
 } from "./helpers";
+import PresetListView from "./PresetListView";
 import { clearPresetDraft, hasVSCodeApi, loadPresetDraft, postToHost, savePresetDraft } from "./vscode";
 
 const DEV_INIT_PAYLOAD: WebviewInitPayload = {
@@ -119,6 +120,17 @@ function toFormState(payload: WebviewInitPayload): FormState {
     rows: SECTIONS.flatMap((s) => mergeRows(s.known, payload.preset.rows, s.key)),
   };
 }
+
+/** Browser-preview sample for the 模板 tab's default list view (vite dev only). */
+const DEV_PRESET_LIST: PresetListEntry[] = [
+  {
+    name: "日常开发",
+    description: "浏览器预览用的示例数据",
+    createdAt: "2026-08-01T08:00:00.000Z",
+    appliedAt: "2026-08-20T10:00:00.000Z",
+  },
+  { name: "周末清理", createdAt: "2026-08-10T08:00:00.000Z", appliedAt: null },
+];
 
 function ModelSelect({
   groups,
@@ -255,6 +267,7 @@ function SectionBlock({
 export default function App() {
   const [payload, setPayload] = useState<WebviewInitPayload | null>(null);
   const [form, setForm] = useState<FormState | null>(null);
+  const [presetList, setPresetList] = useState<PresetListEntry[] | null>(null);
   const [baseline, setBaseline] = useState<FormState | null>(null);
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
   const [batchModel, setBatchModel] = useState("");
@@ -330,18 +343,33 @@ export default function App() {
 
   useEffect(() => {
     const onMessage = (event: MessageEvent) => {
-      const msg = event.data as ExtToWebview | undefined;
+      // Dev fallback re-posts outbound messages to this same window, so the
+      // listener sees both directions there; real webviews only receive ext→web.
+      const msg = event.data as ExtToWebview | WebviewToExt | undefined;
       if (!msg || typeof msg !== "object") return;
       if (msg.type === "init") handlersRef.current.init(msg.payload);
       else if (msg.type === "initFailed") setInitError(msg.payload.error);
       else if (msg.type === "result") handlersRef.current.result(msg.payload);
       else if (msg.type === "modelsUpdated") {
         setPayload((current) => (current ? { ...current, models: msg.payload.models } : current));
+      } else if (msg.type === "presetList") {
+        setPresetList(msg.payload.presets);
+      } else if (!hasVSCodeApi() && msg.type === "presetEdit") {
+        // Dev-only fake host: answer list clicks with the sample editor payload.
+        const entry = DEV_PRESET_LIST.find((p) => p.name === msg.payload?.name);
+        handlersRef.current.init({
+          preset: {
+            name: entry?.name ?? "",
+            ...(entry?.description !== undefined ? { description: entry.description } : {}),
+            rows: DEV_INIT_PAYLOAD.preset.rows,
+          },
+          models: DEV_INIT_PAYLOAD.models,
+        });
       }
     };
     window.addEventListener("message", onMessage);
     if (!hasVSCodeApi()) {
-      const t = window.setTimeout(() => handlersRef.current.init(DEV_INIT_PAYLOAD), 60);
+      const t = window.setTimeout(() => setPresetList(DEV_PRESET_LIST), 60);
       return () => {
         window.removeEventListener("message", onMessage);
         window.clearTimeout(t);
@@ -456,8 +484,12 @@ export default function App() {
     setConfirmingCancel(false);
     setError(null);
     // The host clears its workspaceState draft for this session; the preset tab
-    // falls back to the empty hint until the next editPreset lands an init.
+    // falls back to the preset list until the next edit session lands an init.
     postToHost({ type: "cancel" });
+  }, []);
+
+  const requestEdit = useCallback((name: string | null) => {
+    postToHost({ type: "presetEdit", payload: { name } });
   }, []);
 
   const cancel = useCallback(() => {
@@ -470,24 +502,30 @@ export default function App() {
   }, [closeSession]);
 
   if (initError !== null) {
+    // Session init failed (e.g. unreadable preset): keep the list visible so
+    // the user can retry another row instead of staring at a lone banner.
     return (
-      <div className="boot">
-        <div className="banner-error" role="alert">
-          <span className="banner-icon" aria-hidden="true">
-            ⛔
-          </span>
-          {initError}
+      <main className="app preset-tab">
+        <div className="page">
+          <div className="banner-error" role="alert">
+            <span className="banner-icon" aria-hidden="true">
+              ⛔
+            </span>
+            {initError}
+          </div>
+          <PresetListView presets={presetList} onEdit={requestEdit} />
         </div>
-      </div>
+      </main>
     );
   }
 
   if (!payload || !form) {
     return (
-      <div className="empty preset-empty">
-        尚未打开模板——在侧栏「模板」分区右键模板选择「编辑模板（矩阵表单）」，或从命令面板运行 OpenCode:
-        编辑模板（矩阵表单）。
-      </div>
+      <main className="app preset-tab">
+        <div className="page">
+          <PresetListView presets={presetList} onEdit={requestEdit} />
+        </div>
+      </main>
     );
   }
 

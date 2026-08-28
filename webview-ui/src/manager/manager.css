@@ -43,9 +43,108 @@
   min-height: auto;
 }
 
-.preset-empty {
-  padding: 18px 4px;
-  line-height: 1.7;
+/* Preset list (the tab's default view whenever no edit session is open):
+   one clickable row per preset + a 新建模板 entry point. */
+.preset-list {
+  padding: 6px 0 18px;
+}
+
+.plist-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 4px 2px 10px;
+  border-bottom: 1px solid var(--hairline);
+  margin-bottom: 8px;
+}
+
+.plist-title {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.plist {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--hairline);
+  border-radius: 2px;
+}
+
+.plist li + li {
+  border-top: 1px solid var(--hairline);
+}
+
+.plist-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 10px;
+  font: inherit;
+  color: var(--fg);
+  text-align: left;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  transition: background 0.08s ease;
+}
+
+.plist-item:hover {
+  background: rgba(128, 128, 128, 0.18);
+}
+
+.plist-main {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  flex: 1;
+}
+
+.plist-name {
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.plist-desc {
+  font-size: 11px;
+  color: var(--desc);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.plist-meta {
+  font-size: 10px;
+  color: var(--desc);
+  font-family: var(--mono);
+}
+
+.plist-badge {
+  flex: none;
+  font-size: 10px;
+  color: var(--fg);
+  background: var(--section-bg);
+  border: 1px solid var(--hairline);
+  border-radius: 2px;
+  padding: 1px 6px;
+  white-space: nowrap;
+}
+
+.plist-edit {
+  flex: none;
+  font-size: 11px;
+  color: var(--desc);
+  white-space: nowrap;
+}
+
+.plist-item:hover .plist-edit {
+  color: var(--fg);
 }
 
 /* Quota tab: snapshot freshness line (the page title lives on the manager shell). */
