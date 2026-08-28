@@ -538,7 +538,7 @@ async function pollConfigValue(key: string, expected: unknown, message: string):
   );
 }
 
-/** Open (or reveal) the manager panel on the 设置 tab while capturing its bridge; polls for the boot settingsInit. */
+/** Open (or reveal) the manager panel on the FIRST (配置) tab while capturing its bridge; polls for the boot settingsInit. */
 async function openSettingsPanelCaptured(commandId: string): Promise<PanelBridge> {
   const windowApi = vscode.window as unknown as {
     createWebviewPanel: (...args: unknown[]) => vscode.WebviewPanel;
@@ -597,10 +597,10 @@ async function openSettingsPanelCaptured(commandId: string): Promise<PanelBridge
           .some(
             (message) =>
               message.type === "managerNavigate" &&
-              (message.payload as { tab?: unknown } | undefined)?.tab === "settings",
+              (message.payload as { tab?: unknown } | undefined)?.tab === "config",
           ),
       10_000,
-      "openSettings reveal must navigate the manager panel to the settings tab",
+      "openSettings reveal must navigate the manager panel to the first (配置) tab",
     );
     return heldBefore;
   }
@@ -1232,6 +1232,130 @@ function tests(): TestCase[] {
           "presets dir must be byte-identical after the rejected save",
         );
         assert.equal(fs.existsSync(path.join(configDir, "evil.json")), false, "no escape outside presets/");
+      },
+    },
+
+    // ---- Section 4b: 配置 tab protocol (same manager panel bridge) ------------
+    {
+      name: "config tab: boot configInit carries live assignment rows, skills and the write target",
+      fn: async () => {
+        assert.ok(managerBridge, "manager panel must still be open from the previous step");
+        const bridge = managerBridge;
+        // Boot push (ready handler): rows carry the seeded fixture assignment, skills the
+        // seeded fake skill (frontmatter description), target the legacy file (~/.omo is
+        // only created by a later Section 5 step).
+        await pollUntil(
+          () =>
+            bridge.outbound.some((message) => {
+              if (message.type !== "configInit" || typeof message.payload !== "object" || message.payload === null) {
+                return false;
+              }
+              const payload = message.payload as {
+                rows?: { section?: string; name?: string; model?: string | null; variant?: string | null }[];
+                skills?: { name?: string; description?: string; scope?: string }[];
+                target?: { kind?: string; path?: string };
+              };
+              const row = payload.rows?.find((r) => r.section === "agents" && r.name === "hephaestus");
+              const skill = payload.skills?.find((s) => s.name === "e2e-skill");
+              return (
+                row?.model === "zhipuai-coding-plan/glm-5.2" &&
+                row?.variant === "medium" &&
+                skill?.description === "e2e 技能（配置页展示用）" &&
+                skill?.scope === "global" &&
+                payload.target?.kind === "legacy" &&
+                payload.target?.path === path.join(configDir, "oh-my-opencode.json")
+              );
+            }),
+          20_000,
+          "boot configInit must carry the seeded agent row, fake skill and legacy target",
+        );
+      },
+    },
+    {
+      name: "configSetModel writes the live agent config, replies ok, re-pushes configInit",
+      fn: async () => {
+        assert.ok(managerBridge, "manager panel must still be open from the previous step");
+        const bridge = managerBridge;
+        const agentConfig = path.join(configDir, "oh-my-opencode.json");
+        const initsBefore = bridge.outbound.filter((message) => message.type === "configInit").length;
+
+        bridge.deliver({
+          type: "configSetModel",
+          payload: { section: "agents", name: "hephaestus", model: "zhipuai/glm-4.7", variant: "high" },
+        });
+        await pollUntil(
+          () =>
+            bridge.outbound.some(
+              (message) =>
+                message.type === "configModelSaved" &&
+                typeof message.payload === "object" &&
+                message.payload !== null &&
+                (message.payload as { ok?: unknown }).ok === true,
+            ),
+          10_000,
+          "configSetModel must produce a configModelSaved(ok:true) reply",
+        );
+        // The refreshed configInit (handler push; the watcher echo may add one more)
+        // must carry the just-written assignment.
+        await pollUntil(
+          () =>
+            bridge.outbound.slice(initsBefore).some(
+              (message) =>
+                message.type === "configInit" &&
+                (
+                  message.payload as {
+                    rows?: { section?: string; name?: string; model?: string | null; variant?: string | null }[];
+                  }
+                ).rows?.some(
+                  (row) =>
+                    row.section === "agents" &&
+                    row.name === "hephaestus" &&
+                    row.model === "zhipuai/glm-4.7" &&
+                    row.variant === "high",
+                ),
+            ),
+          10_000,
+          "a refreshed configInit carrying the new model must follow the write",
+        );
+
+        assertNoJsoncErrors(agentConfig);
+        const agent = JSON.parse(fs.readFileSync(agentConfig, "utf8")) as {
+          agents: { hephaestus?: Record<string, unknown> };
+        };
+        assert.equal(agent.agents.hephaestus?.model, "zhipuai/glm-4.7");
+        assert.equal(agent.agents.hephaestus?.variant, "high");
+      },
+    },
+    {
+      name: "malformed configSetModel (bad section) is rejected without a file write",
+      fn: async () => {
+        assert.ok(managerBridge, "manager panel must still be open from the previous step");
+        const bridge = managerBridge;
+        const agentConfig = path.join(configDir, "oh-my-opencode.json");
+        const bytesBefore = fs.readFileSync(agentConfig);
+
+        bridge.deliver({
+          type: "configSetModel",
+          payload: { section: "bogus", name: "hephaestus", model: "zhipuai/glm-4.7", variant: "high" },
+        });
+        await pollUntil(
+          () =>
+            bridge.outbound.some(
+              (message) =>
+                message.type === "configModelSaved" &&
+                typeof message.payload === "object" &&
+                message.payload !== null &&
+                (message.payload as { ok?: unknown }).ok === false &&
+                typeof (message.payload as { error?: unknown }).error === "string" &&
+                ((message.payload as { error?: unknown }).error as string).includes("格式无法识别"),
+            ),
+          10_000,
+          "malformed configSetModel must produce a !ok configModelSaved reply",
+        );
+        assert.ok(
+          fs.readFileSync(agentConfig).equals(bytesBefore),
+          "a rejected configSetModel must not write the agent config",
+        );
       },
     },
     {
@@ -2116,21 +2240,22 @@ function tests(): TestCase[] {
         const bridge = await openSettingsPanelCaptured(CMD.openSettings);
 
         // Boot payload reflects the package.json defaults: every category off at 30s, quota 30s.
-        // Anchor on the LAST settings-tab navigation from THIS entry point (earlier pushes —
+        // Anchor on the LAST config-tab navigation from THIS entry point (earlier pushes —
         // panel boot during the all-hidden test, quota-era reveals — legitimately carried
-        // other state); its immediately-following settingsInit is the boot payload.
+        // other state); the settingsInit riding along with it (打开设置 keeps the settings
+        // tab fresh on arrival) is the entry's boot payload.
         const navigateIdx = bridge.outbound.reduce(
           (last, message, index) =>
-            message.type === "managerNavigate" && (message.payload as { tab?: unknown })?.tab === "settings"
+            message.type === "managerNavigate" && (message.payload as { tab?: unknown })?.tab === "config"
               ? index
               : last,
           -1,
         );
-        assert.ok(navigateIdx >= 0, "openSettings must navigate the panel to the settings tab");
+        assert.ok(navigateIdx >= 0, "openSettings must land on the first (配置) tab");
         const bootMessage = bridge.outbound
           .slice(navigateIdx + 1)
           .find((message) => message.type === "settingsInit") as { payload: SettingsInitMessage } | undefined;
-        assert.ok(bootMessage, "the settings navigation must be followed by a settingsInit push");
+        assert.ok(bootMessage, "the config navigation must be followed by a settingsInit push");
         const boot = bootMessage.payload;
         for (const category of ["config", "presets", "backups", "models", "plugins"]) {
           assert.deepEqual(

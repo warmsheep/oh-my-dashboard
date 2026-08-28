@@ -71,8 +71,12 @@ function seedConfigHome() {
 
   fs.mkdirSync(path.join(opencodeDir, "command"), { recursive: true });
   fs.writeFileSync(path.join(opencodeDir, "command", "e2e.md"), "# e2e command stub\n");
+  // The config-tab e2e asserts this skill's frontmatter description rides the boot configInit.
   fs.mkdirSync(path.join(opencodeDir, "skills", "e2e-skill"), { recursive: true });
-  fs.writeFileSync(path.join(opencodeDir, "skills", "e2e-skill", "SKILL.md"), "# e2e skill stub\n");
+  fs.writeFileSync(
+    path.join(opencodeDir, "skills", "e2e-skill", "SKILL.md"),
+    "---\nname: e2e-skill\ndescription: e2e 技能（配置页展示用）\n---\n\n# e2e skill stub\n",
+  );
 
   // The fixture opencode.jsonc declares "@happycastle/opencode-openmemory@latest" in its
   // plugin array — seed it in the modern arborist layout under an isolated XDG_CACHE_HOME:
