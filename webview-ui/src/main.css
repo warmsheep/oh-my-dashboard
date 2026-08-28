@@ -1,25 +1,34 @@
+/* Fallback values are deliberately LIGHT (page white, control surfaces light gray,
+   text near-black): some code-server builds serve webviews WITHOUT injecting the
+   theme CSS variables, and every var() below then resolves to its fallback. Dark
+   fallbacks rendered the whole preset editor dark there (and light-gray dropdown
+   text on a light-gray popup was unreadable). When the variables ARE present —
+   desktop VSCode and current code-server — they win and theme-following is unchanged. */
 :root {
-  --bg: var(--vscode-editor-background, #1e1e1e);
-  --fg: var(--vscode-editor-foreground, #cccccc);
-  --desc: var(--vscode-descriptionForeground, #9d9d9d);
-  --err: var(--vscode-errorForeground, #f48771);
+  color-scheme: light;
+  --bg: var(--vscode-editor-background, #ffffff);
+  --fg: var(--vscode-editor-foreground, #333333);
+  --desc: var(--vscode-descriptionForeground, #6a6a6a);
+  --err: var(--vscode-errorForeground, #d1383d);
   --focus: var(--vscode-focusBorder, #007fd4);
-  --hairline: var(--vscode-panel-border, #2b2b2b);
-  --section-bg: var(--vscode-panelSectionHeader-background, #333335);
-  --hover: var(--vscode-list-hover-background, #2a2d2e);
+  --hairline: var(--vscode-panel-border, #d9d9d9);
+  --section-bg: var(--vscode-panelSectionHeader-background, #f2f2f2);
+  --hover: var(--vscode-list-hover-background, #ececec);
   --btn-bg: var(--vscode-button-background, #0078d4);
   --btn-fg: var(--vscode-button-foreground, #ffffff);
   --btn-hover: var(--vscode-button-hover-background, #026ec1);
-  --btn2-bg: var(--vscode-button-secondaryBackground, #3a3d41);
-  --btn2-fg: var(--vscode-button-secondaryForeground, #ffffff);
-  --btn2-hover: var(--vscode-button-secondaryHoverBackground, #45494e);
-  --sel-bg: var(--vscode-dropdown-background, #313131);
-  --sel-border: var(--vscode-dropdown-border, #3c3c3c);
-  --sel-fg: var(--vscode-dropdown-foreground, #cccccc);
-  --inp-bg: var(--vscode-input-background, #313131);
-  --inp-border: var(--vscode-input-border, #3c3c3c);
+  --btn2-bg: var(--vscode-button-secondaryBackground, #eaeaea);
+  --btn2-fg: var(--vscode-button-secondaryForeground, #333333);
+  --btn2-hover: var(--vscode-button-secondaryHoverBackground, #dcdcdc);
+  --sel-bg: var(--vscode-dropdown-background, #f2f2f2);
+  --sel-border: var(--vscode-dropdown-border, #c7c7c7);
+  --sel-fg: var(--vscode-dropdown-foreground, #333333);
+  /* Light fallback on purpose: envs missing this var (code-server light) need a light popup. */
+  --option-bg: var(--vscode-dropdown-background, #f2f2f2);
+  --inp-bg: var(--vscode-input-background, #f2f2f2);
+  --inp-border: var(--vscode-input-border, #c7c7c7);
   --inp-fg: var(--vscode-input-foreground, var(--fg));
-  --ok: var(--vscode-testing-iconPassed, #73c991);
+  --ok: var(--vscode-testing-iconPassed, #3d9a57);
   --mono: var(--vscode-editor-font-family, "SF Mono", Menlo, Consolas, "Courier New", monospace);
 }
 
@@ -49,6 +58,18 @@ body {
   font-size: var(--vscode-font-size, 13px);
   line-height: 1.5;
   min-height: 100vh;
+}
+
+/* Native widget popups (select dropdown, scrollbars) follow the VSCode theme
+   classes injected on <body>; without this the browser picks its own scheme. */
+body.vscode-light,
+body.vscode-high-contrast-light {
+  color-scheme: light;
+}
+
+body.vscode-dark,
+body.vscode-high-contrast {
+  color-scheme: dark;
 }
 
 #root {
@@ -161,6 +182,13 @@ select.ctl {
   color: var(--sel-fg);
   background: var(--sel-bg);
   border-color: var(--sel-border);
+}
+
+/* Native option popups ignore the select's colors in some browsers (code-server). */
+select.ctl option,
+select.ctl optgroup {
+  background: var(--option-bg);
+  color: var(--sel-fg);
 }
 
 select.ctl:disabled {
