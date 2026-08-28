@@ -22,11 +22,13 @@ import { createQuotaStatusBar } from "./ui/quotaStatusBar";
 import { readAutoRefreshSettings, writeAutoRefreshSettings } from "./ui/settingsStore";
 import { createStatusBar } from "./ui/statusbar";
 import {
+  notifyManagerPanelModelsChanged,
+  openPresetEditorTab,
   postMessageToManagerPanel,
   pushSettingsToManagerPanel,
   registerManagerPanel,
 } from "./webview/managerPanelHost";
-import { notifyPresetEditorsModelsChanged, postMessageToPresetEditor } from "./webview/presetEditorHost";
+import { createPresetEditorSession } from "./webview/presetEditorHost";
 
 export function activate(ctx: vscode.ExtensionContext): void {
   const cfg = vscode.workspace.getConfiguration(CONFIG_SECTION);
@@ -105,13 +107,6 @@ export function activate(ctx: vscode.ExtensionContext): void {
   });
   const quotaStatusBar = createQuotaStatusBar({ quotaService, log });
   ctx.subscriptions.push(quotaStatusBar);
-  registerManagerPanel(ctx, {
-    quotaService,
-    statusBar: quotaStatusBar,
-    readSettings: readAutoRefreshSettings,
-    saveSettings: writeAutoRefreshSettings,
-    log,
-  });
 
   // Watcher-driven refresh (debounced + content-deduped inside WatchManager). Kept separate
   // from `refreshAll` below so the watcher path does not re-open the explicit-refresh
@@ -129,8 +124,8 @@ export function activate(ctx: vscode.ExtensionContext): void {
           log(`refresh 失败: ${errorMessage(error)}`);
         },
       );
-      // Lazy provider: listModels() only runs when at least one editor panel is open.
-      notifyPresetEditorsModelsChanged(() => configStore.listModels());
+      // Lazy provider: listModels() only runs when the manager panel is open.
+      notifyManagerPanelModelsChanged(() => configStore.listModels());
     } catch (error) {
       log(`refreshAll 失败: ${errorMessage(error)}`);
     }
@@ -246,6 +241,19 @@ export function activate(ctx: vscode.ExtensionContext): void {
   autoRefreshScheduler.reconfigure();
   ctx.subscriptions.push(autoRefreshScheduler);
 
+  // Manager panel (模板/额度/设置 tabs): registered here because the preset-tab
+  // session depends on refreshAll (defined above).
+  const presetSession = createPresetEditorSession(ctx, { configStore, presetService, refreshAll, log });
+  const managerDeps = {
+    quotaService,
+    statusBar: quotaStatusBar,
+    readSettings: readAutoRefreshSettings,
+    saveSettings: writeAutoRefreshSettings,
+    preset: presetSession,
+    log,
+  };
+  registerManagerPanel(ctx, managerDeps);
+
   // autoRefresh.* keys re-arm the polling scheduler; EXTERNAL settings changes
   // (standard Settings UI, hand edits) re-sync the open manager page — own-save
   // echoes are suppressed inside pushSettingsToManagerPanel so they can't revert
@@ -262,7 +270,14 @@ export function activate(ctx: vscode.ExtensionContext): void {
   });
   ctx.subscriptions.push(settingsListener);
 
-  registerCommands(ctx, { configStore, backupService, presetService, refreshAll, log });
+  registerCommands(ctx, {
+    configStore,
+    backupService,
+    presetService,
+    refreshAll,
+    openPresetEditor: (name: string | null) => openPresetEditorTab(ctx, managerDeps, name),
+    log,
+  });
 
   // Warmup's full discover (skills/plugin trees) runs synchronously on the shared
   // exthost event loop — defer it past the activation IO storm other extensions
@@ -303,8 +318,11 @@ export function activate(ctx: vscode.ExtensionContext): void {
   // (c) read the preset status-bar text. See test/e2e/suite.
   if (ctx.extensionMode === vscode.ExtensionMode.Test) {
     ctx.subscriptions.push(
-      vscode.commands.registerCommand(TEST_BRIDGE.presetEditorPostMessage, (name: string, message: unknown): boolean =>
-        postMessageToPresetEditor(name, message),
+      vscode.commands.registerCommand(
+        TEST_BRIDGE.presetEditorPostMessage,
+        // The name arg is legacy from the multi-panel era; the merged panel is a
+        // singleton, so every preset-editor bridge post lands on it directly.
+        (_name: string, message: unknown): boolean => postMessageToManagerPanel(message),
       ),
       vscode.commands.registerCommand(TEST_BRIDGE.quotaPanelPostMessage, (message: unknown): boolean =>
         postMessageToManagerPanel(message),

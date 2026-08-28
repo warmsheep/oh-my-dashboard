@@ -21,7 +21,6 @@ import type { PresetService } from "../core/presetService";
 import type { BackupEntry, Variant } from "../core/types";
 import { BACKUP_REASON_LABELS, KNOWN_AGENTS, KNOWN_CATEGORIES, VARIANTS } from "../core/types";
 import { CURRENT_PRESET_BADGE } from "../tree/nodes";
-import { openPresetEditor } from "../webview/presetEditorHost";
 import {
   agentModelRequestFromArg,
   agentTargetFromArg,
@@ -42,6 +41,8 @@ export interface ExtensionDeps {
   backupService: BackupService;
   presetService: PresetService;
   refreshAll(): void;
+  /** Opens the manager panel's 模板 tab on the named preset (null = new). */
+  openPresetEditor(name: string | null): Promise<void>;
   log(message: string): void;
 }
 
@@ -91,7 +92,7 @@ export function registerCommands(ctx: vscode.ExtensionContext, deps: ExtensionDe
         if (!name) {
           return;
         }
-        await openPresetEditor(ctx, deps, name);
+        await deps.openPresetEditor(name);
       }),
     ),
     vscode.commands.registerCommand(CMD.renamePreset, (arg?: unknown) =>

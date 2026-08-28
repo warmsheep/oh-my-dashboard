@@ -6,25 +6,35 @@ import type { QuotaService } from "../core/quotaService";
 import type {
   AutoRefreshSettings,
   AutoRefreshSettingsSource,
+  ManagerTab,
+  ModelOption,
   QuotaInitPayload,
   QuotaProviderId,
 } from "../shared/protocol";
 import { normalizeAutoRefreshSettings, QUOTA_PROVIDER_IDS } from "../shared/protocol";
 import type { QuotaStatusBar } from "../ui/quotaStatusBar";
 import { buildWebviewHtml, readWebviewHtml } from "./panelHtml";
+import type { PresetEditorSession } from "./presetEditorHost";
+import { isSaveTyped, parsePresetEditorMessage, saveActionOf } from "./presetEditorHost";
 
 export interface ManagerPanelDeps {
   quotaService: QuotaService;
   statusBar: QuotaStatusBar;
   readSettings(): AutoRefreshSettings;
   saveSettings(settings: AutoRefreshSettings): Promise<void>;
+  /** Preset-tab session controller (one editing session at a time in the 模板 tab). */
+  preset: PresetEditorSession;
   log(message: string): void;
 }
 
-/** Which tab an entry point lands on; focusProvider scrolls one quota group into view. */
+/**
+ * Which tab an entry point lands on; focusProvider scrolls one quota group into
+ * view, presetName starts (or switches) the preset editing session (null = new).
+ */
 export interface OpenManagerPanelOptions {
-  tab: "quota" | "settings";
+  tab: ManagerTab;
   focusProvider?: QuotaProviderId;
+  presetName?: string | null;
 }
 
 // Singleton panel: the manager page (额度/设置 tabs) is unique, like the quota and
@@ -66,6 +76,32 @@ export function registerManagerPanel(ctx: vscode.ExtensionContext, deps: Manager
     vscode.commands.registerCommand(CMD.quotaConfigureMimo, () => openSafely({ tab: "quota", focusProvider: "mimo" })),
     vscode.commands.registerCommand(CMD.openSettings, () => openSafely({ tab: "settings" })),
   );
+}
+
+/**
+ * Open the manager panel on the 模板 tab editing `name` (null = a new unsaved
+ * preset). Called by the editPreset command; an already-open panel just
+ * navigates + receives a fresh preset init (switching the editing session).
+ */
+export function openPresetEditorTab(
+  ctx: vscode.ExtensionContext,
+  deps: ManagerPanelDeps,
+  name: string | null,
+): Promise<void> {
+  return openManagerPanel(ctx, deps, { tab: "preset", presetName: name });
+}
+
+/**
+ * Push a refreshed model catalog to the open panel's preset tab. Accepts the
+ * list itself or a lazy provider; the provider is only invoked when the panel
+ * is open, so callers avoid computing `listModels()` when nobody listens.
+ */
+export function notifyManagerPanelModelsChanged(models: ModelOption[] | (() => ModelOption[])): void {
+  if (openPanel === undefined) {
+    return;
+  }
+  const resolved = typeof models === "function" ? models() : models;
+  void openPanel.webview.postMessage({ type: "modelsUpdated", payload: { models: resolved } });
 }
 
 /**
@@ -183,9 +219,30 @@ function postNavigateMessages(
   if (options.tab === "quota") {
     post({ type: "managerNavigate", payload: { tab: "quota", focusProvider: options.focusProvider } });
     post({ type: "quotaInit", payload: quotaInitPayload(deps, options.focusProvider) });
-  } else {
-    post({ type: "managerNavigate", payload: { tab: "settings" } });
-    post({ type: "settingsInit", payload: { settings: deps.readSettings() } });
+    return;
+  }
+  if (options.tab === "preset") {
+    post({ type: "managerNavigate", payload: { tab: "preset" } });
+    postPresetInit(panel, deps, options.presetName ?? null);
+    return;
+  }
+  post({ type: "managerNavigate", payload: { tab: "settings" } });
+  post({ type: "settingsInit", payload: { settings: deps.readSettings() } });
+}
+
+/**
+ * Begin (or switch) the preset editing session and post its init; a load
+ * failure (unreadable preset, listModels throw) posts initFailed instead —
+ * the page keeps the previous/empty session visible with the error banner.
+ */
+function postPresetInit(panel: vscode.WebviewPanel, deps: ManagerPanelDeps, name: string | null): void {
+  try {
+    const payload = deps.preset.begin(name);
+    void panel.webview.postMessage({ type: "init", payload });
+  } catch (error) {
+    const msg = errorMessage(error);
+    deps.log(`managerPanel: 模板编辑会话初始化失败: ${msg}`);
+    void panel.webview.postMessage({ type: "initFailed", payload: { error: msg } });
   }
 }
 
@@ -271,9 +328,36 @@ function createManagerPanel(
   const runFullRefresh = (): Promise<void> => deps.statusBar.refresh().then(() => undefined);
 
   const listener = panel.webview.onDidReceiveMessage((raw: unknown) => {
+    const presetMessage = parsePresetEditorMessage(raw);
+    if (presetMessage !== undefined) {
+      switch (presetMessage.kind) {
+        case "dirty":
+          if (presetMessage.dirty) {
+            deps.preset.noteDirty();
+          }
+          break;
+        case "cancel":
+          // The page already cleared its local session; drop the crash-recovery
+          // draft so a reopen starts clean instead of restoring discarded edits.
+          deps.preset.cancel();
+          break;
+        case "save":
+          // handleSave is synchronous (core save/rename/apply are sync fs) — the
+          // reply lands before the page's awaitResult guard can time out.
+          post({ type: "result", payload: deps.preset.save(presetMessage.payload) });
+          break;
+      }
+      return;
+    }
     const message = parseMessage(raw);
     if (message === undefined) {
       deps.log(`managerPanel: 忽略无法识别的 webview 消息: ${JSON.stringify(raw) ?? String(raw)}`);
+      // Backstop (preset tab): a save-typed message that failed validation must
+      // still get a reply, or the page stays busy forever (awaitingResult never
+      // clears).
+      if (isSaveTyped(raw)) {
+        post({ type: "result", payload: { action: saveActionOf(raw), ok: false, error: "保存请求格式无法识别" } });
+      }
       return;
     }
     switch (message.kind) {
