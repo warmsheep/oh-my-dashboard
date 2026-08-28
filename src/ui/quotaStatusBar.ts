@@ -161,6 +161,12 @@ export function createQuotaStatusBar(deps: QuotaStatusBarDeps): QuotaStatusBar {
   // place (text/color/tooltip only); a full rebuild happens solely when the count changes.
   // Recreating every item on each 30s refresh caused constant create/dispose RPC + status-bar
   // relayout churn in the renderer.
+  //
+  // Items are created with EXPLICIT stable ids (`opencode-quota.<segment-id>`): id-less items
+  // are probabilistically dropped by the renderer across window startup/restore
+  // (microsoft/vscode#185089), and the pool's in-place updates then never resurrect them —
+  // the bar vanished until a visibility toggle changed the segment count and forced a rebuild.
+  const QUOTA_ITEM_ID_PREFIX = "opencode-quota.";
   const render = (): void => {
     if (disposed) {
       return;
@@ -175,7 +181,7 @@ export function createQuotaStatusBar(deps: QuotaStatusBarDeps): QuotaStatusBar {
       ? []
       : segments.length > 0
         ? segments
-        : [{ text: "Coding Plan", color: "neutral" as const }];
+        : [{ id: "neutral", text: "Coding Plan", color: "neutral" as const }];
     const tooltip =
       segments.length === 0 && !snapshot
         ? "点击查询 Coding Plan 剩余额度"
@@ -188,8 +194,12 @@ export function createQuotaStatusBar(deps: QuotaStatusBarDeps): QuotaStatusBar {
       for (const existing of items) {
         existing.dispose();
       }
-      items = rows.map((_, index) => {
-        const item = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, base - index);
+      items = rows.map((row, index) => {
+        const item = vscode.window.createStatusBarItem(
+          `${QUOTA_ITEM_ID_PREFIX}${row.id}`,
+          vscode.StatusBarAlignment.Right,
+          base - index,
+        );
         item.name = "Coding Plan 额度";
         item.command = CMD.quotaRefresh;
         return item;

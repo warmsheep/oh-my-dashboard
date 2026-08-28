@@ -608,7 +608,7 @@ describe("formatQuotaBar — balance-only providers", () => {
         },
       ],
     });
-    expect(bar.segments).toEqual([{ text: "DeepSeek ¥257.06", color: "green" }]);
+    expect(bar.segments).toEqual([{ text: "DeepSeek ¥257.06", color: "green", id: "deepseek:balance" }]);
   });
 
   it("colors balance segments: 20–100 yellow (boundaries inclusive)", () => {
@@ -627,7 +627,7 @@ describe("formatQuotaBar — balance-only providers", () => {
           },
         ],
       });
-      expect(bar.segments).toEqual([{ text: `DeepSeek ¥${total}`, color: "yellow" }]);
+      expect(bar.segments).toEqual([{ text: `DeepSeek ¥${total}`, color: "yellow", id: "deepseek:balance" }]);
     }
   });
 
@@ -646,7 +646,7 @@ describe("formatQuotaBar — balance-only providers", () => {
         },
       ],
     });
-    expect(bar.segments).toEqual([{ text: "DeepSeek $5.5", color: "red" }]);
+    expect(bar.segments).toEqual([{ text: "DeepSeek $5.5", color: "red", id: "deepseek:balance" }]);
   });
 
   it("skips providers with neither windows nor a parseable balance", () => {
@@ -1107,10 +1107,10 @@ describe("formatQuotaBar", () => {
       ],
     });
     expect(bar.segments).toEqual([
-      { text: "Kimi 100%/5h", color: "green" },
-      { text: "72%/7d", color: "green" },
-      { text: "60%/30d", color: "green" },
-      { text: "GLM 91%/5h", color: "green" },
+      { text: "Kimi 100%/5h", color: "green", id: "kimi:5h" },
+      { text: "72%/7d", color: "green", id: "kimi:weekly" },
+      { text: "60%/30d", color: "green", id: "kimi:monthly" },
+      { text: "GLM 91%/5h", color: "green", id: "glm:5h" },
     ]);
   });
 
@@ -1180,8 +1180,92 @@ describe("formatQuotaBar", () => {
         { providerId: "mimo", label: "MiMo", plan: null, configured: false, error: null, windows: [], balances: null },
       ],
     });
-    expect(errored.segments).toEqual([{ text: "Kimi ?", color: "neutral" }]);
+    expect(errored.segments).toEqual([{ text: "Kimi ?", color: "neutral", id: "kimi:error" }]);
     expect(formatQuotaBar({ fetchedAt: "x", providers: [] }).segments).toEqual([]);
+  });
+
+  it("assigns stable unique ids per segment kind (window / balance / error) across the bar", () => {
+    const snapshot: QuotaSnapshot = {
+      fetchedAt: "2026-08-22T00:00:00.000Z",
+      providers: [
+        {
+          providerId: "kimi",
+          label: "Kimi",
+          plan: null,
+          configured: true,
+          error: null,
+          balances: null,
+          windows: [
+            {
+              kind: "5h",
+              usedPercent: 10,
+              remainingPercent: 90,
+              used: null,
+              limit: null,
+              remaining: null,
+              resetAt: null,
+            },
+            {
+              kind: "weekly",
+              usedPercent: 20,
+              remainingPercent: 80,
+              used: null,
+              limit: null,
+              remaining: null,
+              resetAt: null,
+            },
+          ],
+        },
+        {
+          providerId: "glm",
+          label: "GLM",
+          plan: null,
+          configured: true,
+          error: null,
+          balances: null,
+          windows: [
+            {
+              kind: "5h",
+              usedPercent: 5,
+              remainingPercent: 95,
+              used: null,
+              limit: null,
+              remaining: null,
+              resetAt: null,
+            },
+          ],
+        },
+        {
+          providerId: "deepseek",
+          label: "DeepSeek",
+          plan: null,
+          windows: [],
+          balances: { total: 42, currency: "CNY" },
+          configured: true,
+          error: null,
+        },
+        {
+          providerId: "mimo",
+          label: "MiMo",
+          plan: null,
+          windows: [],
+          balances: null,
+          configured: true,
+          error: "HTTP 500",
+        },
+      ],
+    };
+    const bar = formatQuotaBar(snapshot);
+    expect(bar.segments.map((seg) => seg.id)).toEqual([
+      "kimi:5h",
+      "kimi:weekly",
+      "glm:5h",
+      "deepseek:balance",
+      "mimo:error",
+    ]);
+    // Stability contract: the same logical segment keeps its id across renders —
+    // the status bar keys its VSCode items by it (renderer-loss heal, #185089).
+    expect(formatQuotaBar(snapshot).segments.map((seg) => seg.id)).toEqual(bar.segments.map((seg) => seg.id));
   });
 
   it("renders staleFetchedAt providers with a ~ marker instead of ? (windows and balances)", () => {

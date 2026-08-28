@@ -412,6 +412,13 @@ export function quotaRetryDelayMs(baseSeconds: number, streak: number): number {
 const WINDOW_SHORT_LABELS: Record<QuotaWindowKind, string> = { "5h": "5h", weekly: "7d", monthly: "30d" };
 
 export interface QuotaBarSegment {
+  /**
+   * Stable identity of the segment ("<providerId>:<windowKind|balance|error>"). The
+   * status bar keys its VSCode StatusBarItem ids by it: id-less items are
+   * probabilistically lost by the renderer across window startup/restore
+   * (microsoft/vscode#185089), and only id-keyed entries reconcile reliably.
+   */
+  id: string;
   text: string;
   color: QuotaSegmentColor;
 }
@@ -439,7 +446,7 @@ export function formatQuotaBar(snapshot: QuotaSnapshot): QuotaBar {
   for (const provider of snapshot.providers) {
     const stale = provider.staleFetchedAt !== undefined;
     if (provider.error !== null && !stale) {
-      segments.push({ text: `${provider.label} ?`, color: "neutral" });
+      segments.push({ id: `${provider.providerId}:error`, text: `${provider.label} ?`, color: "neutral" });
       continue;
     }
     const marker = stale ? "~" : "";
@@ -454,6 +461,7 @@ export function formatQuotaBar(snapshot: QuotaSnapshot): QuotaBar {
         continue;
       }
       segments.push({
+        id: `${provider.providerId}:${kind}`,
         text: `${first ? `${provider.label} ` : ""}${marker}${Math.round(remaining)}%/${WINDOW_SHORT_LABELS[kind]}`,
         color: remainingColor(remaining),
       });
@@ -461,6 +469,7 @@ export function formatQuotaBar(snapshot: QuotaSnapshot): QuotaBar {
     }
     if (first && provider.balances?.total != null && provider.balances.currency) {
       segments.push({
+        id: `${provider.providerId}:balance`,
         text: balanceSegmentText(provider.label, provider.balances.total, provider.balances.currency, stale),
         color: balanceColor(provider.balances.total),
       });

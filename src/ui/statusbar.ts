@@ -25,7 +25,9 @@ export interface StatusBar extends vscode.Disposable {
 
 /** Create the preset status-bar item (left-aligned); first render derives from presetService, later updates come from tree snapshots. */
 export function createStatusBar(deps: StatusBarDeps): StatusBar {
-  const item = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
+  // Explicit id: id-less items are probabilistically dropped by the renderer across
+  // window startup/restore (microsoft/vscode#185089) — same root cause as the quota bar.
+  const item = vscode.window.createStatusBarItem("opencode-preset", vscode.StatusBarAlignment.Left, 100);
   item.name = "OpenCode 模板";
   item.command = CMD.showPresetQuickPick;
 
