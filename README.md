@@ -48,7 +48,7 @@ code --install-extension build/packages/opencode-config-manager-<版本>.vsix
 
 ### 设置
 
-入口：侧边栏面板标题栏的齿轮按钮（或命令面板「OpenCode: 打开设置」），打开「OpenCode 管理」面板并切到**设置选项卡**（与状态栏额度点击打开的额度选项卡同页，页面顶部选项卡随时切换）：
+入口：侧边栏面板标题栏的齿轮按钮（或命令面板「OpenCode: 打开设置」），打开「OpenCode 管理」面板并落在首个**配置选项卡**（与状态栏额度点击打开的额度选项卡同页，页面顶部选项卡随时切换，设置项在「设置」选项卡）。**配置选项卡**（排在最前）分两块：当前 OMO 的 agent/分类模型配置——页内下拉即时修改并写入检测到的目标文件（`~/.omo/omo.jsonc` 或旧版），显示写入目标路径；Skills 只读清单——列出全部已发现技能的名称与描述（读取各 SKILL.md 的 frontmatter），按目录分组并标注 全局/项目：
 
 - **分区自动刷新**：配置 / 模板 / 备份 / 模型 / 插件五个分区各自独立开关（切换按钮），开启后可配置轮询间隔（秒，默认 30，范围 1–3600）；关闭（默认）时仅保留文件变更监听 + 手动刷新
 - **Coding Plan 额度刷新频率**：默认 30 秒（0 = 关闭自动刷新），与状态栏/额度页同源生效，更改后立即按新频率查询
@@ -74,8 +74,8 @@ src/core/      纯逻辑（无 vscode 依赖，vitest 单测）
   atomicFile / pathSafety / errors / watchManager  基础设施
 src/tree/      树节点纯构建器 + 单一分区 Explorer
 src/ui/        命令 / QuickPick / 状态栏（模板 + 额度）/ 设置读写
-src/webview/   Webview 宿主（管理面板〔模板/额度/设置选项卡〕+ 模板会话控制器；CSP + postMessage 协议）
-webview-ui/    React 前端（Vite 单入口管理页：模板矩阵编辑 + 额度 + 设置三选项卡，VSCode CSS 变量主题）
+src/webview/   Webview 宿主（管理面板〔配置/额度/设置/模板选项卡〕+ 模板会话控制器；CSP + postMessage 协议）
+webview-ui/    React 前端（Vite 单入口管理页：配置 + 额度 + 设置 + 模板四选项卡，VSCode CSS 变量主题）
 ```
 
 数据位置：模板 `~/.config/opencode/presets/*.json`；备份 `~/.config/opencode/backups/<ISO时间戳>-manual/`（含 `manifest.json` 与展示名称，覆盖检测到的实际配置文件与 `~/.agents/skills`）。模板应用/捕获的写入目标由本机检测结果决定（`~/.omo/omo.jsonc` 或旧版 `oh-my-opencode.json[c]`）。
