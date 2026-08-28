@@ -15,6 +15,7 @@ import { QuotaService } from "./core/quotaService";
 import type { DiscoveredConfig, JsoncError } from "./core/types";
 import { WatchManager } from "./core/watchManager";
 import type { WatchTarget } from "./core/watchManager";
+import { toPresetListEntries } from "./shared/protocol";
 import { ConfigTreeDataProvider } from "./tree/provider";
 import type { TreeDataSnapshot } from "./tree/provider";
 import { registerCommands } from "./ui/commands";
@@ -23,6 +24,7 @@ import { readAutoRefreshSettings, writeAutoRefreshSettings } from "./ui/settings
 import { createStatusBar } from "./ui/statusbar";
 import {
   notifyManagerPanelModelsChanged,
+  notifyManagerPanelPresetsChanged,
   openPresetEditorTab,
   postMessageToManagerPanel,
   pushSettingsToManagerPanel,
@@ -119,13 +121,15 @@ export function activate(ctx: vscode.ExtensionContext): void {
       void provider.refresh().then(
         (snapshot) => {
           statusbar.update({ presets: snapshot.presets, currentPreset: snapshot.currentPreset });
+          // Lazy providers: listModels()/mapping only run when the manager panel
+          // is open (snapshot presets are already computed for the tree anyway).
+          notifyManagerPanelModelsChanged(() => configStore.listModels());
+          notifyManagerPanelPresetsChanged(() => toPresetListEntries(snapshot.presets));
         },
         (error: unknown) => {
           log(`refresh 失败: ${errorMessage(error)}`);
         },
       );
-      // Lazy provider: listModels() only runs when the manager panel is open.
-      notifyManagerPanelModelsChanged(() => configStore.listModels());
     } catch (error) {
       log(`refreshAll 失败: ${errorMessage(error)}`);
     }
@@ -250,6 +254,7 @@ export function activate(ctx: vscode.ExtensionContext): void {
     readSettings: readAutoRefreshSettings,
     saveSettings: writeAutoRefreshSettings,
     preset: presetSession,
+    listPresets: () => toPresetListEntries(presetService.list()),
     log,
   };
   registerManagerPanel(ctx, managerDeps);

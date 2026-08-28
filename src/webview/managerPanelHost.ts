@@ -8,6 +8,7 @@ import type {
   AutoRefreshSettingsSource,
   ManagerTab,
   ModelOption,
+  PresetListEntry,
   QuotaInitPayload,
   QuotaProviderId,
 } from "../shared/protocol";
@@ -24,6 +25,8 @@ export interface ManagerPanelDeps {
   saveSettings(settings: AutoRefreshSettings): Promise<void>;
   /** Preset-tab session controller (one editing session at a time in the 模板 tab). */
   preset: PresetEditorSession;
+  /** Preset list for the 模板 tab's default (no open session) view. */
+  listPresets(): PresetListEntry[];
   log(message: string): void;
 }
 
@@ -102,6 +105,20 @@ export function notifyManagerPanelModelsChanged(models: ModelOption[] | (() => M
   }
   const resolved = typeof models === "function" ? models() : models;
   void openPanel.webview.postMessage({ type: "modelsUpdated", payload: { models: resolved } });
+}
+
+/**
+ * Push a refreshed preset list to the open panel's 模板 tab (same lazy-provider
+ * contract as the models push). Keeps the list view in sync with EXTERNAL
+ * changes — tree-side 捕获/删除/重命名/应用 and watcher-driven refreshes —
+ * mirroring how models and settings already re-sync the open page.
+ */
+export function notifyManagerPanelPresetsChanged(presets: PresetListEntry[] | (() => PresetListEntry[])): void {
+  if (openPanel === undefined) {
+    return;
+  }
+  const resolved = typeof presets === "function" ? presets() : presets;
+  void openPanel.webview.postMessage({ type: "presetList", payload: { presets: resolved } });
 }
 
 /**
@@ -223,11 +240,20 @@ function postNavigateMessages(
   }
   if (options.tab === "preset") {
     post({ type: "managerNavigate", payload: { tab: "preset" } });
+    postPresetList(panel, deps);
     postPresetInit(panel, deps, options.presetName ?? null);
     return;
   }
   post({ type: "managerNavigate", payload: { tab: "settings" } });
   post({ type: "settingsInit", payload: { settings: deps.readSettings() } });
+}
+
+/**
+ * Push the preset list powering the 模板 tab's default view (shown whenever no
+ * edit session is open). Idempotent data refresh — safe to re-send anytime.
+ */
+function postPresetList(panel: vscode.WebviewPanel, deps: ManagerPanelDeps): void {
+  void panel.webview.postMessage({ type: "presetList", payload: { presets: deps.listPresets() } });
 }
 
 /**
@@ -345,6 +371,10 @@ function createManagerPanel(
           // handleSave is synchronous (core save/rename/apply are sync fs) — the
           // reply lands before the page's awaitResult guard can time out.
           post({ type: "result", payload: deps.preset.save(presetMessage.payload) });
+          // Saves and renames change the on-disk list (a rename-before-throw can
+          // change it even on !ok): re-push so the list view shown after the
+          // session closes never goes stale.
+          postPresetList(panel, deps);
           break;
       }
       return;
@@ -377,6 +407,10 @@ function createManagerPanel(
         // Settings state rides along on boot so the 设置 tab is ready without an
         // extra round trip when the user switches to it.
         post({ type: "settingsInit", payload: { settings: deps.readSettings() } });
+        // Same for the 模板 tab's preset list: tab bodies are always mounted, so the
+        // list must boot regardless of the entry tab (a preset-targeted navigate
+        // already pushed one — the duplicate carries the same data and is harmless).
+        postPresetList(panel, deps);
         // Fresh data right after boot: the snapshot event subscription below forwards
         // the cycle result to the page without the user clicking anything.
         void runFullRefresh();
@@ -384,6 +418,11 @@ function createManagerPanel(
       }
       case "pong":
         clearLivenessProbe();
+        break;
+      case "editPreset":
+        // List-view click: the same begin/init path the editPreset command drives.
+        // The page is already on the 模板 tab, so only the session init is needed.
+        postPresetInit(panel, deps, message.name);
         break;
       case "refresh":
         void (message.providerId === undefined ? runFullRefresh() : runSoloRefresh(message.providerId));
@@ -511,7 +550,8 @@ type ParsedMessage =
   | { kind: "refresh"; providerId?: QuotaProviderId }
   | { kind: "saveCookie"; cookie: string }
   | { kind: "setStatusBar"; providerId: QuotaProviderId; visible: boolean }
-  | { kind: "save"; source: AutoRefreshSettingsSource };
+  | { kind: "save"; source: AutoRefreshSettingsSource }
+  | { kind: "editPreset"; name: string | null };
 
 /**
  * Validate an incoming webview message against the protocol shape. Returns
@@ -560,6 +600,17 @@ function parseMessage(raw: unknown): ParsedMessage | undefined {
       const settings = (msg.payload as { settings?: unknown } | undefined)?.settings;
       return typeof settings === "object" && settings !== null && !Array.isArray(settings)
         ? { kind: "save", source: settings as AutoRefreshSettingsSource }
+        : undefined;
+    }
+    case "presetEdit": {
+      const name = (msg.payload as { name?: unknown } | undefined)?.name;
+      if (name === null) {
+        return { kind: "editPreset", name: null };
+      }
+      // Name length cap mirrors parseRows in presetEditorHost (every protocol-
+      // carried name is bounded); begin() itself tolerates unknown names.
+      return typeof name === "string" && name.length > 0 && name.length <= 64
+        ? { kind: "editPreset", name }
         : undefined;
     }
     default:
