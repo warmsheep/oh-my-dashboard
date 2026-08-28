@@ -156,9 +156,23 @@ export function createPresetEditorSession(ctx: vscode.ExtensionContext, deps: Pr
   };
 }
 
+/**
+ * Rows for editing the LIVE config (no preset overlay): every known agent/category
+ * plus live extras, VALUES taken from the live assignments (model null when
+ * unassigned). Backs the manager panel's 配置 tab.
+ */
+export function assignmentRows(assignments: {
+  agents: Record<string, ModelSetting>;
+  categories: Record<string, ModelSetting>;
+}): PresetRow[] {
+  // unionRows sources values from its overlay argument and keys from both sides;
+  // feeding the live assignments as the overlay yields live-value rows.
+  return unionRows(assignments, assignments);
+}
+
 function unionRows(
   assignments: { agents: Record<string, ModelSetting>; categories: Record<string, ModelSetting> },
-  preset: Preset | null,
+  preset: Pick<Preset, "agents" | "categories"> | null,
 ): PresetRow[] {
   const rows: PresetRow[] = [];
   const sections = [

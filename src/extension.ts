@@ -13,6 +13,7 @@ import { validate } from "./core/jsoncEditor";
 import { seedLocalModelsFromCatalog } from "./core/modelCatalog";
 import { PresetService } from "./core/presetService";
 import { QuotaService } from "./core/quotaService";
+import { skillSummaries } from "./core/skillScanner";
 import type { DiscoveredConfig, JsoncError } from "./core/types";
 import { WatchManager } from "./core/watchManager";
 import type { WatchTarget } from "./core/watchManager";
@@ -24,6 +25,8 @@ import { createQuotaStatusBar } from "./ui/quotaStatusBar";
 import { readAutoRefreshSettings, writeAutoRefreshSettings } from "./ui/settingsStore";
 import { createStatusBar } from "./ui/statusbar";
 import {
+  buildConfigInitPayload,
+  notifyManagerPanelConfigChanged,
   notifyManagerPanelModelsChanged,
   notifyManagerPanelPresetsChanged,
   openPresetEditorTab,
@@ -128,6 +131,11 @@ export function activate(ctx: vscode.ExtensionContext): void {
           // is open (snapshot presets are already computed for the tree anyway).
           notifyManagerPanelModelsChanged(() => configStore.listModels());
           notifyManagerPanelPresetsChanged(() => toPresetListEntries(snapshot.presets));
+          // Lazy too, and reuses the snapshot's skill locations — no second
+          // discover() walk per watcher-driven refresh while the panel is open.
+          notifyManagerPanelConfigChanged(() =>
+            buildConfigInitPayload(managerDeps, skillSummaries(snapshot.discovered.skillLocations)),
+          );
         },
         (error: unknown) => {
           log(`refresh 失败: ${errorMessage(error)}`);
@@ -258,6 +266,11 @@ export function activate(ctx: vscode.ExtensionContext): void {
     saveSettings: writeAutoRefreshSettings,
     preset: presetSession,
     listPresets: () => toPresetListEntries(presetService.list()),
+    configStore,
+    // Full discover() scan (the same one the tree uses) — lazy: only invoked when
+    // the manager panel actually builds a configInit payload.
+    listSkills: () => skillSummaries(configStore.discover(workspaceFolders()).skillLocations),
+    refreshAll,
     log,
   };
   registerManagerPanel(ctx, managerDeps);

@@ -1,22 +1,25 @@
 import * as vscode from "vscode";
 
-import { CMD, MANAGER_PANEL_VIEW_TYPE } from "../constants";
+import { CMD, MANAGER_PANEL_VIEW_TYPE, MODEL_ID_PATTERN } from "../constants";
+import type { ConfigStore } from "../core/configStore";
 import { errorMessage } from "../core/errors";
 import type { QuotaService } from "../core/quotaService";
 import type {
   AutoRefreshSettings,
   AutoRefreshSettingsSource,
+  ConfigInitPayload,
   ManagerTab,
   ModelOption,
   PresetListEntry,
   QuotaInitPayload,
   QuotaProviderId,
+  SkillSummary,
 } from "../shared/protocol";
 import { normalizeAutoRefreshSettings, QUOTA_PROVIDER_IDS } from "../shared/protocol";
 import type { QuotaStatusBar } from "../ui/quotaStatusBar";
 import { buildWebviewHtml, readWebviewHtml } from "./panelHtml";
 import type { PresetEditorSession } from "./presetEditorHost";
-import { isSaveTyped, parsePresetEditorMessage, saveActionOf } from "./presetEditorHost";
+import { assignmentRows, isSaveTyped, parsePresetEditorMessage, saveActionOf } from "./presetEditorHost";
 
 export interface ManagerPanelDeps {
   quotaService: QuotaService;
@@ -27,6 +30,12 @@ export interface ManagerPanelDeps {
   preset: PresetEditorSession;
   /** Preset list for the 模板 tab's default (no open session) view. */
   listPresets(): PresetListEntry[];
+  /** Config-store backing the 配置 tab: live assignment reads + setAgentModel writes. */
+  configStore: ConfigStore;
+  /** Lazy skills provider for the 配置 tab (full discover scan); only invoked when a payload is built. */
+  listSkills(): SkillSummary[];
+  /** Full UI refresh after a successful in-panel config write (same contract as the preset-save path). */
+  refreshAll(): void;
   log(message: string): void;
 }
 
@@ -87,7 +96,10 @@ export function registerManagerPanel(ctx: vscode.ExtensionContext, deps: Manager
   ctx.subscriptions.push(
     vscode.commands.registerCommand(CMD.quotaRefresh, () => openSafely({ tab: "quota" })),
     vscode.commands.registerCommand(CMD.quotaConfigureMimo, () => openSafely({ tab: "quota", focusProvider: "mimo" })),
-    vscode.commands.registerCommand(CMD.openSettings, () => openSafely({ tab: "settings" })),
+    // 打开设置 lands on the FIRST tab (配置): the entry's historical guarantee of
+    // fresh settings data is preserved by the settingsInit push riding along on
+    // the config navigation (see postNavigateMessages).
+    vscode.commands.registerCommand(CMD.openSettings, () => openSafely({ tab: "config" })),
   );
 }
 
@@ -129,6 +141,36 @@ export function notifyManagerPanelPresetsChanged(presets: PresetListEntry[] | ((
   }
   const resolved = typeof presets === "function" ? presets() : presets;
   void openPanel.webview.postMessage({ type: "presetList", payload: { presets: resolved } });
+}
+
+/**
+ * Push a refreshed configInit to the open panel's 配置 tab (same lazy-provider
+ * contract as the models push): watcher-driven config changes re-sync the open
+ * page. Models intentionally ride the existing modelsUpdated channel instead.
+ */
+export function notifyManagerPanelConfigChanged(payload: ConfigInitPayload | (() => ConfigInitPayload)): void {
+  if (openPanel === undefined) {
+    return;
+  }
+  const resolved = typeof payload === "function" ? payload() : payload;
+  void openPanel.webview.postMessage({ type: "configInit", payload: resolved });
+}
+
+/**
+ * Build the 配置 tab boot payload: live assignment rows (no preset overlay),
+ * merged model options, discovered skills, and the current write target (kind +
+ * path only). Exported so the extension can feed {@link notifyManagerPanelConfigChanged}
+ * with a lazy provider over the same deps. `skills` lets the watcher-driven push
+ * reuse the tree snapshot's locations instead of re-running a full discover scan.
+ */
+export function buildConfigInitPayload(deps: ManagerPanelDeps, skills?: SkillSummary[]): ConfigInitPayload {
+  const target = deps.configStore.resolveAgentConfig();
+  return {
+    rows: assignmentRows(deps.configStore.ohMyAssignments()),
+    models: deps.configStore.listModels(),
+    skills: skills ?? deps.listSkills(),
+    target: { kind: target.kind, path: target.path },
+  };
 }
 
 /**
@@ -262,6 +304,14 @@ function postNavigateMessages(
     post({ type: "managerNavigate", payload: { tab: "preset" } });
     postPresetList(panel, deps);
     postPresetInit(panel, deps, options.presetName ?? null);
+    return;
+  }
+  if (options.tab === "config") {
+    post({ type: "managerNavigate", payload: { tab: "config" } });
+    post({ type: "configInit", payload: buildConfigInitPayload(deps) });
+    // The 打开设置 entry now lands here (first tab): keep the settings tab's
+    // data fresh on arrival, preserving the entry's pre-config-tab guarantee.
+    post({ type: "settingsInit", payload: { settings: deps.readSettings() } });
     return;
   }
   post({ type: "managerNavigate", payload: { tab: "settings" } });
@@ -409,6 +459,13 @@ function createManagerPanel(
       if (isSaveTyped(raw)) {
         post({ type: "result", payload: { action: saveActionOf(raw), ok: false, error: "保存请求格式无法识别" } });
       }
+      // Backstop (配置 tab): same busy-forever contract for configSetModel.
+      if (isConfigSetModelTyped(raw)) {
+        post({
+          type: "configModelSaved",
+          payload: { ok: false, ...configSetModelEcho(raw), error: "配置请求格式无法识别" },
+        });
+      }
       return;
     }
     switch (message.kind) {
@@ -428,6 +485,9 @@ function createManagerPanel(
         // Settings state rides along on boot so the 设置 tab is ready without an
         // extra round trip when the user switches to it.
         post({ type: "settingsInit", payload: { settings: deps.readSettings() } });
+        // Same for the 配置 tab's payload: the tab body is always mounted, so the
+        // live assignments + skills must boot regardless of the entry tab.
+        post({ type: "configInit", payload: buildConfigInitPayload(deps) });
         // Same for the 模板 tab's preset list: tab bodies are always mounted, so the
         // list must boot regardless of the entry tab (a preset-targeted navigate
         // already pushed one — the duplicate carries the same data and is harmless).
@@ -444,6 +504,29 @@ function createManagerPanel(
         // List-view click: the same begin/init path the editPreset command drives.
         // The page is already on the 模板 tab, so only the session init is needed.
         postPresetInit(panel, deps, message.name);
+        break;
+      case "setModel":
+        try {
+          // Core owns the write path (readTextForEdit contract, JSONC syntax abort,
+          // conflict-key cleanup, atomic write); errors map to Chinese via errorMessage().
+          deps.configStore.setAgentModel(message.section, message.name, message.model, message.variant);
+          deps.log(
+            `managerPanel: 已更新 ${message.name} → ${message.model}${message.variant ? `（variant: ${message.variant}）` : ""}`,
+          );
+          post({ type: "configModelSaved", payload: { ok: true, section: message.section, name: message.name } });
+          // Refreshed payload so the open tab re-syncs immediately; the explicit
+          // refreshAll matches the preset-save path (the fs.watch echo also fires,
+          // but later and deduped).
+          post({ type: "configInit", payload: buildConfigInitPayload(deps) });
+          deps.refreshAll();
+        } catch (error) {
+          const msg = errorMessage(error);
+          deps.log(`managerPanel: 配置页更新模型失败: ${msg}`);
+          post({
+            type: "configModelSaved",
+            payload: { ok: false, section: message.section, name: message.name, error: msg },
+          });
+        }
         break;
       case "refresh":
         void (message.providerId === undefined ? runFullRefresh() : runSoloRefresh(message.providerId));
@@ -573,7 +656,8 @@ type ParsedMessage =
   | { kind: "saveCookie"; cookie: string }
   | { kind: "setStatusBar"; providerId: QuotaProviderId; visible: boolean }
   | { kind: "save"; source: AutoRefreshSettingsSource }
-  | { kind: "editPreset"; name: string | null };
+  | { kind: "editPreset"; name: string | null }
+  | { kind: "setModel"; section: "agents" | "categories"; name: string; model: string; variant: string | null };
 
 /**
  * Validate an incoming webview message against the protocol shape. Returns
@@ -635,7 +719,52 @@ function parseMessage(raw: unknown): ParsedMessage | undefined {
         ? { kind: "editPreset", name }
         : undefined;
     }
+    case "configSetModel": {
+      const payload = msg.payload as
+        { section?: unknown; name?: unknown; model?: unknown; variant?: unknown } | undefined;
+      const section = payload?.section;
+      const name = payload?.name;
+      const model = payload?.model;
+      const variant = payload?.variant;
+      // Bounds mirror the preset-editor payload caps; the model must be a
+      // provider/model id (MODEL_ID_PATTERN, same as the command path).
+      return (section === "agents" || section === "categories") &&
+        typeof name === "string" &&
+        name.length > 0 &&
+        name.length <= 64 &&
+        typeof model === "string" &&
+        MODEL_ID_PATTERN.test(model) &&
+        (variant === null || (typeof variant === "string" && variant.length > 0 && variant.length <= 32))
+        ? { kind: "setModel", section, name, model, variant }
+        : undefined;
+    }
     default:
       return undefined;
   }
+}
+
+/** Typed-but-invalid configSetModel detector for the rejection backstop (isSaveTyped analog). */
+function isConfigSetModelTyped(raw: unknown): raw is { payload?: unknown } {
+  return (
+    typeof raw === "object" &&
+    raw !== null &&
+    !Array.isArray(raw) &&
+    (raw as Record<string, unknown>).type === "configSetModel"
+  );
+}
+
+/**
+ * Best-effort section/name echo for the malformed-configSetModel rejection reply:
+ * the protocol types section as agents|categories, so an unparsable section falls
+ * back to "agents" and an unparsable name to "".
+ */
+function configSetModelEcho(raw: { payload?: unknown }): { section: "agents" | "categories"; name: string } {
+  const payload =
+    typeof raw.payload === "object" && raw.payload !== null && !Array.isArray(raw.payload)
+      ? (raw.payload as { section?: unknown; name?: unknown })
+      : undefined;
+  return {
+    section: payload?.section === "categories" ? "categories" : "agents",
+    name: typeof payload?.name === "string" ? payload.name : "",
+  };
 }

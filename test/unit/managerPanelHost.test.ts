@@ -1,6 +1,11 @@
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as vscode from "vscode";
 
+import { ConfigStore } from "../../src/core/configStore";
 import { QuotaService } from "../../src/core/quotaService";
 import { defaultQuotaVisibility, normalizeAutoRefreshSettings } from "../../src/shared/protocol";
 import type { AutoRefreshSettings, QuotaSnapshot, QuotaVisibility } from "../../src/shared/protocol";
@@ -37,6 +42,8 @@ interface FakePanel {
   disposed: boolean;
   revealed: number;
   visible: boolean;
+  /** Every host→webview message posted while the panel existed. */
+  posted: unknown[];
   webview: {
     html: string;
     postMessage: (message: unknown) => Promise<boolean>;
@@ -58,9 +65,13 @@ function makePanel(): FakePanel {
     disposed: false,
     revealed: 0,
     visible: true,
+    posted: [],
     webview: {
       html: "",
-      postMessage: () => Promise.resolve(true),
+      postMessage: (message: unknown) => {
+        panel.posted.push(message);
+        return Promise.resolve(true);
+      },
       onDidReceiveMessage: (callback) => {
         receiveCallback = callback;
         return { dispose: () => undefined };
@@ -90,8 +101,26 @@ function makePanel(): FakePanel {
   return panel;
 }
 
-function makeDeps(): { deps: ManagerPanelDeps; logs: string[] } {
+const configSandboxes: string[] = [];
+
+/**
+ * Real ConfigStore on a throwaway sandbox (hermetic homeDir: no ~/.omo, so the
+ * write target is the seeded legacy file). Returns the sandbox root — tests read
+ * <root>/oh-my-opencode.json to assert what the pump actually wrote.
+ */
+function sandboxConfigStore(seedLegacy: boolean): { store: ConfigStore; root: string } {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "mgrpanel-"));
+  configSandboxes.push(root);
+  if (seedLegacy) {
+    fs.writeFileSync(path.join(root, "oh-my-opencode.json"), '{\n  "agents": {},\n  "categories": {}\n}\n');
+  }
+  return { store: new ConfigStore({ configDirOverride: root, homeDir: path.join(root, "home"), env: {} }), root };
+}
+
+function makeDeps(seedLegacy = true): { deps: ManagerPanelDeps; logs: string[]; refreshes: number[]; root: string } {
   const logs: string[] = [];
+  const refreshes: number[] = [];
+  const { store, root } = sandboxConfigStore(seedLegacy);
   const statusBar: QuotaStatusBar = {
     refresh: () => Promise.resolve(),
     getSnapshot: (): QuotaSnapshot | null => null,
@@ -102,7 +131,7 @@ function makeDeps(): { deps: ManagerPanelDeps; logs: string[] } {
     onSnapshot: () => ({ dispose: () => undefined }),
     dispose: () => undefined,
   };
-  // Throwing session stubs: none of these paths run in the zombie-recreate tests, and
+  // Throwing session stubs: none of these paths run in the panel-host tests, and
   // a throw fails loudly if a regression ever drags them in.
   const preset: PresetEditorSession = {
     begin: () => {
@@ -121,11 +150,16 @@ function makeDeps(): { deps: ManagerPanelDeps; logs: string[] } {
     saveSettings: () => Promise.resolve(),
     preset,
     listPresets: () => [],
+    configStore: store,
+    listSkills: () => [],
+    refreshAll: () => {
+      refreshes.push(1);
+    },
     log: (message) => {
       logs.push(message);
     },
   };
-  return { deps, logs };
+  return { deps, logs, refreshes, root };
 }
 
 // Minimal structural fake: the panel host only touches subscriptions and extensionUri.
@@ -150,6 +184,9 @@ afterEach(() => {
   // identity guard) so tests stay order-independent; clear fake timers after.
   for (const panel of createdPanels) {
     panel.dispose();
+  }
+  for (const dir of configSandboxes.splice(0)) {
+    fs.rmSync(dir, { recursive: true, force: true });
   }
   vi.clearAllTimers();
   vi.useRealTimers();
@@ -186,5 +223,134 @@ describe("openManagerPanel zombie-boot recreate", () => {
     await openManagerPanel(ctx, deps, { tab: "quota" });
     expect(createdPanels.length).toBe(1);
     expect(createdPanels[0].disposed).toBe(false);
+  });
+});
+
+describe("manager panel 配置 tab protocol", () => {
+  /** Open a booted panel on the settings tab; returns it for message delivery. */
+  async function bootedPanel(deps: ManagerPanelDeps): Promise<FakePanel> {
+    await openManagerPanel(ctx, deps, { tab: "settings" });
+    const panel = createdPanels[0];
+    panel.receive({ type: "ready" });
+    return panel;
+  }
+
+  function configInits(panel: FakePanel): unknown[] {
+    return panel.posted.filter((message) => (message as { type?: string }).type === "configInit");
+  }
+
+  it("ready pushes a configInit carrying live rows, models, skills and the write target", async () => {
+    const { deps } = makeDeps();
+    deps.listSkills = () => [
+      { name: "demo", description: "演示技能", scope: "global", locationLabel: "~/.agents/skills" },
+    ];
+    const panel = await bootedPanel(deps);
+    const inits = configInits(panel);
+    expect(inits.length).toBe(1);
+    const payload = (
+      inits[0] as { payload: { rows: unknown[]; models: unknown[]; skills: unknown[]; target: unknown } }
+    ).payload;
+    // Live rows: every known agent/category is present (union with the empty live config).
+    expect(payload.rows.length).toBeGreaterThanOrEqual(11 + 13);
+    expect(payload.rows).toContainEqual({ section: "agents", name: "hephaestus", model: null, variant: null });
+    expect(payload.skills).toEqual([
+      { name: "demo", description: "演示技能", scope: "global", locationLabel: "~/.agents/skills" },
+    ]);
+    expect(payload.target).toEqual({
+      kind: "legacy",
+      path: path.join(deps.configStore.configDir, "oh-my-opencode.json"),
+    });
+  });
+
+  it("navigating an open booted panel to the config tab pushes managerNavigate + configInit", async () => {
+    const { deps } = makeDeps();
+    const panel = await bootedPanel(deps);
+    const before = panel.posted.length;
+    await openManagerPanel(ctx, deps, { tab: "config" });
+    const slice = panel.posted.slice(before);
+    expect(slice).toContainEqual({ type: "managerNavigate", payload: { tab: "config" } });
+    expect(slice.filter((message) => (message as { type?: string }).type === "configInit").length).toBe(1);
+  });
+
+  it("configSetModel writes through, replies ok, re-pushes configInit and refreshes", async () => {
+    const { deps, refreshes, root } = makeDeps();
+    const panel = await bootedPanel(deps);
+    panel.receive({
+      type: "configSetModel",
+      payload: { section: "agents", name: "hephaestus", model: "zhipuai/glm-4.7", variant: "high" },
+    });
+    expect(panel.posted).toContainEqual({
+      type: "configModelSaved",
+      payload: { ok: true, section: "agents", name: "hephaestus" },
+    });
+    // The refreshed configInit carries the just-written assignment.
+    const inits = configInits(panel);
+    expect(inits.length).toBe(2);
+    const refreshed = (
+      inits[1] as {
+        payload: { rows: { section: string; name: string; model: string | null; variant: string | null }[] };
+      }
+    ).payload;
+    expect(refreshed.rows).toContainEqual({
+      section: "agents",
+      name: "hephaestus",
+      model: "zhipuai/glm-4.7",
+      variant: "high",
+    });
+    expect(refreshes.length).toBe(1);
+    const written = JSON.parse(fs.readFileSync(path.join(root, "oh-my-opencode.json"), "utf8")) as {
+      agents: Record<string, { model: string; variant?: string }>;
+    };
+    expect(written.agents.hephaestus).toEqual({ model: "zhipuai/glm-4.7", variant: "high" });
+  });
+
+  it("malformed configSetModel payloads get a !ok reply and write nothing", async () => {
+    const { deps, root } = makeDeps();
+    const panel = await bootedPanel(deps);
+    const bytesBefore = fs.readFileSync(path.join(root, "oh-my-opencode.json"));
+    for (const payload of [
+      { section: "bogus", name: "hephaestus", model: "zhipuai/glm-4.7", variant: "high" },
+      { section: "agents", name: "", model: "zhipuai/glm-4.7", variant: null },
+      { section: "agents", name: "hephaestus", model: "not-a-model-id", variant: null },
+      { section: "agents", name: "hephaestus", model: "zhipuai/glm-4.7", variant: "x".repeat(33) },
+    ]) {
+      panel.receive({ type: "configSetModel", payload });
+    }
+    const replies = panel.posted.filter((message) => (message as { type?: string }).type === "configModelSaved");
+    expect(replies.length).toBe(4);
+    for (const reply of replies) {
+      const payload = (reply as { payload: { ok: boolean; error?: string } }).payload;
+      expect(payload.ok).toBe(false);
+      expect(payload.error).toBe("配置请求格式无法识别");
+    }
+    // The bogus-section rejection echoes the parseable name with the fallback section.
+    expect(replies[0]).toEqual({
+      type: "configModelSaved",
+      payload: { ok: false, section: "agents", name: "hephaestus", error: "配置请求格式无法识别" },
+    });
+    // Unparseable name echoes "".
+    expect(replies[1]).toEqual({
+      type: "configModelSaved",
+      payload: { ok: false, section: "agents", name: "", error: "配置请求格式无法识别" },
+    });
+    expect(fs.readFileSync(path.join(root, "oh-my-opencode.json")).equals(bytesBefore)).toBe(true);
+  });
+
+  it("a write failure (broken JSONC target) replies !ok with the friendly error, no re-push", async () => {
+    const { deps, root } = makeDeps();
+    fs.writeFileSync(path.join(root, "oh-my-opencode.json"), "{,}\n");
+    const panel = await bootedPanel(deps);
+    const initsBefore = configInits(panel).length;
+    panel.receive({
+      type: "configSetModel",
+      payload: { section: "categories", name: "quick", model: "zhipuai/glm-4.7", variant: null },
+    });
+    const replies = panel.posted.filter((message) => (message as { type?: string }).type === "configModelSaved");
+    expect(replies.length).toBe(1);
+    const payload = (replies[0] as { payload: { ok: boolean; error?: string } }).payload;
+    expect(payload.ok).toBe(false);
+    expect(typeof payload.error === "string" && payload.error.length > 0).toBe(true);
+    expect(configInits(panel).length).toBe(initsBefore);
+    expect(fs.readFileSync(path.join(root, "oh-my-opencode.json"), "utf8")).toBe("{,}\n");
   });
 });
