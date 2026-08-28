@@ -123,7 +123,14 @@ export type ExtToWebview =
   /** Settings view boot payload AND external-change push (Settings-UI edits re-sync the open page). */
   | { type: "settingsInit"; payload: SettingsInitPayload }
   /** Reply to settingsSave: ok carries no error, !ok carries the friendly Chinese message. */
-  | { type: "settingsSaved"; payload: { ok: boolean; error?: string } };
+  | { type: "settingsSaved"; payload: { ok: boolean; error?: string } }
+  /** 配置 tab boot payload AND external-change push (watcher-driven config re-sync). */
+  | { type: "configInit"; payload: ConfigInitPayload }
+  /** Reply to configSetModel: ok carries no error, !ok carries the friendly Chinese message. */
+  | {
+      type: "configModelSaved";
+      payload: { ok: boolean; section: "agents" | "categories"; name: string; error?: string };
+    };
 
 export type WebviewToExt =
   | { type: "ready" }
@@ -140,7 +147,12 @@ export type WebviewToExt =
   /** Answer to quotaPing — proves the webview's JS context is still alive. */
   | { type: "pong" }
   /** Persist the whole settings form (idempotent full-object save; values re-normalized host-side). */
-  | { type: "settingsSave"; payload: { settings: AutoRefreshSettings } };
+  | { type: "settingsSave"; payload: { settings: AutoRefreshSettings } }
+  /** 配置 tab in-page edit: write one agent/category model assignment into the live config target. */
+  | {
+      type: "configSetModel";
+      payload: { section: "agents" | "categories"; name: string; model: string; variant: string | null };
+    };
 
 // ---------------------------------------------------------------------------
 // Quota view contract — data shapes consumed by BOTH the extension host
@@ -193,8 +205,8 @@ export const QUOTA_PROVIDER_IDS: readonly QuotaProviderId[] = ["kimi", "glm", "m
  */
 export type QuotaVisibility = Record<QuotaProviderId, boolean>;
 
-/** Manager page tabs — the preset editor, quota view, and settings view live in one panel. */
-export type ManagerTab = "preset" | "quota" | "settings";
+/** Manager page tabs — the config view, preset editor, quota view, and settings view live in one panel. */
+export type ManagerTab = "config" | "preset" | "quota" | "settings";
 
 /** Switch the manager page to a tab; focusProvider scrolls one quota group into view. */
 export interface ManagerNavigatePayload {
@@ -390,4 +402,29 @@ export function normalizeAutoRefreshSettings(
 /** Boot payload of the settings page; also pushed when the settings change outside the page. */
 export interface SettingsInitPayload {
   settings: AutoRefreshSettings;
+}
+
+// ---------------------------------------------------------------------------
+// Config view contract — the live agent/category assignment editor plus the
+// read-only skills list (配置 tab). SkillSummary lives here because the webview
+// must not import core (node:fs dependencies); core imports the TYPE from this
+// module (same pattern as the quota shapes above).
+// ---------------------------------------------------------------------------
+
+/** One discovered skill for the config tab's read-only list (name + SKILL.md frontmatter description). */
+export interface SkillSummary {
+  name: string;
+  /** SKILL.md frontmatter description line; "" when absent/unparseable. */
+  description: string;
+  scope: "global" | "project";
+  /** Display label of the skills dir this skill was found in (e.g. "~/.agents/skills"). */
+  locationLabel: string;
+}
+
+/** Config-tab boot payload: live assignments + model options + skills + the write target. */
+export interface ConfigInitPayload {
+  rows: PresetRow[];
+  models: ModelOption[];
+  skills: SkillSummary[];
+  target: { kind: "omo" | "legacy"; path: string };
 }
