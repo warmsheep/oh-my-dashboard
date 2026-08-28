@@ -46,11 +46,21 @@ export interface OpenManagerPanelOptions {
 let openPanel: vscode.WebviewPanel | undefined;
 let openPanelReady = false;
 let openPanelNavigate: OpenManagerPanelOptions | undefined;
+/** Creation time (Date.now()) of the current singleton panel; 0 = none. Feeds the zombie-boot recreate check. */
+let openPanelCreatedAt = 0;
 // Liveness probe for the open panel (see armLivenessProbe); module-level because
 // the panel itself is a singleton.
 let probeTimer: ReturnType<typeof setTimeout> | undefined;
 /** A booted-once page must answer quotaPing within this window or it is treated as dead. */
 const PROBE_TIMEOUT_MS = 1_500;
+/**
+ * Matches the boot watchdog in createManagerPanel: a page that never finished
+ * booting after 20s is a zombie (its iframe was likely evicted during a long-idle
+ * code-server session before the first ready). The user's explicit click is the
+ * right moment to rebuild the iframe — unlike an automatic dispose, which would
+ * yank a tab away from a page that is merely booting slowly on a degraded link.
+ */
+const PANEL_RECREATE_AFTER_MS = 20_000;
 /**
  * Saves received from the page currently in flight. While >0, the extension's
  * config-change listener must NOT push settingsInit back: those events are the
@@ -205,7 +215,17 @@ export async function openManagerPanel(
       armLivenessProbe(ctx, deps, options);
     } else {
       // Still booting: buffer the navigation into the pending ready handler — posting
-      // before ready would silently drop the message.
+      // before ready would silently drop the message. UNLESS the page went past the
+      // boot watchdog without EVER becoming ready: the liveness probe cannot see it
+      // (it only covers booted-once pages), so every later click would land on a
+      // dead blank tab forever. Dispose + recreate fresh — the identity guard in
+      // onDidDispose keeps this replacement safe (same pattern as armLivenessProbe).
+      if (Date.now() - openPanelCreatedAt > PANEL_RECREATE_AFTER_MS) {
+        deps.log("managerPanel: 面板长时间未完成初始化，已重建管理面板");
+        openPanel.dispose();
+        createManagerPanel(ctx, deps, options);
+        return;
+      }
       openPanelNavigate = options;
     }
     return;
@@ -294,6 +314,7 @@ function createManagerPanel(
   openPanel = panel;
   openPanelReady = false;
   openPanelNavigate = options;
+  openPanelCreatedAt = Date.now();
   ctx.subscriptions.push(panel);
 
   // Boot watchdog, diagnostics ONLY. Opening is deliberately decoupled from the
@@ -511,6 +532,7 @@ function createManagerPanel(
       openPanel = undefined;
       openPanelReady = false;
       openPanelNavigate = undefined;
+      openPanelCreatedAt = 0;
       // Release the visibility gate so closed-panel cycles stop including hidden
       // providers (the identity guard keeps a replacement panel from being muted
       // by this reset — it re-arms itself through its own onDidChangeViewState).
