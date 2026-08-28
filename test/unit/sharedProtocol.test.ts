@@ -35,6 +35,7 @@ import {
   quotaCurrencySymbol,
   quotaWindowLabel,
   remainingColor,
+  toPresetListEntries,
   VARIANT_ORDER,
   VARIANTS,
 } from "../../src/shared/protocol";
@@ -277,5 +278,42 @@ describe("quota visibility helpers", () => {
   it("filterQuotaSnapshotByVisibility with everything visible is an identity pass-through", () => {
     const filtered = filterQuotaSnapshotByVisibility(snapshot, defaultQuotaVisibility());
     expect(filtered.providers).toHaveLength(4);
+  });
+});
+
+describe("toPresetListEntries", () => {
+  it("projects preset records into the lean list shape", () => {
+    expect(
+      toPresetListEntries([
+        {
+          name: "daily",
+          description: "日常工作",
+          createdAt: "2026-08-01T00:00:00.000Z",
+          appliedAt: "2026-08-20T00:00:00.000Z",
+        },
+      ]),
+    ).toEqual([
+      {
+        name: "daily",
+        description: "日常工作",
+        createdAt: "2026-08-01T00:00:00.000Z",
+        appliedAt: "2026-08-20T00:00:00.000Z",
+      },
+    ]);
+  });
+
+  it("omits the description key when absent and normalizes missing appliedAt to null", () => {
+    const [entry] = toPresetListEntries([{ name: "bare", createdAt: "2026-08-01T00:00:00.000Z" }]);
+    expect(entry).toEqual({ name: "bare", createdAt: "2026-08-01T00:00:00.000Z", appliedAt: null });
+    expect(Object.hasOwn(entry, "description")).toBe(false);
+  });
+
+  it("keeps an empty-string appliedAt falsy edge honest (empty string stays a string)", () => {
+    const [entry] = toPresetListEntries([{ name: "x", createdAt: "t", appliedAt: "" }]);
+    expect(entry?.appliedAt).toBe("");
+  });
+
+  it("maps an empty input to an empty list", () => {
+    expect(toPresetListEntries([])).toEqual([]);
   });
 });

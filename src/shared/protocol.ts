@@ -69,12 +69,44 @@ export interface WebviewInitPayload {
   models: ModelOption[];
 }
 
+/** Lean 模板列表 entry — display metadata only, no agent/category row data. */
+export interface PresetListEntry {
+  name: string;
+  description?: string;
+  createdAt: string;
+  appliedAt: string | null;
+}
+
+/**
+ * Structural subset of the core Preset record accepted by toPresetListEntries:
+ * protocol stays core-free, so the mapper takes anything shaped like a preset.
+ */
+export interface PresetListSource {
+  name: string;
+  description?: string;
+  createdAt: string;
+  appliedAt?: string | null;
+}
+
+/** Project preset records into the lean list shape (drops row data the list view never renders). */
+export function toPresetListEntries(presets: readonly PresetListSource[]): PresetListEntry[] {
+  return presets.map((preset) => ({
+    name: preset.name,
+    ...(preset.description !== undefined ? { description: preset.description } : {}),
+    createdAt: preset.createdAt,
+    appliedAt: preset.appliedAt ?? null,
+  }));
+}
+
 export type ExtToWebview =
   | { type: "init"; payload: WebviewInitPayload }
   /** Sent when building/sending the init payload failed (e.g. listModels threw): replaces the boot screen with the error. */
   | { type: "initFailed"; payload: { error: string } }
   | { type: "modelsUpdated"; payload: { models: ModelOption[] } }
   | { type: "result"; payload: { action: "save" | "apply"; ok: boolean; error?: string } }
+  /** 模板 tab default view: the preset list rides along on panel boot AND is re-pushed
+   *  on preset-tab navigation and after every preset save (renames change the list). */
+  | { type: "presetList"; payload: { presets: PresetListEntry[] } }
   /** Quota view boot payload: cached snapshot (null before the first refresh cycle), per-provider
    *  status-bar visibility, and an optional focus target. */
   | { type: "quotaInit"; payload: QuotaInitPayload }
@@ -98,6 +130,8 @@ export type WebviewToExt =
   | { type: "dirty"; payload: boolean }
   | { type: "cancel" }
   | { type: "save"; payload: { name: string; description?: string; rows: PresetRow[]; apply: boolean } }
+  /** 模板 tab list-view click: begin (or switch to) the named preset's edit session (null = new). */
+  | { type: "presetEdit"; payload?: { name: string | null } }
   /** Manual refresh from the quota view; providerId omitted (or undefined) means refresh all providers. */
   | { type: "quotaRefresh"; payload?: { providerId?: QuotaProviderId } }
   | { type: "quotaSaveMimoCookie"; payload: { cookie: string } }
