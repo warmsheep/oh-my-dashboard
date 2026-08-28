@@ -15,7 +15,7 @@ import {
   type FormState,
   type ModelOption,
 } from "./helpers";
-import { clearDraft, hasVSCodeApi, loadDraft, postToHost, saveDraft } from "./vscode";
+import { clearPresetDraft, hasVSCodeApi, loadPresetDraft, postToHost, savePresetDraft } from "./vscode";
 
 const DEV_INIT_PAYLOAD: WebviewInitPayload = {
   preset: {
@@ -277,14 +277,15 @@ export default function App() {
 
   const handleInit = useCallback((p: WebviewInitPayload) => {
     const base = toFormState(p);
-    const draft = loadDraft();
-    origNameRef.current = p.preset.name;
-    if (draft && draft.origName === p.preset.name) {
-      setForm(draft.form);
+    const origName = p.preset.name;
+    const draft = loadPresetDraft(origName);
+    origNameRef.current = origName;
+    if (draft) {
+      setForm(draft);
       setDraftRestored(true);
     } else {
       setForm(base);
-      saveDraft({ origName: p.preset.name, form: base });
+      savePresetDraft(origName, base);
     }
     setBaseline(base);
     setPayload(p);
@@ -310,7 +311,7 @@ export default function App() {
       };
       setForm(normalized);
       setBaseline(normalized);
-      saveDraft({ origName: origNameRef.current, form: normalized });
+      savePresetDraft(origNameRef.current, normalized);
     }
     setError(null);
     if (result.action === "apply") {
@@ -339,7 +340,6 @@ export default function App() {
       }
     };
     window.addEventListener("message", onMessage);
-    postToHost({ type: "ready" });
     if (!hasVSCodeApi()) {
       const t = window.setTimeout(() => handlersRef.current.init(DEV_INIT_PAYLOAD), 60);
       return () => {
@@ -390,7 +390,7 @@ export default function App() {
     setForm((prev) => {
       if (!prev) return prev;
       const next = updater(prev);
-      saveDraft({ origName: origNameRef.current, form: next });
+      savePresetDraft(origNameRef.current, next);
       return next;
     });
     setDraftRestored(false);
@@ -447,15 +447,27 @@ export default function App() {
     });
   }, []);
 
-  const cancel = useCallback(() => {
-    if (dirty) setConfirmingCancel(true);
-    else postToHost({ type: "cancel" });
-  }, [dirty]);
-
-  const discardAndClose = useCallback(() => {
-    clearDraft(formRef.current?.rows ?? []);
+  const closeSession = useCallback(() => {
+    clearPresetDraft(origNameRef.current);
+    setPayload(null);
+    setForm(null);
+    setBaseline(null);
+    setAwaitingResult(false);
+    setConfirmingCancel(false);
+    setError(null);
+    // The host clears its workspaceState draft for this session; the preset tab
+    // falls back to the empty hint until the next editPreset lands an init.
     postToHost({ type: "cancel" });
   }, []);
+
+  const cancel = useCallback(() => {
+    if (dirty) setConfirmingCancel(true);
+    else closeSession();
+  }, [closeSession, dirty]);
+
+  const discardAndClose = useCallback(() => {
+    closeSession();
+  }, [closeSession]);
 
   if (initError !== null) {
     return (
@@ -471,25 +483,25 @@ export default function App() {
   }
 
   if (!payload || !form) {
-    return <div className="boot">正在加载…</div>;
+    return (
+      <div className="empty preset-empty">
+        尚未打开模板——在侧栏「模板」分区右键模板选择「编辑模板（矩阵表单）」，或从命令面板运行 OpenCode:
+        编辑模板（矩阵表单）。
+      </div>
+    );
   }
 
   const busy = awaitingResult || locked;
 
   return (
     <form
-      className="app"
+      className="app preset-tab"
       onSubmit={(e) => {
         e.preventDefault();
         save(false);
       }}
     >
       <main className="page">
-        <header className="page-head">
-          <h1>模板矩阵编辑器</h1>
-          <p>为各 Agent 与 Category 指定模型和 variant；未设置的行继承默认配置。</p>
-        </header>
-
         {draftRestored && <div className="notice">已恢复上次未保存的草稿</div>}
         {error && (
           <div className="banner-error" role="alert">
