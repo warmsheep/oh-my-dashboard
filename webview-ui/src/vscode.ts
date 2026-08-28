@@ -1,4 +1,4 @@
-import type { PresetRow, WebviewToExt } from "@shared/protocol";
+import type { WebviewToExt } from "@shared/protocol";
 
 import type { FormState } from "./helpers";
 
@@ -46,28 +46,56 @@ export function postToHost(message: WebviewToExt): void {
   getVSCodeApi().postMessage(message);
 }
 
-export interface DraftState {
-  origName: string;
-  form: FormState;
+/**
+ * Whole-webview state shape. The manager page is ONE webview hosting three tabs,
+ * so the previously per-page getState slots are namespaced: the active tab and
+ * per-preset editor drafts (keyed by the preset name the draft belongs to) must
+ * not clobber each other — every writer merges into the current state object.
+ */
+export interface ManagerWebviewState {
+  managerTab?: unknown;
+  presetDrafts?: Record<string, FormState>;
 }
 
-export function loadDraft(): DraftState | undefined {
+function readState(): ManagerWebviewState {
   try {
-    const d = getVSCodeApi().getState<DraftState>();
-    return d && typeof d === "object" && typeof d.origName === "string" && Array.isArray(d.form?.rows) ? d : undefined;
+    const state = getVSCodeApi().getState<ManagerWebviewState>();
+    return state && typeof state === "object" ? state : {};
   } catch {
-    return undefined;
+    return {};
   }
 }
 
-export function saveDraft(draft: DraftState): void {
+function writeState(next: ManagerWebviewState): void {
   try {
-    getVSCodeApi().setState(draft);
+    getVSCodeApi().setState(next);
   } catch {
-    /* persisting a draft is best-effort */
+    /* persisting state is best-effort */
   }
 }
 
-export function clearDraft(rows: PresetRow[]): void {
-  saveDraft({ origName: "", form: { name: "", description: "", rows } });
+/** Persist the active manager tab while preserving the preset drafts. */
+export function setManagerTabState(tab: string): void {
+  writeState({ ...readState(), managerTab: tab });
+}
+
+/** Load the unsaved editor draft for ONE preset (keyed by its original open name). */
+export function loadPresetDraft(origName: string): FormState | undefined {
+  const draft = readState().presetDrafts?.[origName];
+  return draft && typeof draft === "object" && Array.isArray(draft.rows) ? draft : undefined;
+}
+
+export function savePresetDraft(origName: string, form: FormState): void {
+  const current = readState();
+  writeState({ ...current, presetDrafts: { ...current.presetDrafts, [origName]: form } });
+}
+
+export function clearPresetDraft(origName: string): void {
+  const current = readState();
+  if (current.presetDrafts === undefined || !(origName in current.presetDrafts)) {
+    return;
+  }
+  const drafts = { ...current.presetDrafts };
+  delete drafts[origName];
+  writeState({ ...current, presetDrafts: drafts });
 }
