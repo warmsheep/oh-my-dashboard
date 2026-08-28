@@ -53,10 +53,11 @@ let manualBackupDirName = "";
 let importedBackupDirName = "";
 
 /**
- * Captured bridges for preset-editor panels opened earlier in the chain, keyed by
- * the panel's CURRENT name (kept in sync on rename-on-save / cancel).
+ * The ONE captured bridge of the singleton manager panel (模板/额度/设置 tabs).
+ * Whichever section opens/captures the panel first sets it; later reveals reuse
+ * it (reveal never calls createWebviewPanel).
  */
-const heldBridges = new Map<string, PanelBridge>();
+let managerBridge: PanelBridge | undefined;
 
 function assertNoJsoncErrors(file: string): void {
   assert.ok(fs.existsSync(file), `expected file to exist: ${file}`);
@@ -268,19 +269,20 @@ async function executeDeleteModel(id: string): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// Preset-editor webview bridge (webview↔host protocol roundtrip).
+// Preset tab webview bridge (webview↔host protocol roundtrip).
 //
-// The panel map in presetEditorHost is module-private and the B2 bridge only
-// covers the host→webview direction. To drive SAVE messages (webview→host) we
-// wrap vscode.window.createWebviewPanel while editPreset runs and capture:
+// The preset editor rides the merged manager panel (模板 tab); the panel is a
+// singleton, so ALL sections share ONE captured bridge (`managerBridge`). To
+// drive SAVE messages (webview→host) we wrap vscode.window.createWebviewPanel
+// while the panel is CREATED (first open) and capture:
 //   - the real onDidReceiveMessage listener  → deliver save/dirty/cancel with
 //   - panel.webview.postMessage              → observe {type:'result'} replies
 // The real webview (React bundle) keeps running untouched — the wrappers only
 // tee into the same calls the extension already makes.
 //
 // CONTRACT: reading lastReply() right after deliverSave() relies on the host's
-// handleSave() completing SYNCHRONOUSLY (core save/rename/apply are sync fs, so
-// the reply is already in `outbound` when deliver returns). If handleSave ever
+// save handling completing SYNCHRONOUSLY (core save/rename/apply are sync fs,
+// so the reply is already in `outbound` when deliver returns). If that ever
 // becomes async, the webview steps below fail DETERMINISTICALLY (red), not
 // flakily — revisit this capture then.
 // ---------------------------------------------------------------------------
@@ -297,7 +299,14 @@ interface PanelBridge {
   outbound: PanelMessage[];
 }
 
-async function openPresetEditorCaptured(name: string): Promise<PanelBridge> {
+/**
+ * Open the manager panel's 模板 tab on `name` while capturing its bridge.
+ * First call creates the panel (createWebviewPanel fires → capture); later
+ * calls only reveal it and reuse the held manager bridge. Opening is decoupled
+ * from the webview handshake (merged-panel policy), so the boot/reveal init is
+ * awaited by POLLING for an init message carrying the requested preset name.
+ */
+async function openPresetTabCaptured(name: string): Promise<PanelBridge> {
   const windowApi = vscode.window as unknown as {
     createWebviewPanel: (...args: unknown[]) => vscode.WebviewPanel;
   };
@@ -334,24 +343,64 @@ async function openPresetEditorCaptured(name: string): Promise<PanelBridge> {
     bridge = capture;
     return panel;
   };
+  const streamLengthBefore = managerBridge?.outbound.length ?? 0;
   try {
     await withTimeout(
       Promise.resolve(vscode.commands.executeCommand(CMD.editPreset, name)),
       20_000,
-      `editPreset(${name}) must resolve once the webview is ready`,
+      `editPreset(${name}) must resolve once the manager panel tab is open`,
     );
   } finally {
     windowApi.createWebviewPanel = original;
   }
-  assert.ok(bridge, "createWebviewPanel was not called while opening the preset editor");
-  // The host posts {type:'init'} right after the ready handshake — its presence in
-  // the capture proves BOTH directions are wired to the real panel.
-  assert.ok(
-    bridge.outbound.some((message) => message.type === "init"),
-    "captured panel must have received the init message",
+  let held: PanelBridge;
+  if (bridge !== undefined) {
+    assert.ok(managerBridge === undefined, "the manager panel must be captured exactly once");
+    managerBridge = bridge;
+    held = bridge;
+  } else {
+    assert.ok(managerBridge, "editPreset reveal must reuse the previously captured manager bridge");
+    held = managerBridge;
+  }
+  await pollUntil(
+    () =>
+      held.outbound
+        .slice(streamLengthBefore)
+        .some(
+          (message) =>
+            message.type === "init" && (message.payload as { preset?: { name?: unknown } })?.preset?.name === name,
+        ),
+    20_000,
+    `the 模板 tab must receive an init carrying preset ${name}`,
   );
-  heldBridges.set(name, bridge);
-  return bridge;
+  return held;
+}
+
+/**
+ * Reveal the already-open manager panel on `name`'s 模板 tab (session switch) and
+ * wait for the fresh init — the preset-editor analog of a reveal-reuse step.
+ */
+async function openPresetTabReused(name: string): Promise<PanelBridge> {
+  assert.ok(managerBridge, "manager panel must still be open from the previous step");
+  const held = managerBridge;
+  const before = held.outbound.length;
+  await withTimeout(
+    Promise.resolve(vscode.commands.executeCommand(CMD.editPreset, name)),
+    20_000,
+    `editPreset(${name}) reveal must resolve`,
+  );
+  await pollUntil(
+    () =>
+      held.outbound
+        .slice(before)
+        .some(
+          (message) =>
+            message.type === "init" && (message.payload as { preset?: { name?: unknown } })?.preset?.name === name,
+        ),
+    20_000,
+    `the reused 模板 tab must receive a fresh init for ${name}`,
+  );
+  return held;
 }
 
 interface SaveReply {
@@ -415,12 +464,9 @@ function deliverSave(
 }
 
 // ---------------------------------------------------------------------------
-// Manager panel webview bridge — same capture technique as the preset editor,
-// driven by the singleton manager panel (quotaRefresh / quotaConfigureMimo /
-// openSettings all reveal the SAME merged 额度/设置 panel).
+// Quota-view assertions — messages from the SAME manager panel bridge declared
+// above (the quota tab rides the merged panel).
 // ---------------------------------------------------------------------------
-
-let managerBridge: PanelBridge | undefined;
 
 interface QuotaSnapshotMessage {
   snapshot: {
@@ -896,22 +942,19 @@ function tests(): TestCase[] {
       },
     },
     {
-      name: "editPreset('e2e-preset') resolves after webview posts ready (≤15s)",
+      name: "editPreset('e2e-preset') opens the manager panel's 模板 tab and resolves (≤15s)",
       fn: async () => {
-        // presetEditorHost loads <extensionRoot>/dist-webview/index.html and only
-        // resolves openPresetEditor once the webview posts {type:'ready'}.
+        // The preset editor rides the merged manager page (manager.html); opening
+        // is decoupled from the webview handshake — the command resolves at panel
+        // creation and the boot init lands asynchronously.
         const extension = vscode.extensions.getExtension(EXTENSION_ID);
         assert.ok(extension);
         const distWebview = path.join(extension.extensionUri.fsPath, "dist-webview");
         assert.ok(
-          fs.existsSync(path.join(distWebview, "index.html")),
-          "dist-webview/index.html missing — run.mjs must copy webview-ui/build first",
+          fs.existsSync(path.join(distWebview, "manager.html")),
+          "dist-webview/manager.html missing — run.mjs must copy webview-ui/build first",
         );
-        await withTimeout(
-          Promise.resolve(vscode.commands.executeCommand(CMD.editPreset, PRESET_NAME)),
-          15_000,
-          "editPreset must resolve once the preset editor webview is ready",
-        );
+        await openPresetTabCaptured(PRESET_NAME);
       },
     },
     {
@@ -976,7 +1019,7 @@ function tests(): TestCase[] {
         const agentConfig = path.join(configDir, "oh-my-opencode.json");
         const agentBytesBefore = fs.readFileSync(agentConfig);
 
-        const bridge = await openPresetEditorCaptured(WV_PRESET);
+        const bridge = await openPresetTabCaptured(WV_PRESET);
         deliverSave(bridge, {
           name: WV_PRESET,
           apply: false,
@@ -1012,8 +1055,8 @@ function tests(): TestCase[] {
         const agentConfig = path.join(configDir, "oh-my-opencode.json");
         const before = JSON.parse(fs.readFileSync(wvFile, "utf8")) as { appliedAt: string | null };
 
-        // Same panel as the previous step (keyed by its current name).
-        const bridge = await openPresetEditorReused(WV_PRESET);
+        // Same manager panel as the previous step (singleton, session switch).
+        const bridge = await openPresetTabReused(WV_PRESET);
         deliverSave(bridge, {
           name: WV_PRESET,
           apply: true,
@@ -1059,7 +1102,7 @@ function tests(): TestCase[] {
         const renamedFile = path.join(configDir, "presets", `${WV_PRESET_RENAMED}.json`);
         const before = JSON.parse(fs.readFileSync(wvFile, "utf8")) as { createdAt: string };
 
-        const bridge = await openPresetEditorReused(WV_PRESET);
+        const bridge = await openPresetTabReused(WV_PRESET);
         deliverSave(bridge, {
           name: WV_PRESET_RENAMED,
           apply: false,
@@ -1079,20 +1122,11 @@ function tests(): TestCase[] {
         assert.equal(renamed.name, WV_PRESET_RENAMED);
         assert.equal(renamed.createdAt, before.createdAt, "rename-on-save must preserve createdAt");
 
-        // The host re-keys its open-panel map to the new name; the B2 bridge is
-        // keyed by the CURRENT name, so it proves the re-key from the outside.
-        const posted = await vscode.commands.executeCommand(TEST_BRIDGE.presetEditorPostMessage, WV_PRESET_RENAMED, {
-          type: "modelsUpdated",
-          payload: { models: [] },
-        });
-        assert.equal(posted, true, "bridge must find the panel under its NEW name");
-        const postedOld = await vscode.commands.executeCommand(TEST_BRIDGE.presetEditorPostMessage, WV_PRESET, {
-          type: "modelsUpdated",
-          payload: { models: [] },
-        });
-        assert.equal(postedOld, false, "bridge must no longer find the panel under its OLD name");
-        heldBridges.set(WV_PRESET_RENAMED, bridge);
-        heldBridges.delete(WV_PRESET);
+        // Single-panel era: re-keying is gone, but the session must FOLLOW the
+        // rename — reopening the new name reveals the same panel and its init
+        // carries the renamed preset.
+        const renamedBridge = await openPresetTabReused(WV_PRESET_RENAMED);
+        assert.equal(renamedBridge, bridge, "editPreset(newName) must reuse the open manager panel");
       },
     },
     {
@@ -1101,7 +1135,7 @@ function tests(): TestCase[] {
         const presetsDir = path.join(configDir, "presets");
         const before = fs.readdirSync(presetsDir).sort();
 
-        const bridge = await openPresetEditorReused(WV_PRESET_RENAMED);
+        const bridge = await openPresetTabReused(WV_PRESET_RENAMED);
         deliverSave(bridge, {
           name: "../evil",
           apply: false,
@@ -1126,20 +1160,35 @@ function tests(): TestCase[] {
       },
     },
     {
-      name: "webview cancel disposes the panel",
+      name: "webview cancel clears the preset session but keeps the manager panel open",
       fn: async () => {
-        const bridge = await openPresetEditorReused(WV_PRESET_RENAMED);
+        const bridge = await openPresetTabReused(WV_PRESET_RENAMED);
         bridge.deliver({ type: "cancel" });
-        heldBridges.delete(WV_PRESET_RENAMED);
+
+        // Merged-panel semantics: cancel ends the EDITING SESSION (the page clears
+        // itself + the host drops the crash-recovery draft), NOT the shared panel.
+        const reachable = await vscode.commands.executeCommand(TEST_BRIDGE.presetEditorPostMessage, "any", {
+          type: "modelsUpdated",
+          payload: { models: [] },
+        });
+        assert.equal(reachable, true, "the manager panel must stay open after a preset cancel");
+
+        // The session restarts cleanly on the next editPreset (fresh init).
+        await openPresetTabReused(WV_PRESET_RENAMED);
+
+        // Reset the singleton for the quota section below: its first tests patch
+        // createWebviewPanel and require a COLD panel (no reveal path).
+        await vscode.commands.executeCommand("workbench.action.closeAllEditors");
         await pollUntil(
           async () =>
-            (await vscode.commands.executeCommand(TEST_BRIDGE.presetEditorPostMessage, WV_PRESET_RENAMED, {
+            (await vscode.commands.executeCommand(TEST_BRIDGE.presetEditorPostMessage, "any", {
               type: "modelsUpdated",
               payload: { models: [] },
             })) === false,
-          3_000,
-          "panel keyed under the cancelled name must be removed from the host map",
+          5_000,
+          "manager panel singleton must reset after closeAllEditors",
         );
+        managerBridge = undefined;
       },
     },
 
@@ -2149,24 +2198,6 @@ function tests(): TestCase[] {
       },
     },
   ];
-}
-
-/**
- * Fetch the bridge for a panel that is ALREADY open (the save/apply/rename steps
- * reuse one editor session). Fails loudly when the panel was closed or keyed
- * under a different name.
- */
-async function openPresetEditorReused(name: string): Promise<PanelBridge> {
-  // The panel for `name` is open from an earlier step, so editPreset short-circuits
-  // with reveal() and createWebviewPanel never fires — verify reachability through
-  // the B2 host→webview bridge instead; its openPanels keying is the same map the
-  // inbound listener lives behind.
-  const reachable = await vscode.commands.executeCommand(TEST_BRIDGE.presetEditorPostMessage, name, {
-    type: "modelsUpdated",
-    payload: { models: [] },
-  });
-  assert.equal(reachable, true, `expected an open preset editor panel for ${name}`);
-  return heldBridges.get(name) ?? assert.fail(`no captured bridge held for open panel ${name}`);
 }
 
 export async function run(): Promise<void> {
