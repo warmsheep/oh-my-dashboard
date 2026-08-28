@@ -42,12 +42,38 @@ export const BACKUP_REASON_LABELS: Record<string, string> = {
   "pre-restore": "恢复前",
 };
 
+/** Selectable parts of a backup: what create() may include and restore() may limit itself to. */
+export type BackupScope = "config" | "presets" | "models";
+
+/** Canonical scope order (single source) — create/restore/availability all follow it. */
+export const BACKUP_SCOPES: readonly BackupScope[] = ["config", "presets", "models"];
+
+/** Chinese display labels for {@link BackupScope} (QuickPick items, backup summaries). */
+export const BACKUP_SCOPE_LABELS: Record<BackupScope, string> = {
+  config: "配置",
+  presets: "模板",
+  models: "模型",
+};
+
+/** QuickPick detail lines explaining what each {@link BackupScope} covers. */
+export const BACKUP_SCOPE_DETAILS: Record<BackupScope, string> = {
+  config: "opencode/agent 配置、command、skills",
+  presets: "presets 模板",
+  models: "models.json 模型清单",
+};
+
 export interface BackupManifest {
   version: 1;
   reason: BackupReason;
   /** User-facing display name; purely presentational — the dir keeps its timestamp id. */
   name?: string;
   preset?: string;
+  /**
+   * Scopes recorded at create time; absent = legacy full backup. Restore-time
+   * availability is always detected from the backup CONTENT instead (see
+   * BackupService.availableScopes), so this field is informational only.
+   */
+  scopes?: BackupScope[];
   createdAt: string;
   fileCount: number;
   machine: string;

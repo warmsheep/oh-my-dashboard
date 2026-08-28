@@ -6,8 +6,10 @@ import * as path from "node:path";
 import { strFromU8, unzip, zip, type AsyncZipOptions, type UnzipOptions } from "fflate";
 
 import { writeFileAtomic } from "./atomicFile";
+import { LOCAL_MODELS_FILE } from "./builtinModels";
 import { assertContainedFileName } from "./pathSafety";
-import type { BackupEntry, BackupManifest, BackupReason } from "./types";
+import { BACKUP_SCOPES } from "./types";
+import type { BackupEntry, BackupManifest, BackupReason, BackupScope } from "./types";
 
 /**
  * Deflate/inflate MUST stay off the extension-host event loop: fflate's async
@@ -60,6 +62,11 @@ export interface BackupServiceOptions {
    */
   extraDirs?: readonly { label: string; src: string }[];
   /**
+   * Absolute path of the local model catalog (the "models" scope source). Defaults
+   * to <configDir>/models.json; the backup entry label is the file's basename.
+   */
+  modelsFile?: string;
+  /**
    * Overridable copy caps (tests). Defaults mirror the zip caps (20k entries / 256MB)
    * and bound BOTH create() and restore(): a foreign oversized backup dir planted by
    * hand must not translate restore into an unbounded synchronous main-thread copy.
@@ -75,7 +82,8 @@ export const DEFAULT_RETENTION: Record<BackupReason, number | null> = {
 };
 
 const MANAGED_FILES = ["opencode.json", "oh-my-opencode.json", "AGENTS.md"] as const;
-const MANAGED_DIRS = ["command", "skills", "presets"] as const;
+/** configDir sub-dirs belonging to the "config" scope ("presets" is its own scope). */
+const CONFIG_DIRS = ["command", "skills"] as const;
 const MANIFEST_FILE = "manifest.json";
 const ALL_REASONS = Object.keys(DEFAULT_RETENTION) as BackupReason[];
 
@@ -125,6 +133,9 @@ export class BackupService {
   private readonly retention: Record<BackupReason, number | null>;
   private readonly managedFiles: readonly { label: string; src: string }[];
   private readonly extraDirs: readonly { label: string; src: string }[];
+  private readonly modelsFile: string;
+  /** Backup-entry label of the models catalog (its basename, default "models.json"). */
+  private readonly modelsLabel: string;
   private readonly maxEntries: number;
   private readonly maxTotalBytes: number;
   private readonly manifestCache = new Map<string, { mtimeMs: number; entry: BackupEntry | null }>();
@@ -140,11 +151,22 @@ export class BackupService {
       ? opts.managedFiles.map((src) => ({ label: path.basename(src), src }))
       : MANAGED_FILES.map((name) => ({ label: name, src: path.join(opts.configDir, name) }));
     this.extraDirs = opts.extraDirs ?? [];
+    this.modelsFile = opts.modelsFile ?? path.join(opts.configDir, LOCAL_MODELS_FILE);
+    this.modelsLabel = path.basename(this.modelsFile);
     this.maxEntries = opts.caps?.maxEntries ?? ZIP_MAX_ENTRIES;
     this.maxTotalBytes = opts.caps?.maxTotalBytes ?? ZIP_MAX_TOTAL_BYTES;
   }
 
-  create(reason: BackupReason, meta?: { preset?: string; name?: string }): BackupEntry {
+  /**
+   * Snapshot the selected scopes into a new backup dir. `scopes` omitted = ALL scopes
+   * (the auto pre-apply/pre-save/pre-restore callers' legacy full-backup contract);
+   * the manifest always records the effective scope list in canonical order.
+   */
+  create(
+    reason: BackupReason,
+    meta?: { preset?: string; name?: string },
+    scopes?: readonly BackupScope[],
+  ): BackupEntry {
     const at = this.now();
     const baseDirName = `${isoFs(at)}-${reason}`;
     // Same-millisecond double backup: negotiate a -N suffix instead of failing the
@@ -162,26 +184,17 @@ export class BackupService {
     this.fsMod.rmSync(staging, { recursive: true, force: true });
     this.fsMod.mkdirSync(staging, { recursive: true });
 
+    const effective = this.normalizeScopes(scopes);
     try {
       const budget = { files: 0, bytes: 0, entries: 0 };
-      for (const { label, src } of this.managedFiles) {
-        if (this.fsMod.existsSync(src)) {
-          this.chargeBudget(budget, this.fsMod.statSync(src).size);
-          this.fsMod.copyFileSync(src, path.join(staging, label));
-        }
+      if (effective.includes("config")) {
+        this.stageConfigScope(staging, budget);
       }
-      for (const name of MANAGED_DIRS) {
-        const src = path.join(this.configDir, name);
-        if (!this.fsMod.existsSync(src)) {
-          continue;
-        }
-        this.copyTreeSafe(src, path.join(staging, name), budget, 1);
+      if (effective.includes("presets")) {
+        this.stagePresetsScope(staging, budget);
       }
-      for (const { label, src } of this.extraDirs) {
-        if (!this.fsMod.existsSync(src)) {
-          continue;
-        }
-        this.copyTreeSafe(src, path.join(staging, label), budget, 1);
+      if (effective.includes("models")) {
+        this.stageModelsScope(staging, budget);
       }
 
       const manifest: BackupManifest = {
@@ -189,6 +202,7 @@ export class BackupService {
         reason,
         ...(meta?.name !== undefined && meta.name.length > 0 ? { name: meta.name } : {}),
         ...(meta?.preset !== undefined ? { preset: meta.preset } : {}),
+        scopes: effective,
         createdAt: at.toISOString(),
         fileCount: budget.files,
         machine: this.hostname,
@@ -207,6 +221,50 @@ export class BackupService {
     const entry: BackupEntry = { dirName, dir, manifest };
     this.prune(reason);
     return entry;
+  }
+
+  /** Canonicalize a scope selection: BACKUP_SCOPES order, deduped, unknown values dropped. */
+  private normalizeScopes(scopes: readonly BackupScope[] | undefined): BackupScope[] {
+    return scopes === undefined ? [...BACKUP_SCOPES] : BACKUP_SCOPES.filter((scope) => scopes.includes(scope));
+  }
+
+  /** Stage the "config" scope: managed files + command/ + skills/ + extraDirs, existing sources only. */
+  private stageConfigScope(staging: string, budget: { files: number; bytes: number; entries: number }): void {
+    for (const { label, src } of this.managedFiles) {
+      if (this.fsMod.existsSync(src)) {
+        this.chargeBudget(budget, this.fsMod.statSync(src).size);
+        this.fsMod.copyFileSync(src, path.join(staging, label));
+      }
+    }
+    for (const name of CONFIG_DIRS) {
+      const src = path.join(this.configDir, name);
+      if (!this.fsMod.existsSync(src)) {
+        continue;
+      }
+      this.copyTreeSafe(src, path.join(staging, name), budget, 1);
+    }
+    for (const { label, src } of this.extraDirs) {
+      if (!this.fsMod.existsSync(src)) {
+        continue;
+      }
+      this.copyTreeSafe(src, path.join(staging, label), budget, 1);
+    }
+  }
+
+  /** Stage the "presets" scope: the configDir presets/ dir, when it exists. */
+  private stagePresetsScope(staging: string, budget: { files: number; bytes: number; entries: number }): void {
+    const src = path.join(this.configDir, "presets");
+    if (this.fsMod.existsSync(src)) {
+      this.copyTreeSafe(src, path.join(staging, "presets"), budget, 1);
+    }
+  }
+
+  /** Stage the "models" scope: the local model catalog file, when it exists. */
+  private stageModelsScope(staging: string, budget: { files: number; bytes: number; entries: number }): void {
+    if (this.fsMod.existsSync(this.modelsFile)) {
+      this.chargeBudget(budget, this.fsMod.statSync(this.modelsFile).size);
+      this.fsMod.copyFileSync(this.modelsFile, path.join(staging, this.modelsLabel));
+    }
   }
 
   /**
@@ -335,9 +393,30 @@ export class BackupService {
     return { ...entry, manifest };
   }
 
-  restore(dirName: string): void {
+  /**
+   * Restore the selected scopes from a backup. `scopes` omitted = restore everything
+   * present (legacy full-restore contract); a scope the backup does not hold is a no-op.
+   */
+  restore(dirName: string, scopes?: readonly BackupScope[]): void {
     this.assertDirName(dirName);
     const srcDir = path.join(this.backupsDir, dirName);
+    // Foreign backup dirs (planted by hand, uncapped at create time) must not turn
+    // restore into an unbounded synchronous copy on the extension-host main thread.
+    const budget = { files: 0, bytes: 0, entries: 0 };
+    const effective = this.normalizeScopes(scopes);
+    if (effective.includes("config")) {
+      this.restoreConfigScope(srcDir, budget);
+    }
+    if (effective.includes("presets")) {
+      this.restorePresetsScope(srcDir, budget);
+    }
+    if (effective.includes("models")) {
+      this.restoreModelsScope(srcDir);
+    }
+  }
+
+  /** Restore the "config" scope: managed files (atomic) + command/ + skills/ + extraDirs. */
+  private restoreConfigScope(srcDir: string, budget: { files: number; bytes: number; entries: number }): void {
     // Managed config files are restored through the atomic writer: a mid-copy failure
     // (ENOSPC/EPERM) must never truncate the live opencode.json / omo.jsonc.
     for (const { label, src } of this.managedFiles) {
@@ -347,10 +426,7 @@ export class BackupService {
         writeFileAtomic(src, this.fsMod.readFileSync(backup, "utf8"), this.fsMod);
       }
     }
-    // Foreign backup dirs (planted by hand, uncapped at create time) must not turn
-    // restore into an unbounded synchronous copy on the extension-host main thread.
-    const budget = { files: 0, bytes: 0, entries: 0 };
-    for (const name of MANAGED_DIRS) {
+    for (const name of CONFIG_DIRS) {
       const src = path.join(srcDir, name);
       if (this.fsMod.existsSync(src)) {
         const target = path.join(this.configDir, name);
@@ -368,6 +444,50 @@ export class BackupService {
         this.copyTreeSafe(backup, src, budget, 1, "BACKUP_RESTORE_TOO_LARGE");
       }
     }
+  }
+
+  /** Restore the "presets" scope: the presets/ dir back into configDir. */
+  private restorePresetsScope(srcDir: string, budget: { files: number; bytes: number; entries: number }): void {
+    const src = path.join(srcDir, "presets");
+    if (this.fsMod.existsSync(src)) {
+      const target = path.join(this.configDir, "presets");
+      this.removeSymlinksInWay(src, target);
+      this.copyTreeSafe(src, target, budget, 1, "BACKUP_RESTORE_TOO_LARGE");
+    }
+  }
+
+  /** Restore the "models" scope: the catalog file back to its live path (atomic write). */
+  private restoreModelsScope(srcDir: string): void {
+    const backup = path.join(srcDir, this.modelsLabel);
+    if (this.fsMod.existsSync(backup)) {
+      this.fsMod.mkdirSync(path.dirname(this.modelsFile), { recursive: true });
+      writeFileAtomic(this.modelsFile, this.fsMod.readFileSync(backup, "utf8"), this.fsMod);
+    }
+  }
+
+  /**
+   * Content-based scope detection: which scopes this backup could actually restore.
+   * Works for legacy backups without manifest.scopes — the manifest is not consulted,
+   * only cheap existsSync checks against the per-scope entry sets.
+   */
+  availableScopes(dirName: string): BackupScope[] {
+    this.assertDirName(dirName);
+    const srcDir = path.join(this.backupsDir, dirName);
+    const present: BackupScope[] = [];
+    if (
+      this.managedFiles.some(({ label }) => this.fsMod.existsSync(path.join(srcDir, label))) ||
+      CONFIG_DIRS.some((name) => this.fsMod.existsSync(path.join(srcDir, name))) ||
+      this.extraDirs.some(({ label }) => this.fsMod.existsSync(path.join(srcDir, label)))
+    ) {
+      present.push("config");
+    }
+    if (this.fsMod.existsSync(path.join(srcDir, "presets"))) {
+      present.push("presets");
+    }
+    if (this.fsMod.existsSync(path.join(srcDir, this.modelsLabel))) {
+      present.push("models");
+    }
+    return present;
   }
 
   /**

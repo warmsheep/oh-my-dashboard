@@ -330,6 +330,11 @@ describe("BackupService.prune", () => {
   });
 });
 
+/** Seed the local model catalog (the "models" scope source; NOT part of seedFullTree). */
+function seedModelsFile(): void {
+  fs.writeFileSync(path.join(configDir, "models.json"), '{"models":[]}');
+}
+
 describe("BackupService.restore", () => {
   it("restores the backup byte-identical and creates NO pre-restore backup (manual backups only)", async () => {
     seedFullTree();
@@ -353,6 +358,259 @@ describe("BackupService.restore", () => {
 
     expect(svc.list()).toHaveLength(1);
     expect(svc.list()[0].dirName).toBe(snap.dirName);
+  });
+});
+
+describe("BackupService scoped create/restore (config/presets/models)", () => {
+  it("create(['presets']) snapshots ONLY presets/ and records scopes in the manifest", async () => {
+    seedFullTree();
+    seedModelsFile();
+    const svc = new BackupService({ configDir, now: () => new Date("2026-08-24T10:00:00.000Z") });
+
+    const entry = svc.create("manual", undefined, ["presets"]);
+
+    expect(fs.readdirSync(entry.dir).sort()).toEqual(["manifest.json", "presets"]);
+    expect(fs.readFileSync(path.join(entry.dir, "presets", "work.json"), "utf8")).toBe('{"name":"work"}');
+    expect(entry.manifest.fileCount).toBe(1);
+    expect(entry.manifest.scopes).toEqual(["presets"]);
+  });
+
+  it("create() without scopes copies all three scopes and records all of them", async () => {
+    seedFullTree();
+    seedModelsFile();
+    const svc = new BackupService({ configDir, now: () => new Date("2026-08-24T10:00:00.000Z") });
+
+    const entry = svc.create("manual");
+
+    expect(fs.existsSync(path.join(entry.dir, "opencode.json"))).toBe(true);
+    expect(fs.existsSync(path.join(entry.dir, "command", "a.md"))).toBe(true);
+    expect(fs.existsSync(path.join(entry.dir, "skills", "one", "x.md"))).toBe(true);
+    expect(fs.readFileSync(path.join(entry.dir, "models.json"), "utf8")).toBe('{"models":[]}');
+    expect(entry.manifest.scopes).toEqual(["config", "presets", "models"]);
+    expect(entry.manifest.fileCount).toBe(7 + 1);
+  });
+
+  it("create(['models']) copies models.json and skips presets/ and config files", async () => {
+    seedFullTree();
+    seedModelsFile();
+    const svc = new BackupService({ configDir, now: () => new Date("2026-08-24T10:00:00.000Z") });
+
+    const entry = svc.create("manual", undefined, ["models"]);
+
+    expect(fs.readdirSync(entry.dir).sort()).toEqual(["manifest.json", "models.json"]);
+    expect(entry.manifest.fileCount).toBe(1);
+    expect(entry.manifest.scopes).toEqual(["models"]);
+  });
+
+  it("create(['models']) with no models.json on disk records the scope but copies nothing", async () => {
+    seedFullTree();
+    const svc = new BackupService({ configDir, now: () => new Date("2026-08-24T10:00:00.000Z") });
+
+    const entry = svc.create("manual", undefined, ["models"]);
+
+    expect(fs.readdirSync(entry.dir)).toEqual(["manifest.json"]);
+    expect(entry.manifest.fileCount).toBe(0);
+    expect(entry.manifest.scopes).toEqual(["models"]);
+  });
+
+  it("honors a custom modelsFile (label = its basename, restore writes back to the same path)", async () => {
+    seedFullTree();
+    const customModels = path.join(configDir, "catalog.json");
+    fs.writeFileSync(customModels, '{"models":[]}');
+    const svc = new BackupService({
+      configDir,
+      modelsFile: customModels,
+      now: seqNow("2026-08-24T10:00:00.000Z"),
+    });
+    const snap = svc.create("manual");
+
+    expect(fs.readFileSync(path.join(snap.dir, "catalog.json"), "utf8")).toBe('{"models":[]}');
+    expect(svc.availableScopes(snap.dirName)).toEqual(["config", "presets", "models"]);
+
+    fs.rmSync(customModels);
+    svc.restore(snap.dirName, ["models"]);
+    expect(fs.readFileSync(customModels, "utf8")).toBe('{"models":[]}');
+  });
+
+  it("create() normalizes scopes to canonical order and drops unknown values", async () => {
+    seedFullTree();
+    seedModelsFile();
+    const svc = new BackupService({ configDir, now: () => new Date("2026-08-24T10:00:00.000Z") });
+
+    const entry = svc.create("manual", undefined, ["models", "presets", "presets"]);
+
+    expect(entry.manifest.scopes).toEqual(["presets", "models"]);
+    expect(fs.existsSync(path.join(entry.dir, "opencode.json"))).toBe(false);
+  });
+
+  it("availableScopes() detects CONTENT on a legacy backup without manifest.scopes", async () => {
+    // Hand-built backup exactly like a pre-scopes version would have left it.
+    const dirName = "2026-08-24T10-00-00-000Z-manual";
+    const dir = path.join(configDir, "backups", dirName);
+    fs.mkdirSync(path.join(dir, "presets"), { recursive: true });
+    fs.writeFileSync(path.join(dir, "presets", "a.json"), "{}");
+    fs.writeFileSync(path.join(dir, "opencode.json"), "{}");
+    fs.writeFileSync(
+      path.join(dir, "manifest.json"),
+      JSON.stringify({
+        version: 1,
+        reason: "manual",
+        createdAt: "2026-08-24T10:00:00.000Z",
+        fileCount: 2,
+        machine: "x",
+      }),
+    );
+    const svc = new BackupService({ configDir });
+
+    expect(svc.availableScopes(dirName)).toEqual(["config", "presets"]);
+  });
+
+  it("availableScopes() returns canonical order, detects models.json, and counts extraDirs labels as config", async () => {
+    const extraRoot = fs.mkdtempSync(path.join(os.tmpdir(), "extra-"));
+    try {
+      const all = "2026-08-24T11-00-00-000Z-manual";
+      const dir = path.join(configDir, "backups", all);
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, "models.json"), "{}");
+      fs.writeFileSync(path.join(dir, "opencode.json"), "{}");
+      fs.mkdirSync(path.join(dir, "presets"));
+      fs.writeFileSync(
+        path.join(dir, "manifest.json"),
+        JSON.stringify({
+          version: 1,
+          reason: "manual",
+          createdAt: "2026-08-24T11:00:00.000Z",
+          fileCount: 3,
+          machine: "x",
+        }),
+      );
+
+      const pm = "2026-08-24T12-00-00-000Z-manual";
+      const pmDir = path.join(configDir, "backups", pm);
+      fs.mkdirSync(path.join(pmDir, "presets"), { recursive: true });
+      fs.writeFileSync(path.join(pmDir, "models.json"), "{}");
+      fs.writeFileSync(
+        path.join(pmDir, "manifest.json"),
+        JSON.stringify({
+          version: 1,
+          reason: "manual",
+          createdAt: "2026-08-24T12:00:00.000Z",
+          fileCount: 1,
+          machine: "x",
+        }),
+      );
+
+      const extraOnly = "2026-08-24T13-00-00-000Z-manual";
+      const extraDir = path.join(configDir, "backups", extraOnly);
+      fs.mkdirSync(path.join(extraDir, "skills-user"), { recursive: true });
+      fs.writeFileSync(path.join(extraDir, "skills-user", "SKILL.md"), "# s");
+      fs.writeFileSync(
+        path.join(extraDir, "manifest.json"),
+        JSON.stringify({
+          version: 1,
+          reason: "manual",
+          createdAt: "2026-08-24T13:00:00.000Z",
+          fileCount: 1,
+          machine: "x",
+        }),
+      );
+
+      const svc = new BackupService({
+        configDir,
+        extraDirs: [{ label: "skills-user", src: path.join(extraRoot, "skills") }],
+      });
+
+      expect(svc.availableScopes(all)).toEqual(["config", "presets", "models"]);
+      expect(svc.availableScopes(pm)).toEqual(["presets", "models"]);
+      expect(svc.availableScopes(extraOnly)).toEqual(["config"]);
+    } finally {
+      fs.rmSync(extraRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("availableScopes() is [] for a manifest-only backup and guards dirName traversal", async () => {
+    const dirName = "2026-08-24T14-00-00-000Z-manual";
+    const dir = path.join(configDir, "backups", dirName);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, "manifest.json"),
+      JSON.stringify({
+        version: 1,
+        reason: "manual",
+        createdAt: "2026-08-24T14:00:00.000Z",
+        fileCount: 0,
+        machine: "x",
+      }),
+    );
+    const svc = new BackupService({ configDir });
+
+    expect(svc.availableScopes(dirName)).toEqual([]);
+    for (const evil of ["../escape", "/abs/name", "a/b"]) {
+      expect(() => svc.availableScopes(evil)).toThrow("INVALID_BACKUP_NAME");
+    }
+  });
+
+  it("restore(dirName, ['presets']) restores ONLY presets — config and models keep their live mutations", async () => {
+    seedFullTree();
+    seedModelsFile();
+    const svc = new BackupService({ configDir, now: seqNow("2026-08-24T10:00:00.000Z") });
+    const snap = svc.create("manual");
+
+    fs.writeFileSync(path.join(configDir, "opencode.json"), '{"model":"mutated"}');
+    fs.writeFileSync(path.join(configDir, "presets", "work.json"), '{"name":"mutated"}');
+    fs.writeFileSync(path.join(configDir, "models.json"), '{"models":"mutated"}');
+
+    svc.restore(snap.dirName, ["presets"]);
+
+    expect(fs.readFileSync(path.join(configDir, "presets", "work.json"), "utf8")).toBe('{"name":"work"}');
+    expect(fs.readFileSync(path.join(configDir, "opencode.json"), "utf8")).toBe('{"model":"mutated"}');
+    expect(fs.readFileSync(path.join(configDir, "models.json"), "utf8")).toBe('{"models":"mutated"}');
+  });
+
+  it("restore(dirName, ['models']) restores a deleted models.json atomically", async () => {
+    seedFullTree();
+    seedModelsFile();
+    const svc = new BackupService({ configDir, now: seqNow("2026-08-24T10:00:00.000Z") });
+    const snap = svc.create("manual");
+
+    fs.rmSync(path.join(configDir, "models.json"));
+
+    svc.restore(snap.dirName, ["models"]);
+
+    expect(fs.readFileSync(path.join(configDir, "models.json"), "utf8")).toBe('{"models":[]}');
+    expect(fs.readFileSync(path.join(configDir, "presets", "work.json"), "utf8")).toBe('{"name":"work"}');
+  });
+
+  it("restore(dirName, undefined) restores everything including models.json", async () => {
+    seedFullTree();
+    seedModelsFile();
+    const svc = new BackupService({ configDir, now: seqNow("2026-08-24T10:00:00.000Z") });
+    const snap = svc.create("manual");
+
+    fs.writeFileSync(path.join(configDir, "opencode.json"), '{"model":"mutated"}');
+    fs.writeFileSync(path.join(configDir, "models.json"), '{"models":"mutated"}');
+
+    svc.restore(snap.dirName);
+
+    expect(fs.readFileSync(path.join(configDir, "opencode.json"), "utf8")).toBe('{"model":"glm"}');
+    expect(fs.readFileSync(path.join(configDir, "models.json"), "utf8")).toBe('{"models":[]}');
+  });
+
+  it("restore() of a scope the backup does not hold is a no-op for that scope", async () => {
+    seedFullTree();
+    seedModelsFile();
+    const svc = new BackupService({ configDir, now: seqNow("2026-08-24T10:00:00.000Z") });
+    const snap = svc.create("manual", undefined, ["presets"]);
+
+    fs.writeFileSync(path.join(configDir, "opencode.json"), '{"model":"mutated"}');
+    fs.writeFileSync(path.join(configDir, "presets", "work.json"), '{"name":"mutated"}');
+    fs.writeFileSync(path.join(configDir, "models.json"), '{"models":"mutated"}');
+
+    svc.restore(snap.dirName, ["config", "presets", "models"]);
+
+    expect(fs.readFileSync(path.join(configDir, "presets", "work.json"), "utf8")).toBe('{"name":"work"}');
+    expect(fs.readFileSync(path.join(configDir, "opencode.json"), "utf8")).toBe('{"model":"mutated"}');
+    expect(fs.readFileSync(path.join(configDir, "models.json"), "utf8")).toBe('{"models":"mutated"}');
   });
 });
 
