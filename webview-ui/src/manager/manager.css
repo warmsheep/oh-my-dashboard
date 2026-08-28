@@ -36,6 +36,18 @@
   display: none;
 }
 
+/* Preset tab: the matrix form ships its own full-height flex shell + sticky
+   footer (built for a standalone page) — inside the tab it must size to the
+   tab body, not the viewport. */
+.preset-tab {
+  min-height: auto;
+}
+
+.preset-empty {
+  padding: 18px 4px;
+  line-height: 1.7;
+}
+
 /* Quota tab: snapshot freshness line (the page title lives on the manager shell). */
 .qpage-meta {
   margin: 0 0 12px;

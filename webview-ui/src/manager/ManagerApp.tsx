@@ -1,10 +1,11 @@
 import type { ExtToWebview, ManagerTab } from "@shared/protocol";
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import App from "../App";
 import QuotaApp from "../quota/QuotaApp";
 import SettingsApp from "../settings/SettingsApp";
-import { getVSCodeApi, hasVSCodeApi, postToHost } from "../vscode";
-import { normalizeManagerTab } from "./helpers";
+import { getVSCodeApi, hasVSCodeApi, postToHost, setManagerTabState } from "../vscode";
+import { MANAGER_TABS, normalizeManagerTab } from "./helpers";
 
 function readPersistedTab(): ManagerTab {
   try {
@@ -15,15 +16,14 @@ function readPersistedTab(): ManagerTab {
   }
 }
 
-const TAB_LABELS: Record<ManagerTab, string> = { quota: "额度", settings: "设置" };
-const TABS: readonly ManagerTab[] = ["quota", "settings"];
+const TAB_LABELS: Record<ManagerTab, string> = { quota: "额度", settings: "设置", preset: "模板" };
 
 /**
- * Merged manager page: one tab bar, two always-mounted bodies. The ROOT listener
- * owns the `ready` handshake (sent once) and the `pong` liveness answer — both
- * must work regardless of the active tab, which is also why the tab contents are
- * CSS-toggled instead of unmounted (drafts, cookie inputs, and pending markers
- * survive tab switches).
+ * Merged manager page: one tab bar, three always-mounted bodies (模板/额度/设置).
+ * The ROOT listener owns the `ready` handshake (sent once) and the `pong`
+ * liveness answer — both must work regardless of the active tab, which is also
+ * why the tab contents are CSS-toggled instead of unmounted (preset drafts,
+ * cookie inputs, and pending markers survive tab switches).
  */
 export default function ManagerApp() {
   const [tab, setTab] = useState<ManagerTab>(readPersistedTab);
@@ -31,20 +31,16 @@ export default function ManagerApp() {
 
   const switchTab = useCallback((next: ManagerTab) => {
     setTab(next);
-    try {
-      getVSCodeApi().setState({ managerTab: next });
-    } catch {
-      /* tab persistence is best-effort */
-    }
+    setManagerTabState(next);
   }, []);
 
   // WAI-ARIA tabs pattern: roving focus — ArrowLeft/ArrowRight both switch and
   // move focus to the newly selected tab.
   const moveTab = (direction: 1 | -1): void => {
-    const index = TABS.indexOf(tab);
-    const next = TABS[(index + direction + TABS.length) % TABS.length];
+    const index = MANAGER_TABS.indexOf(tab);
+    const next = MANAGER_TABS[(index + direction + MANAGER_TABS.length) % MANAGER_TABS.length];
     switchTab(next);
-    tabRefs.current[TABS.indexOf(next)]?.focus();
+    tabRefs.current[MANAGER_TABS.indexOf(next)]?.focus();
   };
   const onTablistKeyDown = (event: React.KeyboardEvent<HTMLDivElement>): void => {
     if (event.key === "ArrowRight") {
@@ -63,7 +59,7 @@ export default function ManagerApp() {
         return;
       }
       if (msg.type === "managerNavigate") {
-        switchTab(msg.payload.tab);
+        switchTab(normalizeManagerTab(msg.payload.tab));
       } else if (msg.type === "quotaPing") {
         // Liveness probe answered at the root: the page must prove its JS context
         // is alive no matter which tab is showing.
@@ -89,11 +85,11 @@ export default function ManagerApp() {
       <div className="page manager-page">
         <header className="page-head">
           <h1>OpenCode 管理</h1>
-          <p>Coding Plan 额度与插件设置</p>
+          <p>模板矩阵编辑 · Coding Plan 额度 · 插件设置</p>
         </header>
 
         <div className="mtabs" role="tablist" aria-label="管理页分区" onKeyDown={onTablistKeyDown}>
-          {TABS.map((id, index) => (
+          {MANAGER_TABS.map((id, index) => (
             <button
               key={id}
               type="button"
@@ -130,6 +126,15 @@ export default function ManagerApp() {
           hidden={tab !== "settings"}
         >
           <SettingsApp />
+        </div>
+        <div
+          id="mpanel-preset"
+          className="mtab-body"
+          role="tabpanel"
+          aria-labelledby="mtab-preset"
+          hidden={tab !== "preset"}
+        >
+          <App />
         </div>
       </div>
     </main>
