@@ -958,6 +958,81 @@ function tests(): TestCase[] {
       },
     },
     {
+      name: "模板 tab list view: boot + navigate push presetList; presetEdit starts the session in-panel",
+      fn: async () => {
+        try {
+          await vscode.commands.executeCommand(CMD.capturePreset, "e2e-list");
+          const bridge = await openPresetTabReused(PRESET_NAME);
+
+          // Boot push (fired at ready during the previous test) and the navigate
+          // push (this reveal) both deliver the preset list powering the default view.
+          const listNames = (message: PanelMessage | undefined): string[] => {
+            const presets = (message?.payload as { presets?: Array<{ name?: unknown }> } | undefined)?.presets ?? [];
+            return presets.map((preset) => String(preset.name));
+          };
+          const lists = bridge.outbound.filter((message) => message.type === "presetList");
+          assert.ok(lists.length >= 2, "boot AND navigate must each push a presetList message");
+          // Temporal contract of this assertion: the boot push predates the
+          // capturePreset("e2e-list") call above, so only the reveal-time push is
+          // guaranteed to list it.
+          const latestNames = listNames(lists[lists.length - 1]);
+          assert.ok(
+            latestNames.includes(PRESET_NAME),
+            `latest presetList must contain ${PRESET_NAME}, got: ${latestNames.join(",")}`,
+          );
+          assert.ok(
+            latestNames.includes("e2e-list"),
+            `latest presetList must contain e2e-list, got: ${latestNames.join(",")}`,
+          );
+
+          // In-panel click (no tree/context menu): presetEdit begins the named
+          // session through the same begin/init path the editPreset command drives.
+          const before = bridge.outbound.length;
+          bridge.deliver({ type: "presetEdit", payload: { name: "e2e-list" } });
+          await pollUntil(
+            () =>
+              bridge.outbound
+                .slice(before)
+                .some(
+                  (message) =>
+                    message.type === "init" &&
+                    (message.payload as { preset?: { name?: unknown } })?.preset?.name === "e2e-list",
+                ),
+            5_000,
+            "presetEdit(e2e-list) must produce an init for e2e-list",
+          );
+
+          // A malformed presetEdit (bad payload shape) is dropped without a reply.
+          const beforeGarbage = bridge.outbound.length;
+          bridge.deliver({ type: "presetEdit", payload: { name: "" } });
+          await new Promise((resolve) => setTimeout(resolve, 200));
+          assert.equal(
+            bridge.outbound.slice(beforeGarbage).some((message) => message.type === "init"),
+            false,
+            "malformed presetEdit must not produce an init",
+          );
+
+          // EXTERNAL mutation sync: a tree-side capture (refreshAll → refreshViews)
+          // must re-push the preset list to the open panel, same contract as the
+          // models/settings external-change pushes.
+          const beforeCapture = bridge.outbound.length;
+          await vscode.commands.executeCommand(CMD.capturePreset, "e2e-ext");
+          await pollUntil(
+            () =>
+              bridge.outbound
+                .slice(beforeCapture)
+                .some((message) => message.type === "presetList" && listNames(message).includes("e2e-ext")),
+            10_000,
+            "tree-side capturePreset must re-push presetList containing e2e-ext to the open panel",
+          );
+        } finally {
+          // Leave no fixture behind: later tests snapshot the presets dir.
+          fs.rmSync(path.join(configDir, "presets", "e2e-list.json"), { force: true });
+          fs.rmSync(path.join(configDir, "presets", "e2e-ext.json"), { force: true });
+        }
+      },
+    },
+    {
       name: "restoreBackup(<manual dir>) restores; configs still parseable",
       fn: async () => {
         assert.ok(manualBackupDirName, "requires a manual backup from the previous step");
