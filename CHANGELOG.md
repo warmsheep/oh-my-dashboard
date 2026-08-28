@@ -2,6 +2,14 @@
 
 > 版本与日期以 git 历史为准；0.8.0–0.14.0、0.16.x、0.18.0 等中间版本为本地打包、版本号未入库，相关变更归并入下一个入库版本。
 
+## 0.32.0 (2026-08-28)
+
+- **模板编辑器并入「OpenCode 管理」面板**：原先每模板一个独立编辑器窗口（多面板）收敛为管理面板第三个「模板」选项卡（模板/额度/设置）；「编辑模板（矩阵表单）」命令改为打开/切换到该选项卡并载入对应模板。多面板收缩为**单会话**——编辑 B 时 A 的未保存草稿按模板名分槽保留（webview state 命名空间化），切回即恢复；宿主侧 workspaceState 崩溃恢复快照语义不变
+- 「取消」语义改为**清空模板会话**（页面回空态提示 + 宿主清除恢复草稿），不再关闭面板——管理面板承载额度/设置不再随模板编辑退出；未保存修改时仍先弹「确认放弃」
+- 架构：`presetEditorHost` 重构为纯会话控制器（begin/save/noteDirty/cancel，去除面板管理与按名 re-key）；`managerPanelHost` 消息泵统一分发 save/dirty/cancel 并新增 `openPresetEditorTab` 入口与 `notifyManagerPanelModelsChanged` 模型推送（lazy provider 语义保留）；webview 构建收敛为 **manager 单入口**（删除 index.html 入口与 `PRESET_EDITOR_VIEW_TYPE`）
+- e2e：模板段全部改走 manager 单桥（创建捕获一次、后续 reveal 复用 + init 轮询匹配模板名）；rename-on-save 断言从「面板 re-key」改为「会话跟随新名」；cancel 用例改为「面板保持 + 会话可重启」，段末重置单例保证额度段冷启动
+- 浏览器实测：三选项卡切换、矩阵编辑、脏标记、切卡草稿保留、dirty 取消确认与放弃回空态
+
 ## 0.31.3 (2026-08-27)
 
 - 管理面板选项卡悬停背景改为浅灰半透明（`rgba(128,128,128,0.18)`，替代原深色 `--vscode-list-hover-background`），深浅主题下均呈浅灰提示

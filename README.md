@@ -10,7 +10,7 @@ VSCode 扩展：管理 [opencode](https://opencode.ai) 与 [oh-my-opencode](http
   - skills 兼容主流 agent 目录约定，家目录下显示为「全局」：全局扫描 `~/.agents/skills`、`~/.claude/skills`、配置目录 `skills/` 等，项目级扫描 `.agents/`、`.claude/`、`.opencode/` 等下的 `skills/`（完整候选序见 AGENTS.md）；跟随符号链接，需含 `SKILL.md`，仅显示实际存在的目录
   - agent/category 节点点击 → QuickPick 选模型与 variant，程序化写回（omo 目标写 `reasoning` 键，同时清理冲突的 `variant`/`models` 链）
 - **模型**：清单分组展示（opencode.json / models.json 来源标注）；不内置模型，仅内置供应商白名单，激活后自动从 models.dev 联网初始化空清单；「模型」标题右侧行内按钮：添加模型、**更新模型清单**（从 models.dev 获取当前清单所涉供应商的最新模型并合并进来，用户手动添加的模型不会被覆盖删除）、打开清单文件
-- **模板**：从当前配置捕获；Webview 矩阵编辑器（批量设模型、逐行 variant）；应用采用合并语义（模板未列出的键不动）
+- **模板**：从当前配置捕获；矩阵编辑器（批量设模型、逐行 variant，位于管理面板「模板」选项卡）；应用采用合并语义（模板未列出的键不动）
 - **插件**：列出 opencode.json `plugin` 数组声明的插件（npm 包名可带 `@版本`，或 `~/` `./` `/` `file://` 本地路径），按 opencode 运行时缓存布局解析（兼容旧版平铺缓存），回退配置目录；展示安装版本 / 未安装 / 本地路径 / 缺失状态；点击标题打开配置文件，展开浏览插件目录文件（排除嵌套 `node_modules` 与 `.git`），单击文件即可预览编辑
 - **备份**：手动「立即备份」会要求输入备份名称（名称仅用于展示，时间戳自动附带且不入名称）；历史备份可右键「重命名备份」；manifest 记录原因；与当前配置 diff 对比；恢复时明确警告覆盖（应用/恢复不自动产生备份）
   - **导入/导出**：备份可导出为 zip（跨平台纯 JS 实现三平台通用，含中文名时置 UTF-8 标志位）；导入时校验 manifest、防目录遍历/zip 炸弹（解压前按头部声明尺寸限流），同名已存在时自动加 `-import-N` 后缀
@@ -74,8 +74,8 @@ src/core/      纯逻辑（无 vscode 依赖，vitest 单测）
   atomicFile / pathSafety / errors / watchManager  基础设施
 src/tree/      树节点纯构建器 + 单一分区 Explorer
 src/ui/        命令 / QuickPick / 状态栏（模板 + 额度）/ 设置读写
-src/webview/   Webview 宿主（模板编辑器 + 管理面板〔额度/设置选项卡〕；CSP + postMessage 协议）
-webview-ui/    React 前端（Vite 多入口：模板矩阵表单 + 管理页〔额度/设置选项卡〕，VSCode CSS 变量主题）
+src/webview/   Webview 宿主（管理面板〔模板/额度/设置选项卡〕+ 模板会话控制器；CSP + postMessage 协议）
+webview-ui/    React 前端（Vite 单入口管理页：模板矩阵编辑 + 额度 + 设置三选项卡，VSCode CSS 变量主题）
 ```
 
 数据位置：模板 `~/.config/opencode/presets/*.json`；备份 `~/.config/opencode/backups/<ISO时间戳>-manual/`（含 `manifest.json` 与展示名称，覆盖检测到的实际配置文件与 `~/.agents/skills`）。模板应用/捕获的写入目标由本机检测结果决定（`~/.omo/omo.jsonc` 或旧版 `oh-my-opencode.json[c]`）。
