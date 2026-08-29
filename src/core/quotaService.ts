@@ -424,6 +424,12 @@ export interface QuotaBarSegment {
    * (microsoft/vscode#185089), and only id-keyed entries reconcile reliably.
    */
   id: string;
+  /**
+   * Status-bar item display name ("<provider label> 额度", e.g. "Kimi 额度") — what the
+   * renderer shows for the item in the status-bar context menu / accessibility
+   * surface; shared by all of one provider's window/balance/error segments.
+   */
+  name: string;
   text: string;
   color: QuotaSegmentColor;
 }
@@ -451,7 +457,12 @@ export function formatQuotaBar(snapshot: QuotaSnapshot): QuotaBar {
   for (const provider of snapshot.providers) {
     const stale = provider.staleFetchedAt !== undefined;
     if (provider.error !== null && !stale) {
-      segments.push({ id: `${provider.providerId}:error`, text: `${provider.label} ?`, color: "neutral" });
+      segments.push({
+        id: `${provider.providerId}:error`,
+        name: `${provider.label} 额度`,
+        text: `${provider.label} ?`,
+        color: "neutral",
+      });
       continue;
     }
     const marker = stale ? "~" : "";
@@ -467,6 +478,7 @@ export function formatQuotaBar(snapshot: QuotaSnapshot): QuotaBar {
       }
       segments.push({
         id: `${provider.providerId}:${kind}`,
+        name: `${provider.label} 额度`,
         text: `${first ? `${provider.label} ` : ""}${marker}${Math.round(remaining)}%/${WINDOW_SHORT_LABELS[kind]}`,
         color: remainingColor(remaining),
       });
@@ -475,6 +487,7 @@ export function formatQuotaBar(snapshot: QuotaSnapshot): QuotaBar {
     if (first && provider.balances?.total != null && provider.balances.currency) {
       segments.push({
         id: `${provider.providerId}:balance`,
+        name: `${provider.label} 额度`,
         text: balanceSegmentText(provider.label, provider.balances.total, provider.balances.currency, stale),
         color: balanceColor(provider.balances.total),
       });

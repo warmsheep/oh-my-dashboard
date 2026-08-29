@@ -158,7 +158,7 @@ export function createQuotaStatusBar(deps: QuotaStatusBarDeps): QuotaStatusBar {
   // One status-bar item per (provider, window) segment — VSCode items are single-colored, so
   // per-window colors require separate items. Higher priority sits further left (right-aligned).
   // Item pool: when the segment count is unchanged, existing StatusBarItems are updated in
-  // place (text/color/tooltip only); a full rebuild happens solely when the count changes.
+  // place (text/color/name/tooltip); a full rebuild happens solely when the count changes.
   // Recreating every item on each 30s refresh caused constant create/dispose RPC + status-bar
   // relayout churn in the renderer.
   //
@@ -181,7 +181,7 @@ export function createQuotaStatusBar(deps: QuotaStatusBarDeps): QuotaStatusBar {
       ? []
       : segments.length > 0
         ? segments
-        : [{ id: "neutral", text: "Coding Plan", color: "neutral" as const }];
+        : [{ id: "neutral", name: "Coding Plan 额度", text: "Coding Plan", color: "neutral" as const }];
     const tooltip =
       segments.length === 0 && !snapshot
         ? "点击查询 Coding Plan 剩余额度"
@@ -200,13 +200,16 @@ export function createQuotaStatusBar(deps: QuotaStatusBarDeps): QuotaStatusBar {
           vscode.StatusBarAlignment.Right,
           base - index,
         );
-        item.name = "Coding Plan 额度";
         item.command = CMD.quotaRefresh;
         return item;
       });
     }
     rows.forEach((row, index) => {
       const item = items[index];
+      // Name updates EVERY render (not only on pool rebuild): a count-preserving
+      // composition change (e.g. neutral fallback → single-segment provider, or
+      // cross-provider swaps) reuses pooled items and must relabel them.
+      item.name = row.name;
       item.text = index === 0 ? `$(bolt) ${row.text}` : row.text;
       item.color = palette[row.color];
       item.tooltip = tooltip;

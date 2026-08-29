@@ -608,7 +608,9 @@ describe("formatQuotaBar — balance-only providers", () => {
         },
       ],
     });
-    expect(bar.segments).toEqual([{ text: "DeepSeek ¥257.06", color: "green", id: "deepseek:balance" }]);
+    expect(bar.segments).toEqual([
+      { id: "deepseek:balance", name: "DeepSeek 额度", text: "DeepSeek ¥257.06", color: "green" },
+    ]);
   });
 
   it("colors balance segments: 20–100 yellow (boundaries inclusive)", () => {
@@ -627,7 +629,9 @@ describe("formatQuotaBar — balance-only providers", () => {
           },
         ],
       });
-      expect(bar.segments).toEqual([{ text: `DeepSeek ¥${total}`, color: "yellow", id: "deepseek:balance" }]);
+      expect(bar.segments).toEqual([
+        { id: "deepseek:balance", name: "DeepSeek 额度", text: `DeepSeek ¥${total}`, color: "yellow" },
+      ]);
     }
   });
 
@@ -646,7 +650,9 @@ describe("formatQuotaBar — balance-only providers", () => {
         },
       ],
     });
-    expect(bar.segments).toEqual([{ text: "DeepSeek $5.5", color: "red", id: "deepseek:balance" }]);
+    expect(bar.segments).toEqual([
+      { id: "deepseek:balance", name: "DeepSeek 额度", text: "DeepSeek $5.5", color: "red" },
+    ]);
   });
 
   it("skips providers with neither windows nor a parseable balance", () => {
@@ -1107,10 +1113,10 @@ describe("formatQuotaBar", () => {
       ],
     });
     expect(bar.segments).toEqual([
-      { text: "Kimi 100%/5h", color: "green", id: "kimi:5h" },
-      { text: "72%/7d", color: "green", id: "kimi:weekly" },
-      { text: "60%/30d", color: "green", id: "kimi:monthly" },
-      { text: "GLM 91%/5h", color: "green", id: "glm:5h" },
+      { id: "kimi:5h", name: "Kimi 额度", text: "Kimi 100%/5h", color: "green" },
+      { id: "kimi:weekly", name: "Kimi 额度", text: "72%/7d", color: "green" },
+      { id: "kimi:monthly", name: "Kimi 额度", text: "60%/30d", color: "green" },
+      { id: "glm:5h", name: "GLM 额度", text: "GLM 91%/5h", color: "green" },
     ]);
   });
 
@@ -1180,7 +1186,7 @@ describe("formatQuotaBar", () => {
         { providerId: "mimo", label: "MiMo", plan: null, configured: false, error: null, windows: [], balances: null },
       ],
     });
-    expect(errored.segments).toEqual([{ text: "Kimi ?", color: "neutral", id: "kimi:error" }]);
+    expect(errored.segments).toEqual([{ id: "kimi:error", name: "Kimi 额度", text: "Kimi ?", color: "neutral" }]);
     expect(formatQuotaBar({ fetchedAt: "x", providers: [] }).segments).toEqual([]);
   });
 
