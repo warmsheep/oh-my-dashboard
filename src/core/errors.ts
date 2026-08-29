@@ -26,6 +26,8 @@ export const FRIENDLY_ERRORS: Record<string, string> = {
   MIMO_COOKIE_INVALID: "MiMo Cookie 格式无法识别，请粘贴完整的 Cookie 字符串",
   FREE_PORT_UNAVAILABLE: "无法获取可用的随机端口，请稍后重试",
   TMUX_NOT_FOUND: "未检测到 tmux，请先安装后重试（Debian/Ubuntu: apt install tmux，macOS: brew install tmux）",
+  TMUX_NOT_FOUND_WINDOWS:
+    "Windows 原生不支持 tmux——请用 Remote-WSL 打开工作区，并在 WSL 内安装 tmux（sudo apt install tmux）后重试",
 };
 
 /** Map a NodeJS errno code to a Chinese, action-oriented message. */

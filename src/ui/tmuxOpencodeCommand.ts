@@ -113,7 +113,8 @@ async function listTmuxSessions(): Promise<Set<string>> {
  * `tmux` hosting the opencode TUI on a pinned random port (see core/tmuxOpencode.ts for
  * why the port is mandatory for oh-my-openagent team mode). Idempotent: when the
  * per-workspace session already exists it simply attaches (keeping the original port).
- * Throws TMUX_NOT_FOUND for the run() wrapper to surface as a Chinese notification.
+ * Throws TMUX_NOT_FOUND (TMUX_NOT_FOUND_WINDOWS on a local-Windows host, with WSL
+ * guidance) for the run() wrapper to surface as a Chinese notification.
  */
 export async function openTmuxOpencode(deps: TmuxOpencodeDeps): Promise<void> {
   const folder = vscode.workspace.workspaceFolders?.[0];
@@ -124,7 +125,10 @@ export async function openTmuxOpencode(deps: TmuxOpencodeDeps): Promise<void> {
   }
   const version = await tmuxVersionOutput();
   if (version === null) {
-    throw new Error("TMUX_NOT_FOUND");
+    // Windows has no native tmux and this command is tmux-centric end to end (the
+    // oh-my-openagent team visualization it enables requires POSIX tmux anyway), so a
+    // local-Windows host degrades here with WSL guidance instead of the apt/brew hint.
+    throw new Error(process.platform === "win32" ? "TMUX_NOT_FOUND_WINDOWS" : "TMUX_NOT_FOUND");
   }
   // Exact-match attach is guaranteed by the accurate list-sessions probe; tmux always
   // prefers an exact session-name match over its unique-prefix fallback.
