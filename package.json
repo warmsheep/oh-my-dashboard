@@ -165,6 +165,11 @@
         "command": "opencode.openSettings",
         "title": "打开设置",
         "category": "OpenCode"
+      },
+      {
+        "command": "opencode.openTmuxOpencode",
+        "title": "Open Tmux Opencode",
+        "category": "OpenCode"
       }
     ],
     "menus": {

@@ -29,6 +29,7 @@ import {
   VARIANTS,
 } from "../core/types";
 import { CURRENT_PRESET_BADGE } from "../tree/nodes";
+import { openTmuxOpencode } from "./tmuxOpencodeCommand";
 import {
   agentModelRequestFromArg,
   agentTargetFromArg,
@@ -151,6 +152,14 @@ export function registerCommands(ctx: vscode.ExtensionContext, deps: ExtensionDe
       run(deps, "打开模型清单失败", () => openModelsFile(deps)),
     ),
     vscode.commands.registerCommand(CMD.refreshTree, () => deps.refreshAll()),
+    vscode.commands.registerCommand(CMD.openTmuxOpencode, () =>
+      run(deps, "打开 Tmux Opencode 失败", () =>
+        openTmuxOpencode({
+          log: deps.log,
+          launchEnabled: ctx.extensionMode !== vscode.ExtensionMode.Test,
+        }),
+      ),
+    ),
   ];
   ctx.subscriptions.push(...disposables);
 }
