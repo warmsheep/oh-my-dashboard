@@ -170,6 +170,11 @@
         "command": "opencode.openTmuxOpencode",
         "title": "Open Tmux Opencode",
         "category": "OpenCode"
+      },
+      {
+        "command": "opencode.openBaseOpencode",
+        "title": "Open Base Opencode",
+        "category": "OpenCode"
       }
     ],
     "menus": {

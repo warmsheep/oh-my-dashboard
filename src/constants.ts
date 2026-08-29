@@ -32,6 +32,7 @@ export const CMD = {
   quotaConfigureMimo: "opencode.quotaConfigureMimo",
   openSettings: "opencode.openSettings",
   openTmuxOpencode: "opencode.openTmuxOpencode",
+  openBaseOpencode: "opencode.openBaseOpencode",
 } as const;
 
 export const VIEW = {

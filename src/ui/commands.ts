@@ -29,7 +29,7 @@ import {
   VARIANTS,
 } from "../core/types";
 import { CURRENT_PRESET_BADGE } from "../tree/nodes";
-import { openTmuxOpencode } from "./tmuxOpencodeCommand";
+import { openBaseOpencode } from "./baseOpencodeCommand";
 import {
   agentModelRequestFromArg,
   agentTargetFromArg,
@@ -46,6 +46,7 @@ import {
   toNode,
 } from "./commandArgs";
 import type { AgentTarget } from "./commandArgs";
+import { openTmuxOpencode } from "./tmuxOpencodeCommand";
 
 export interface ExtensionDeps {
   configStore: ConfigStore;
@@ -155,6 +156,14 @@ export function registerCommands(ctx: vscode.ExtensionContext, deps: ExtensionDe
     vscode.commands.registerCommand(CMD.openTmuxOpencode, () =>
       run(deps, "打开 Tmux Opencode 失败", () =>
         openTmuxOpencode({
+          log: deps.log,
+          launchEnabled: ctx.extensionMode !== vscode.ExtensionMode.Test,
+        }),
+      ),
+    ),
+    vscode.commands.registerCommand(CMD.openBaseOpencode, () =>
+      run(deps, "打开 Base Opencode 失败", () =>
+        openBaseOpencode({
           log: deps.log,
           launchEnabled: ctx.extensionMode !== vscode.ExtensionMode.Test,
         }),
