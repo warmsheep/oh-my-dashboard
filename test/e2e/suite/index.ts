@@ -737,6 +737,14 @@ function tests(): TestCase[] {
       },
     },
     {
+      name: "openBaseOpencode resolves as a hermetic no-op under ExtensionMode.Test",
+      fn: async () => {
+        const before = vscode.window.terminals.length;
+        await vscode.commands.executeCommand(CMD.openBaseOpencode);
+        assert.equal(vscode.window.terminals.length, before, "openBaseOpencode must not create terminals in Test mode");
+      },
+    },
+    {
       name: "openConfigFile(node.filePath) opens opencode.json as text document",
       fn: async () => {
         // commands.ts accepts a NodeLike arg with filePath (tree-item shape).
