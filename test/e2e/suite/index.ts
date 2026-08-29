@@ -726,6 +726,17 @@ function tests(): TestCase[] {
       },
     },
     {
+      name: "openTmuxOpencode resolves as a hermetic no-op under ExtensionMode.Test",
+      fn: async () => {
+        // Test mode skips tmux probes and terminal creation on purpose (the sandbox
+        // must never spawn real tmux/opencode processes); the command still resolves
+        // without side effects on the terminal set.
+        const before = vscode.window.terminals.length;
+        await vscode.commands.executeCommand(CMD.openTmuxOpencode);
+        assert.equal(vscode.window.terminals.length, before, "openTmuxOpencode must not create terminals in Test mode");
+      },
+    },
+    {
       name: "openConfigFile(node.filePath) opens opencode.json as text document",
       fn: async () => {
         // commands.ts accepts a NodeLike arg with filePath (tree-item shape).
