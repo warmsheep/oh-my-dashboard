@@ -2,6 +2,27 @@
 
 > 版本与日期以 git 历史为准；0.8.0–0.14.0、0.16.x、0.18.0 等中间版本为本地打包、版本号未入库，相关变更归并入下一个入库版本。
 
+## 0.36.3 (2026-08-29)
+
+- **修复：team 成员窗格不跟随主题锁定（仍为暗色）**——0.36.2 的锁定仅导出在主 pane 命令内（`export XDG_STATE_HOME=…`），而 oh-my-openagent 经 `split-window` 拉起的成员窗格继承的是**会话环境**，读不到该导出。现改为：扩展侧创建逐次状态目录（`fs.mkdtemp`）并把 kv 种子写入 **`<目录>/opencode/kv.json`**（路径契约收口在 core `tuiThemeKvPath` 并单测锁定——此前一度误写到目录根导致静默失效），主 pane 仍显式导出，同时追加 `tmux set-environment -t <会话> XDG_STATE_HOME <目录>` 使成员窗格经会话环境继承同一锁定。真机（tmux 3.3a）验证：主窗格与仅靠继承的成员窗格**双双渲染亮色板**（48;5;15/255/254）。顺带收益：pane 命令不再含 `VAR=$(…)` 构造（fish 解析错误源），fish 探测跳过分支删除，fish 3.0+ 现在也能获得主题锁定
+- 已知边界：0.36.2 前创建的存量会话 attach 时不带该会话环境，其成员窗格仍为自然回退——删除会话重建即获得锁定；主题仍为启动时快照（跟随当时 VSCode 配色）；状态目录仍不回收；用户若手动把 `XDG_STATE_HOME` 加入 tmux `update-environment`（非默认），attach 时会话环境可能被清
+
+## 0.36.2 (2026-08-29)
+
+- **Open Tmux Opencode 主题跟随 VSCode 明暗配色**：启动时读取当前 VSCode 配色（Light/HighContrastLight → 亮色，其余 → 暗色）并让 opencode TUI 以对应模式启动。机制（opencode TUI 源码 + 真机实证）：TUI 的明/暗是 **mode** 而非主题名，解析链为 `kv theme_mode_lock ?? 终端 OSC 背景探测 ?? 暗色`——tmux 下 OSC 探测永远无响应，故此前恒为暗色；且无任何环境变量/配置键可覆盖 mode。现通过逐次重定向 `XDG_STATE_HOME` 到临时状态目录并预置 `kv.json` 的 `theme_mode_lock` 锁定模式（仅影响本 pane）：实测 light 锁全界面翻转为亮色板（背景 48;5;15/254/251），dark 锁保持暗色板（232/238/235）
+- 已知取舍：TUI 内部的明暗切换仅对该 pane 生效（每次启动以 VSCode 主题为准）；状态目录中 session/model 指针逐次重置（会话数据本体在共享 data 目录，不受影响）；临时状态目录不回收（exec 替换 shell 无法 trap，量级极小）；team 成员窗格不继承该锁（沿用自然回退）；`default-shell` 为 fish 时自动跳过主题锁（`VAR=$(…)` 是 fish 语法错误，会导致整个 pane 命令解析失败）；`${TMPDIR:-/tmp}` 引号化以防含空格路径分词，前缀任何失败都会在 export 前中止（降级为正常未锁定启动而非损坏）
+- attach 路径不变（沿用会话既有主题）；e2e 沙箱（ExtensionMode.Test）仍为无副作用跳过
+
+## 0.36.1 (2026-08-29)
+
+- **修复：tmux 终端内文字全部黑色**——根因（tmux 1.8 实测）：新 pane 环境为 `TERM=screen`（tmux 默认 default-terminal，无色彩能力）+ 从 VSCode 终端泄漏进 tmux server 环境的 `COLORTERM=truecolor`，两个矛盾信号使 opencode TUI 放弃配色（实测 pane 输出仅剩 `[30m` 黑色码，甚至完全不渲染）。现按 tmux 能力自动修复：default-terminal 不含 256color/direct/truecolor 时导出 `TERM=screen-256color`（pane 内 export + 会话级 `set-option default-terminal`，oh-my-openagent team 成员窗格后续切分时同样继承）；tmux < 3.2 时将 pane 与会话级 `COLORTERM` 置空（`export COLORTERM=`——fish 无 unset 内建故用空串赋值，对各类 TUI 等效于无 truecolor；旧 tmux 无法转换 truecolor 转义只会渲染成黑，3.2+ 自行管理 COLORTERM 故不干预）；未知探测结果一律走保守修复分支。创建流程相应改为「分离创建 → 配置会话 → attach」（`;` 链保留 probe→create 竞态韧性，attach 路径不变）。经真实 tmux 1.8 + opencode 端到端验证：修复前 pane 无任何色码，修复后 256 色完整渲染（38;5;*/48;5;* 全套），会话内新建窗格（模拟 team 成员）环境正确继承
+- 注意：attach 不会给旧逻辑创建的存量会话补配——升级后请对既有黑字会话执行一次 `tmux kill-session -t <会话名>` 再重新运行命令
+
+## 0.36.0 (2026-08-29)
+
+- **状态栏额度分段按供应商命名**：额度各分段的状态栏条目名从统一的「Coding Plan 额度」改为「Kimi 额度」「GLM 额度」等（右键状态栏菜单与无障碍面板可见；分段正文不变），可见而未配置时的中性回退入口保留原名；`QuotaBarSegment` 新增 `name` 字段（core 单测同步）
+- **新命令「OpenCode: Open Tmux Opencode」**：在编辑器区域新开终端页，经 tmux 启动 opencode TUI 并绑定随机空闲端口（`export OPENCODE_PORT=<P>; exec opencode --port <P>`）。调研确认（opencode tui.ts/network.ts/server.ts + oh-my-openagent layout.ts/resolve-server-url.ts 源码，及真实 tmux 分离会话实测）：TUI 不带 `--port/--hostname/--mdns` 时完全不起 TCP 服务（进程内 RPC，插件 `ctx.serverUrl` 为死的 localhost:4096），oh-my-openagent team 模式的 `isServerRunning` 门会静默跳过成员窗格布局；带 `--port` 后 `ctx.serverUrl` 携带真实端口，team 模式经 `opencode attach <url>` 切窗格拉起成员。tmux 会话按工作区名 sanitize 命名（`opencode-<slug>`，无工作区为 `opencode`），重复执行 attach 已有会话（保留原端口）；会话存在性探测用 `list-sessions` + 代码内精确比对——旧版 tmux 对 `-t` 目标做唯一前缀匹配，`opencode` 会被误连到 `opencode-<其他工作区>`（tmux 1.8 实测；`=<name>` 精确前缀旧版不支持）；工作目录在 pane 内经 `cd` 设置（`new-session -c` 需 tmux 1.9+，CentOS 7 的 1.8 不支持，已实测）；缺 tmux 时报 `TMUX_NOT_FOUND` 中文安装指引；e2e（ExtensionMode.Test）下跳过探测与终端创建保持沙箱 hermetic（真实链路经「tmux 分离会话 + curl 端口 200」人工验证）
+
 ## 0.35.1 (2026-08-28)
 
 - **修复：点击「打开设置」应激活第一个选项卡**——0.35.0 的「配置」选项卡上线后，齿轮/命令面板「打开设置」仍导航到第三个「设置」选项卡；现改为落在最前的**配置选项卡**，且该导航同时附带一次 settingsInit 推送，保留入口「设置数据始终新鲜」的历史语义（用户随后点「设置」选项卡看到的即为最新值）。e2e 断言同步更新（reveal 导航目标、boot 锚点）

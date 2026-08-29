@@ -15,6 +15,7 @@ VSCode 扩展：管理 [opencode](https://opencode.ai) 与 [oh-my-opencode](http
 - **备份**：手动「立即备份」会要求输入备份名称（名称仅用于展示，时间戳自动附带且不入名称），并可勾选仅包含 配置/模板/模型；历史备份可右键「重命名备份」，恢复时可只恢复备份中实际存在的部分范围；manifest 记录原因；与当前配置 diff 对比；恢复时明确警告覆盖（应用/恢复不自动产生备份）
   - **导入/导出**：备份可导出为 zip（跨平台纯 JS 实现三平台通用，含中文名时置 UTF-8 标志位）；导入时校验 manifest、防目录遍历/zip 炸弹（解压前按头部声明尺寸限流），同名已存在时自动加 `-import-N` 后缀
 - **状态栏**：显示当前模板，点击快速切换（`Ctrl+Alt+P`）
+- **Open Tmux Opencode**（命令面板）：在编辑器区域新开一个终端页，通过 tmux 启动 opencode TUI，并绑定一个随机空闲端口（同时导出 `OPENCODE_PORT` 供 oh-my-openagent 兜底）——这是 oh-my-openagent agent team 模式的兼容启动方式（opencode TUI 必须带 `--port` 才会启用真实 HTTP 服务，team 模式据此用 `opencode attach` 拉起成员窗格）。tmux 会话按工作区命名（`opencode-<项目名>`），重复执行直接 attach 已有会话（保留原端口）；自动修正 pane 颜色环境（TERM 升级至 256 色、旧 tmux 清空泄漏的 COLORTERM，team 成员窗格同样继承），避免 TUI 全黑；**启动主题跟随 VSCode 明暗配色**（亮色主题 → opencode 亮色模式，暗色 → 暗色；tmux 下终端背景探测失效，通过逐次状态目录锁定 TUI 的 `theme_mode_lock` 并写入会话环境实现，主 Agent 与 team 成员窗格一并继承，不改动全局配置）；未安装 tmux 时给出中文安装指引。team 模式本身需在 `~/.omo/omo.jsonc` 开启 `team_mode.enabled`（可视化另需 `tmux_visualization`）
 - **Coding Plan 额度**（状态栏右侧）：实时显示 Kimi / GLM / MiMo / DeepSeek 剩余额度（5 小时额度、周额度；MiMo 为月额度+余额；DeepSeek 为按量计费余额）
   - 点击打开**管理面板**（类设置页的编辑器窗口，与「打开设置」同页），「额度/设置」选项卡切换；额度页按供应商分组展示各窗口进度条、剩余百分比与重置时间，每组可单独「刷新」，底部「刷新全部」；面板打开期间跟随自动刷新实时更新
   - 每个供应商分组头部有**「状态栏」开关**：关闭后状态栏不再显示该供应商，也不再定时刷新其额度（仅在管理面板打开期间刷新，节省请求）；开关状态存于 `quota.json` 的 `statusBar` 块
