@@ -2,6 +2,15 @@
 
 > 版本与日期以 git 历史为准；0.8.0–0.14.0、0.16.x、0.18.0 等中间版本为本地打包、版本号未入库，相关变更归并入下一个入库版本。
 
+## 0.38.0 (2026-08-29)
+
+- **Open Base Opencode 同样固定随机端口**：启动命令改为 `opencode --port <随机空闲端口>`（复用 core `pickFreePort`，探测失败经 `FREE_PORT_UNAVAILABLE` 中文降级），终端环境经 `TerminalOptions.env`（合并模式）附带 `OPENCODE_PORT` 兜底（与 tmux 启动一致，覆盖旧版 opencode 的 ctx.serverUrl 缺失场景）——其他终端可 `opencode attach http://127.0.0.1:<P>`、外部工具可直连；启动后弹出端口提示。纯数字 flag 保持 bash/zsh/fish/PowerShell/cmd 全方言兼容，三平台原生支持不变
+
+## 0.37.0 (2026-08-29)
+
+- **新命令「OpenCode: Open Base Opencode」**：编辑器区域普通终端直接运行 opencode TUI——无 tmux/端口固定/颜色主题修正（那些均为 tmux pane 环境的补丁；直连 VSCode 终端时 TUI 原生 truecolor + OSC 背景探测自动明暗）。跨平台设计：仅发送裸 `opencode`（bash/zsh/fish/PowerShell/cmd 通用），工作区定位用终端 `cwd` 选项而非 `cd` 命令，零引号零平台分支；**Linux/macOS/本地 Windows 三平台原生支持**（opencode 缺失时由终端自身报错，不探测 exthost PATH 以免 nvm/Homebrew 误判）；ExtensionMode.Test 无副作用保 e2e hermetic
+- **Windows/macOS 兼容性补齐（Open Tmux Opencode 平台矩阵）**：macOS 原生支持（zsh/bash 终端、版本探测驱动的颜色/主题策略均平台无关，缺 tmux 时中文提示已含 brew 指引）；Windows 经 Remote-WSL 完整支持（exthost 运行于 WSL Linux，行为与 Linux 一致）；本地 Windows exthost 缺 tmux 时新增专用错误码 `TMUX_NOT_FOUND_WINDOWS`——给出 Remote-WSL + WSL 内安装 tmux 的指引（替代不适用的 apt/brew 提示），此前的优雅降级路径（探测失败→提示、不建终端、不崩溃）保持不变。README 补平台支持说明
+
 ## 0.36.3 (2026-08-29)
 
 - **修复：team 成员窗格不跟随主题锁定（仍为暗色）**——0.36.2 的锁定仅导出在主 pane 命令内（`export XDG_STATE_HOME=…`），而 oh-my-openagent 经 `split-window` 拉起的成员窗格继承的是**会话环境**，读不到该导出。现改为：扩展侧创建逐次状态目录（`fs.mkdtemp`）并把 kv 种子写入 **`<目录>/opencode/kv.json`**（路径契约收口在 core `tuiThemeKvPath` 并单测锁定——此前一度误写到目录根导致静默失效），主 pane 仍显式导出，同时追加 `tmux set-environment -t <会话> XDG_STATE_HOME <目录>` 使成员窗格经会话环境继承同一锁定。真机（tmux 3.3a）验证：主窗格与仅靠继承的成员窗格**双双渲染亮色板**（48;5;15/255/254）。顺带收益：pane 命令不再含 `VAR=$(…)` 构造（fish 解析错误源），fish 探测跳过分支删除，fish 3.0+ 现在也能获得主题锁定
