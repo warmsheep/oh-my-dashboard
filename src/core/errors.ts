@@ -24,6 +24,8 @@ export const FRIENDLY_ERRORS: Record<string, string> = {
   BACKUP_RESTORE_TOO_LARGE: "备份内容过大（超过 256MB 或 2 万条目上限），已中止恢复",
   CONFIG_UNREADABLE: "配置文件存在但无法读取（权限或被占用），已中止以防覆盖",
   MIMO_COOKIE_INVALID: "MiMo Cookie 格式无法识别，请粘贴完整的 Cookie 字符串",
+  FREE_PORT_UNAVAILABLE: "无法获取可用的随机端口，请稍后重试",
+  TMUX_NOT_FOUND: "未检测到 tmux，请先安装后重试（Debian/Ubuntu: apt install tmux，macOS: brew install tmux）",
 };
 
 /** Map a NodeJS errno code to a Chinese, action-oriented message. */
