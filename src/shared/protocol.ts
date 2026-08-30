@@ -162,7 +162,7 @@ export type WebviewToExt =
   /** OpenCode tab in-page edit: write (null = remove the key) one OPENCODE_SETTINGS entry into opencode.json[c]. */
   | { type: "opencodeSetSetting"; payload: { key: string; value: OpencodeSettingValue } }
   /** OMO tab feature-settings edit: write (null = remove the key) one OMO_MISC_SETTINGS entry into the agent config. */
-  | { type: "omoSetSetting"; payload: { key: string; value: boolean | number | null } };
+  | { type: "omoSetSetting"; payload: { key: string; value: OmoSettingValue } };
 
 // ---------------------------------------------------------------------------
 // Quota view contract — data shapes consumed by BOTH the extension host
@@ -457,7 +457,7 @@ export interface OmoMiscSetting {
   key: string;
   /** Key path inside the agent config, relative to the target's sectionPath prefix. */
   path: string[];
-  kind: "boolean" | "number";
+  kind: "boolean" | "number" | "stringList" | "enumChips" | "shallowObject" | "modelCatalog";
   label: string;
   hint?: string;
   /** Chinese section label used to group rows in the OMO tab. */
@@ -465,8 +465,18 @@ export interface OmoMiscSetting {
   /** Inclusive integer bounds of the number kind (defaults: 0..100); single source for the host validator AND the webview pre-check. */
   min?: number;
   max?: number;
-  /** Runtime default shown when the file does not set the key (null in {@link OmoMiscValues}). */
-  default: boolean | number;
+  /** Runtime default shown when the file does not set the key (null in {@link OmoMiscValues}); scalar kinds only — the new kinds default to "empty". */
+  default?: boolean | number;
+  /** Selectable values for the enumChips kind (fixed multi-select). */
+  options?: string[];
+  /** Field schemas of the shallowObject kind (Wave-1 type reused, no duplicate shape). */
+  fields?: OpencodeSettingField[];
+  /**
+   * plugin (default) = the key lives under the sectionPath prefix (omo `[opencode]` block /
+   * legacy top level); shared = the key lives at the TOP LEVEL of the target file for BOTH
+   * targets — never under `[opencode]` (e.g. the `models` catalog both generations share).
+   */
+  scope?: "plugin" | "shared";
 }
 
 /**
@@ -575,6 +585,73 @@ export const OMO_MISC_SETTINGS: readonly OmoMiscSetting[] = [
     default: false,
   },
   {
+    key: "runtimeFallbackParams",
+    path: ["runtime_fallback"],
+    kind: "shallowObject",
+    label: "回退细参",
+    group: "稳定性",
+    fields: [
+      { key: "max_fallback_attempts", kind: "number", label: "最大回退次数", min: 1, max: 20, integer: true },
+      { key: "cooldown_seconds", kind: "number", label: "冷却秒数", min: 1, max: 3600, integer: true },
+      { key: "timeout_seconds", kind: "number", label: "超时秒数", min: 1, max: 600, integer: true },
+      { key: "notify_on_fallback", kind: "boolean", label: "回退时通知" },
+      { key: "restore_primary_after_cooldown", kind: "boolean", label: "冷却后恢复主模型" },
+    ],
+  },
+  {
+    key: "disabledAgents",
+    path: ["disabled_agents"],
+    kind: "enumChips",
+    // Spread of the canonical constant: options is a mutable string[] while KNOWN_AGENTS
+    // is readonly — the values still have a single source (no literal duplication).
+    options: [...KNOWN_AGENTS],
+    label: "停用智能体",
+    hint: "勾选的智能体将被停用",
+    group: "智能体开关",
+  },
+  {
+    key: "omoModels",
+    path: ["models"],
+    kind: "modelCatalog",
+    scope: "shared",
+    label: "模型别名目录",
+    hint: "别名可在智能体模型中直接引用（如 kimi-max）",
+    group: "模型目录",
+  },
+  {
+    key: "defaultMode",
+    path: ["default_mode"],
+    kind: "shallowObject",
+    label: "默认模式",
+    group: "默认模式",
+    fields: [
+      { key: "ultrawork", kind: "boolean", label: "超级工作模式" },
+      { key: "goal", kind: "boolean", label: "目标循环" },
+    ],
+  },
+  {
+    key: "disableOmoEnv",
+    path: ["experimental", "disable_omo_env"],
+    kind: "boolean",
+    label: "关闭 OMO 环境变量",
+    hint: "关闭注入的 OMO 环境变量可提升 prompt 缓存命中",
+    group: "实验特性",
+  },
+  {
+    key: "aggressiveTruncation",
+    path: ["experimental", "aggressive_truncation"],
+    kind: "boolean",
+    label: "激进上下文截断",
+    group: "实验特性",
+  },
+  {
+    key: "truncateAllToolOutputs",
+    path: ["experimental", "truncate_all_tool_outputs"],
+    kind: "boolean",
+    label: "截断全部工具输出",
+    group: "实验特性",
+  },
+  {
     key: "backgroundConcurrency",
     path: ["background_task", "defaultConcurrency"],
     kind: "number",
@@ -588,31 +665,127 @@ export const OMO_MISC_SETTINGS: readonly OmoMiscSetting[] = [
 ];
 
 /** Current OMO misc values; null = the file does not set the key (UI shows the descriptor default). */
-export type OmoMiscValues = Record<string, boolean | number | null>;
+export type OmoMiscValues = Record<string, OmoSettingValue>;
 
 /** Max length of free-text opencode string settings (username); single source for the host validator AND the webview pre-check. */
 export const OPENCODE_STRING_VALUE_MAX_LENGTH = 64;
 
+/**
+ * Max length of a tui.json theme name after trimming. Single source for core's
+ * isValidTuiTheme (tuiSettings.ts) AND the webview's tuiTheme pre-check — the
+ * bound is a deliberate contract, not a coincidental equality with the string bound.
+ */
+export const TUI_THEME_MAX_LENGTH = 64;
+
+/**
+ * The 15 per-tool permission keys opencode understands, in importance order.
+ * Single source of truth for the permissionTools kind's validator, the panel's
+ * tool rows and the aggregate reader (same pattern as KNOWN_AGENTS).
+ */
+export const OPENCODE_PERMISSION_TOOLS: readonly string[] = [
+  "bash",
+  "edit",
+  "read",
+  "glob",
+  "grep",
+  "list",
+  "task",
+  "skill",
+  "lsp",
+  "webfetch",
+  "websearch",
+  "todowrite",
+  "question",
+  "external_directory",
+  "doom_loop",
+];
+
+/** stringList value: an ordered list of short string entries (e.g. rule file paths). */
+export type StringListValue = string[];
+
+/** shallowObject value: descriptor-field key → leaf value (null = field absent in file). */
+export type ShallowObjectValue = Record<string, boolean | number | null>;
+
+/** permissionTools value: tool name → action (null = remove that tool's key). */
+export type PermissionToolsValue = Record<string, "allow" | "ask" | "deny" | null>;
+
+/** mcpServers write value: server name → disabled flag (snapshot diff semantics, see opencodeSettingEdits). */
+export type McpServersValue = Record<string, boolean>;
+
+/** modelCatalog value: alias → model binding; a null entry marks "remove that alias" (UI deletion intent only). */
+export type ModelCatalogValue = Record<string, { model: string; reasoning: string | null } | null>;
+
+/**
+ * The 8 reasoning levels a modelCatalog alias entry may pin. Single source for the
+ * omoSettings validator and the webview reasoning dropdown (same pattern as VARIANTS).
+ */
+export const OMO_REASONING_LEVELS: readonly string[] = [
+  "off",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+  "auto",
+];
+
+/** One field schema of a shallowObject-kind descriptor (a leaf key inside the object). */
+export interface OpencodeSettingField {
+  key: string;
+  kind: "boolean" | "number";
+  label: string;
+  hint?: string;
+  /** Inclusive bounds of the number kind (absent = unbounded). */
+  min?: number;
+  max?: number;
+  /** Reject non-integers when true; decimals allowed exactly when this is not set. */
+  integer?: boolean;
+  /** Documented default shown when the file does not set the field. */
+  default?: boolean | number;
+}
+
 /** One opencode.json setting visualized in the OpenCode tab. */
 export interface OpencodeSetting {
   key: string;
-  /** Key path inside opencode.json[c]. */
+  /** Key path inside opencode.json[c] (or the `file` target when one is set). */
   path: string[];
-  kind: "model" | "enum" | "tristate" | "boolean" | "string" | "providers";
+  kind:
+    | "model"
+    | "enum"
+    | "tristate"
+    | "boolean"
+    | "string"
+    | "number"
+    | "providers"
+    | "stringList"
+    | "enumChips"
+    | "shallowObject"
+    | "permissionTools"
+    | "mcpServers";
   label: string;
   hint?: string;
   /** Selectable values for the enum kind. */
   options?: string[];
-  /** Chinese section label used to group rows in the OpenCode tab (模型 / 行为 / 其他). */
+  /** Chinese section label used to group rows in the OpenCode tab (模型 / 行为 / 其他 / …). */
   group: string;
   /** Documented default shown as a hint when the file does not set the key. */
   default?: boolean | string;
+  /** Inclusive bounds of the number kind (absent = unbounded). */
+  min?: number;
+  max?: number;
+  /** Field schemas of the shallowObject kind. */
+  fields?: OpencodeSettingField[];
+  /** Non-opencode.json target file; "tui" routes this descriptor's reads/writes to configDir/tui.json. */
+  file?: "tui";
 }
 
 /**
  * High-frequency opencode.json keys (issue traffic + doc coverage). Deprecated keys
- * (theme/keybinds/tui/layout/mode/autoshare) are deliberately absent — opencode
- * silently drops them on load, so writing them is a no-op (design-doc red line).
+ * (theme/keybinds/tui/layout/mode/autoshare) are deliberately absent from opencode.json —
+ * opencode silently drops them on load, so writing them is a no-op (design-doc red
+ * line); the TUI theme rides the separate tui.json face via the tuiTheme descriptor
+ * (file: "tui") instead.
  */
 export const OPENCODE_SETTINGS: readonly OpencodeSetting[] = [
   {
@@ -696,14 +869,138 @@ export const OPENCODE_SETTINGS: readonly OpencodeSetting[] = [
     hint: "opencode 原生智能体覆写，与 OMO 的智能体配置是两套体系",
     group: "模型",
   },
+  {
+    key: "permissionShorthand",
+    path: ["permission"],
+    kind: "enum",
+    label: "全局权限",
+    options: ["allow", "ask", "deny"],
+    hint: "读写规则见下方按工具设置",
+    group: "权限",
+  },
+  {
+    key: "permissionTools",
+    path: ["permission"],
+    kind: "permissionTools",
+    label: "按工具权限",
+    group: "权限",
+  },
+  {
+    key: "instructions",
+    path: ["instructions"],
+    kind: "stringList",
+    label: "规则文件",
+    hint: "项目级配置文件会按并集叠加",
+    group: "规则文件",
+  },
+  {
+    key: "mcpServers",
+    path: ["mcp"],
+    kind: "mcpServers",
+    label: "MCP 服务器",
+    group: "MCP 服务器",
+  },
+  {
+    key: "compaction",
+    path: ["compaction"],
+    kind: "shallowObject",
+    label: "上下文压缩",
+    group: "上下文",
+    fields: [
+      { key: "auto", kind: "boolean", label: "自动压缩", default: true },
+      { key: "prune", kind: "boolean", label: "修剪旧消息", default: false },
+      { key: "tail_turns", kind: "number", label: "保留尾部轮次", min: 0, max: 100, integer: true, default: 2 },
+    ],
+  },
+  {
+    key: "agentBuildDisable",
+    path: ["agent", "build", "disable"],
+    kind: "boolean",
+    label: "禁用 build 智能体",
+    group: "智能体",
+  },
+  {
+    key: "agentBuildTemperature",
+    path: ["agent", "build", "temperature"],
+    kind: "number",
+    label: "build 温度",
+    hint: "0–2，支持小数",
+    min: 0,
+    max: 2,
+    group: "智能体",
+  },
+  {
+    key: "agentPlanDisable",
+    path: ["agent", "plan", "disable"],
+    kind: "boolean",
+    label: "禁用 plan 智能体",
+    group: "智能体",
+  },
+  {
+    key: "agentPlanTemperature",
+    path: ["agent", "plan", "temperature"],
+    kind: "number",
+    label: "plan 温度",
+    hint: "0–2，支持小数",
+    min: 0,
+    max: 2,
+    group: "智能体",
+  },
+  {
+    key: "agentGeneralModel",
+    path: ["agent", "general", "model"],
+    kind: "model",
+    label: "general 智能体模型",
+    hint: "opencode 原生智能体覆写，与 OMO 的智能体配置是两套体系",
+    group: "智能体",
+  },
+  {
+    key: "agentExploreModel",
+    path: ["agent", "explore", "model"],
+    kind: "model",
+    label: "explore 智能体模型",
+    hint: "opencode 原生智能体覆写，与 OMO 的智能体配置是两套体系",
+    group: "智能体",
+  },
+  {
+    key: "tuiTheme",
+    path: ["theme"],
+    kind: "string",
+    file: "tui",
+    label: "TUI 主题",
+    hint: "示例：opencode、catppuccin、tokyo-night；写入 tui.json",
+    group: "终端界面",
+  },
 ];
 
 /** One OpenCode setting value; null = key absent (「未设置」→ remove edit). */
-export type OpencodeSettingValue = string | boolean | number | string[] | null;
+export type OpencodeSettingValue =
+  string | boolean | number | null | StringListValue | ShallowObjectValue | PermissionToolsValue | McpServersValue;
+
+/** One OMO tab setting value; null = remove op (恢复默认) — the shape follows the descriptor kind. */
+export type OmoSettingValue = boolean | number | null | StringListValue | ShallowObjectValue | ModelCatalogValue;
+
+/**
+ * Read/write-split permission aggregate for the OpenCode tab payload: the string
+ * shorthand when `permission` is a string, the per-tool actions for the simple
+ * object form, and the tool names whose values are hand-written pattern objects
+ * (protected — the UI badges them as 高级规则 and never offers a dropdown).
+ */
+export interface OpencodePermissionState {
+  shorthand: "allow" | "ask" | "deny" | null;
+  tools: PermissionToolsValue;
+  advancedTools: string[];
+}
 
 /** Boot/refresh payload of the OpenCode tab: current values + the config file path + model options. */
 export interface OpencodeSettingsPayload {
   values: Record<string, OpencodeSettingValue>;
   configPath: string;
   models: ModelOption[];
+  /** Permission aggregate (read path of the 权限 group; writes go through permissionTools/shorthand keys). */
+  permission: OpencodePermissionState;
+  /** Declared MCP servers with their disabled flags (read path of the MCP 服务器 group). */
+  mcp: { name: string; disabled: boolean }[];
+  /** The standalone tui.json face: current theme + file path shown in the 终端界面 group. */
+  tui: { theme: string | null; path: string };
 }
