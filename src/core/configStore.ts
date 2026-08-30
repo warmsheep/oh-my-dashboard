@@ -3,15 +3,22 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import { OMO_MISC_SETTINGS, OPENCODE_SETTINGS } from "../shared/protocol";
-import type { OmoMiscValues, OpencodeSettingValue } from "../shared/protocol";
+import type { OmoMiscValues, OmoSettingValue, OpencodePermissionState, OpencodeSettingValue } from "../shared/protocol";
 import { agentAssignmentEdits } from "./agentAssignment";
 import { writeFileAtomic } from "./atomicFile";
 import { ensureLocalModelsFile, mergeModelOptions } from "./builtinModels";
 import { applyEdits, getValue, JsoncSyntaxError, parseSafe } from "./jsoncEditor";
 import { isValidOmoMiscValue, omoMiscEdits, readOmoMiscValues } from "./omoSettings";
-import { isValidOpencodeSettingValue, opencodeSettingEdits, readOpencodeSettingValues } from "./opencodeSettings";
+import {
+  isValidOpencodeSettingValue,
+  opencodeSettingEdits,
+  readMcpServers,
+  readOpencodeSettingValues,
+  readPermissionState,
+} from "./opencodeSettings";
 import { declaredPluginSpecifiers, listDeclaredPlugins } from "./pluginResolver";
 import { readdirSafe, readDirTree, skillDirCandidates, skillNamesFromTree, TREE_EXCLUDES } from "./skillScanner";
+import { isValidTuiTheme, readTuiTheme, tuiThemeEdits } from "./tuiSettings";
 import type {
   AgentConfigTarget,
   DiscoveredConfig,
@@ -372,14 +379,21 @@ export class ConfigStore {
   }
 
   /**
-   * Write (or remove, value=null) one OPENCODE_SETTINGS entry into opencode.json[c]. Same
-   * contract as setAgentModel: descriptor key + value validated first (OPENCODE_SETTING_INVALID),
-   * readTextForEdit, JSONC syntax abort, atomic write; creates the file when missing.
+   * Write (or remove, value=null) one OPENCODE_SETTINGS entry into its target file.
+   * Descriptors carrying file:"tui" route to tui.json ({@link setTuiTheme}); the rest
+   * write opencode.json[c] with the same contract as setAgentModel: descriptor key +
+   * value validated first (OPENCODE_SETTING_INVALID), readTextForEdit, JSONC syntax
+   * abort, atomic write; creates the file when missing.
    */
   setOpencodeSetting(key: string, value: OpencodeSettingValue): void {
     const setting = OPENCODE_SETTINGS.find((entry) => entry.key === key);
     if (setting === undefined || !isValidOpencodeSettingValue(setting, value)) {
       throw new Error("OPENCODE_SETTING_INVALID");
+    }
+    if (setting.file === "tui") {
+      // Kind string + file tui validation guarantees a string-or-null value here.
+      this.setTuiTheme(value as string | null);
+      return;
     }
     const target = this.resolveOpencodeConfigPath();
     const raw = this.readTextForEdit(target);
@@ -392,6 +406,47 @@ export class ConfigStore {
     this.writeAtomic(target, next);
   }
 
+  /** Declared MCP servers with their disabled flags (OpenCode tab payload view, display-tolerant). */
+  mcpServers(): { name: string; disabled: boolean }[] {
+    return readMcpServers(this.readTextOrEmpty(this.resolveOpencodeConfigPath()));
+  }
+
+  /** The permission aggregate (shorthand + per-tool actions + advanced tool list) for the OpenCode tab payload. */
+  permissionState(): OpencodePermissionState {
+    return readPermissionState(this.readTextOrEmpty(this.resolveOpencodeConfigPath()));
+  }
+
+  /** Path of the standalone tui.json face (the TUI theme lives here, never in opencode.json). */
+  tuiConfigPath(): string {
+    return path.join(this.configDir, "tui.json");
+  }
+
+  /** Current tui.json theme (display-tolerant: missing/unparsable file reads as null). */
+  tuiTheme(): string | null {
+    return readTuiTheme(this.readTextOrEmpty(this.tuiConfigPath()));
+  }
+
+  /**
+   * Write (or remove, theme=null) the `theme` key of configDir/tui.json. Same contract
+   * as setOpencodeSetting: isValidTuiTheme gate (TUI_THEME_INVALID — null passes as the
+   * remove op), readTextForEdit, JSONC syntax abort, atomic write; creates the file
+   * when missing.
+   */
+  setTuiTheme(theme: string | null): void {
+    if (theme !== null && !isValidTuiTheme(theme)) {
+      throw new Error("TUI_THEME_INVALID");
+    }
+    const target = this.tuiConfigPath();
+    const raw = this.readTextForEdit(target);
+    const parse = parseSafe<unknown>(raw);
+    if (parse.errors.length > 0) {
+      throw new JsoncSyntaxError(parse.errors);
+    }
+    const next = applyEdits(raw.length > 0 ? raw : "{}", tuiThemeEdits(theme));
+    defaultFs.mkdirSync(path.dirname(target), { recursive: true });
+    this.writeAtomic(target, next);
+  }
+
   /** Read the OMO tab's misc feature values from the resolved agent-config target (display-tolerant). */
   omoMiscValues(): OmoMiscValues {
     const target = this.resolveAgentConfig();
@@ -400,11 +455,13 @@ export class ConfigStore {
 
   /**
    * Write (or remove, value=null) one OMO_MISC_SETTINGS entry into the resolved agent
-   * config at its scope (omo targets inside the `[opencode]` block, legacy at top level).
-   * Same contract as setAgentModel: key + value validated first (OMO_SETTING_INVALID),
-   * readTextForEdit, JSONC syntax abort, atomic write; creates the file when missing.
+   * config at its scope: plugin keys go inside the `[opencode]` block on omo targets
+   * (top level on legacy targets), shared keys go TOP LEVEL on both targets — the
+   * sectionPath-prefix/scope routing lives in omoMiscEdits. Same contract as
+   * setAgentModel: key + value validated first (OMO_SETTING_INVALID), readTextForEdit,
+   * JSONC syntax abort, atomic write; creates the file when missing.
    */
-  setOmoMiscSetting(key: string, value: boolean | number | null): void {
+  setOmoMiscSetting(key: string, value: OmoSettingValue): void {
     const setting = OMO_MISC_SETTINGS.find((entry) => entry.key === key);
     if (setting === undefined || !isValidOmoMiscValue(setting, value)) {
       throw new Error("OMO_SETTING_INVALID");
