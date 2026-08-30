@@ -13,6 +13,7 @@ import type {
   ManagerTab,
   ModelOption,
   OmoMiscSetting,
+  OmoSettingValue,
   OpencodeSetting,
   OpencodeSettingsPayload,
   OpencodeSettingValue,
@@ -203,15 +204,19 @@ export function buildConfigInitPayload(deps: ManagerPanelDeps, skills?: SkillSum
 
 /**
  * Build the OpenCode tab boot payload: current settings values, the opencode.json[c]
- * path (displayed at the top of the tab), and merged model options for the model
- * pickers. Exported so the extension can feed {@link notifyManagerPanelOpencodeChanged}
- * with a lazy provider over the same deps.
+ * path (displayed at the top of the tab), merged model options for the model
+ * pickers, plus the read aggregates of the 权限 / MCP 服务器 groups and the tui.json
+ * face (theme + path) powering the 终端界面 group. Exported so the extension can
+ * feed {@link notifyManagerPanelOpencodeChanged} with a lazy provider over the same deps.
  */
 export function buildOpencodeInitPayload(deps: ManagerPanelDeps): OpencodeSettingsPayload {
   return {
     values: deps.configStore.opencodeSettingValues(),
     configPath: deps.configStore.resolveOpencodeConfigPath(),
     models: deps.configStore.listModels(),
+    permission: deps.configStore.permissionState(),
+    mcp: deps.configStore.mcpServers(),
+    tui: { theme: deps.configStore.tuiTheme(), path: deps.configStore.tuiConfigPath() },
   };
 }
 
@@ -758,7 +763,7 @@ type ParsedMessage =
   | { kind: "editPreset"; name: string | null }
   | { kind: "setModel"; section: "agents" | "categories"; name: string; model: string; variant: string | null }
   | { kind: "setOpencodeSetting"; setting: OpencodeSetting; value: OpencodeSettingValue }
-  | { kind: "setOmoSetting"; setting: OmoMiscSetting; value: boolean | number | null };
+  | { kind: "setOmoSetting"; setting: OmoMiscSetting; value: OmoSettingValue };
 
 /**
  * Validate an incoming webview message against the protocol shape. Returns
@@ -854,7 +859,7 @@ function parseMessage(raw: unknown): ParsedMessage | undefined {
       const found =
         typeof payload?.key === "string" ? OMO_MISC_SETTINGS.find((entry) => entry.key === payload.key) : undefined;
       return found !== undefined && isValidOmoMiscValue(found, payload?.value)
-        ? { kind: "setOmoSetting", setting: found, value: payload?.value as boolean | number | null }
+        ? { kind: "setOmoSetting", setting: found, value: payload?.value as OmoSettingValue }
         : undefined;
     }
     default:

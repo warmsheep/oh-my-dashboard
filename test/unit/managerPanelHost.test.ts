@@ -480,4 +480,209 @@ describe("manager panel OpenCode/OMO 设置 protocol", () => {
     expect(messagesOfType(panel, "opencodeInit").length).toBe(initsBefore);
     expect(fs.readFileSync(path.join(root, "opencode.json"), "utf8")).toBe("{,}\n");
   });
+
+  it("ready pushes an opencodeInit carrying the permission/mcp/tui aggregate fields", async () => {
+    const { deps, root } = makeDeps();
+    fs.writeFileSync(
+      path.join(root, "opencode.json"),
+      JSON.stringify({
+        permission: { bash: "deny", webfetch: { "https://*": "allow" } },
+        mcp: { github: { enabled: false }, filesystem: { command: "npx" } },
+      }),
+    );
+    fs.writeFileSync(path.join(root, "tui.json"), JSON.stringify({ theme: "catppuccin" }));
+    const panel = await bootedPanel(deps);
+    const inits = messagesOfType(panel, "opencodeInit");
+    const payload = (
+      inits[0] as {
+        payload: {
+          permission: { shorthand: unknown; tools: unknown; advancedTools: unknown };
+          mcp: unknown;
+          tui: { theme: unknown; path: string };
+        };
+      }
+    ).payload;
+    expect(payload.permission).toEqual({ shorthand: null, tools: { bash: "deny" }, advancedTools: ["webfetch"] });
+    expect(payload.mcp).toEqual([
+      { name: "github", disabled: true },
+      { name: "filesystem", disabled: false },
+    ]);
+    expect(payload.tui).toEqual({ theme: "catppuccin", path: path.join(root, "tui.json") });
+  });
+
+  it("opencodeSetSetting writes the new kinds through and re-pushes a fresh opencodeInit", async () => {
+    const { deps, root } = makeDeps();
+    fs.writeFileSync(path.join(root, "opencode.json"), "{}\n");
+    const panel = await bootedPanel(deps);
+    panel.receive({ type: "opencodeSetSetting", payload: { key: "instructions", value: [".cursor/rules"] } });
+    panel.receive({
+      type: "opencodeSetSetting",
+      payload: { key: "compaction", value: { auto: false, tail_turns: 5 } },
+    });
+    panel.receive({ type: "opencodeSetSetting", payload: { key: "permissionTools", value: { bash: "ask" } } });
+    panel.receive({ type: "opencodeSetSetting", payload: { key: "mcpServers", value: { github: true } } });
+    panel.receive({ type: "opencodeSetSetting", payload: { key: "agentBuildTemperature", value: 0.7 } });
+
+    const replies = messagesOfType(panel, "opencodeSettingSaved");
+    expect(replies.map((reply) => (reply as { payload: { key: string } }).payload.key)).toEqual([
+      "instructions",
+      "compaction",
+      "permissionTools",
+      "mcpServers",
+      "agentBuildTemperature",
+    ]);
+    for (const reply of replies) {
+      expect((reply as { payload: { ok: boolean } }).payload.ok).toBe(true);
+    }
+    const written = JSON.parse(fs.readFileSync(path.join(root, "opencode.json"), "utf8"));
+    expect(written.instructions).toEqual([".cursor/rules"]);
+    expect(written.compaction).toEqual({ auto: false, tail_turns: 5 });
+    expect(written.permission).toEqual({ bash: "ask" });
+    expect(written.mcp.github).toEqual({ enabled: false });
+    expect(written.agent).toEqual({ build: { temperature: 0.7 } });
+    // The last re-pushed payload reflects the fresh aggregate state.
+    const inits = messagesOfType(panel, "opencodeInit");
+    const last = (inits[inits.length - 1] as { payload: { permission: unknown; mcp: unknown } }).payload;
+    expect(last.permission).toEqual({ shorthand: null, tools: { bash: "ask" }, advancedTools: [] });
+    expect(last.mcp).toEqual([{ name: "github", disabled: true }]);
+  });
+
+  it("invalid new-kind values get the !ok backstop with the key echo and write nothing", async () => {
+    const { deps, root } = makeDeps();
+    fs.writeFileSync(path.join(root, "opencode.json"), "{}\n");
+    const panel = await bootedPanel(deps);
+    const bytesBefore = fs.readFileSync(path.join(root, "opencode.json"));
+    panel.receive({
+      type: "opencodeSetSetting",
+      payload: { key: "instructions", value: Array.from({ length: 17 }, (_, i) => `rule-${i}`) },
+    });
+    panel.receive({ type: "opencodeSetSetting", payload: { key: "compaction", value: { tail_turns: 101 } } });
+    panel.receive({ type: "opencodeSetSetting", payload: { key: "permissionTools", value: { made_up: "ask" } } });
+    panel.receive({ type: "opencodeSetSetting", payload: { key: "mcpServers", value: { "bad name!": true } } });
+    panel.receive({ type: "opencodeSetSetting", payload: { key: "agentBuildTemperature", value: 2.5 } });
+
+    const replies = messagesOfType(panel, "opencodeSettingSaved");
+    expect(replies.length).toBe(5);
+    for (const reply of replies) {
+      expect(reply).toEqual({
+        type: "opencodeSettingSaved",
+        payload: { ok: false, key: expect.any(String), error: "设置请求格式无法识别" },
+      });
+    }
+    expect((replies[0] as { payload: { key: string } }).payload.key).toBe("instructions");
+    expect(fs.readFileSync(path.join(root, "opencode.json")).equals(bytesBefore)).toBe(true);
+  });
+
+  it("compaction null-leaf commit passes the kind validator and writes per-leaf edits", async () => {
+    const { deps, root } = makeDeps();
+    fs.writeFileSync(path.join(root, "opencode.json"), '{ "compaction": { "auto": true, "custom": "keep" } }\n');
+    const panel = await bootedPanel(deps);
+
+    panel.receive({
+      type: "opencodeSetSetting",
+      payload: { key: "compaction", value: { auto: false, tail_turns: null } },
+    });
+
+    expect(panel.posted).toContainEqual({ type: "opencodeSettingSaved", payload: { ok: true, key: "compaction" } });
+    const written = JSON.parse(fs.readFileSync(path.join(root, "opencode.json"), "utf8"));
+    expect(written.compaction).toEqual({ auto: false, custom: "keep" });
+  });
+
+  it("boot configInit carries omo values for the Wave-2 keys (fresh sandbox → nulls)", async () => {
+    const { deps } = makeDeps();
+    const panel = await bootedPanel(deps);
+    const inits = messagesOfType(panel, "configInit");
+    const omo = (inits[0] as { payload: { omo: Record<string, unknown> } }).payload.omo;
+    expect(omo.disabledAgents).toBeNull();
+    expect(omo.omoModels).toBeNull();
+    expect(omo.runtimeFallbackParams).toBeNull();
+    expect(omo.defaultMode).toBeNull();
+    expect(omo.disableOmoEnv).toBeNull();
+    expect(omo.aggressiveTruncation).toBeNull();
+    expect(omo.truncateAllToolOutputs).toBeNull();
+  });
+
+  it("omoSetSetting writes the new kinds through and re-pushes configInit with fresh omo values", async () => {
+    const { deps, root } = makeDeps();
+    const panel = await bootedPanel(deps);
+    panel.receive({ type: "omoSetSetting", payload: { key: "disabledAgents", value: ["oracle", "momus"] } });
+    panel.receive({
+      type: "omoSetSetting",
+      payload: { key: "omoModels", value: { "kimi-max": { model: "moonshotai/kimi-k2", reasoning: "high" } } },
+    });
+    panel.receive({
+      type: "omoSetSetting",
+      payload: { key: "runtimeFallbackParams", value: { max_fallback_attempts: 5, cooldown_seconds: null } },
+    });
+
+    const replies = messagesOfType(panel, "omoSettingSaved");
+    expect(replies.map((reply) => (reply as { payload: { key: string } }).payload.key)).toEqual([
+      "disabledAgents",
+      "omoModels",
+      "runtimeFallbackParams",
+    ]);
+    for (const reply of replies) {
+      expect((reply as { payload: { ok: boolean } }).payload.ok).toBe(true);
+    }
+    const written = JSON.parse(fs.readFileSync(path.join(root, "oh-my-opencode.json"), "utf8"));
+    expect(written.disabled_agents).toEqual(["oracle", "momus"]);
+    expect(written.models).toEqual({ "kimi-max": { model: "moonshotai/kimi-k2", reasoning: "high" } });
+    expect(written.runtime_fallback).toEqual({ max_fallback_attempts: 5 });
+    const inits = messagesOfType(panel, "configInit");
+    const omo = (inits[inits.length - 1] as { payload: { omo: Record<string, unknown> } }).payload.omo;
+    expect(omo.disabledAgents).toEqual(["oracle", "momus"]);
+    expect(omo.omoModels).toEqual({ "kimi-max": { model: "moonshotai/kimi-k2", reasoning: "high" } });
+    expect(omo.runtimeFallbackParams).toEqual({
+      max_fallback_attempts: 5,
+      cooldown_seconds: null,
+      timeout_seconds: null,
+      notify_on_fallback: null,
+      restore_primary_after_cooldown: null,
+    });
+  });
+
+  it("invalid new-kind omoSetSetting values get the !ok backstop with the key echo and write nothing", async () => {
+    const { deps, root } = makeDeps();
+    const panel = await bootedPanel(deps);
+    const bytesBefore = fs.readFileSync(path.join(root, "oh-my-opencode.json"));
+    panel.receive({ type: "omoSetSetting", payload: { key: "disabledAgents", value: ["not-an-agent"] } });
+    panel.receive({ type: "omoSetSetting", payload: { key: "disabledAgents", value: ["oracle", "oracle"] } });
+    panel.receive({
+      type: "omoSetSetting",
+      payload: { key: "omoModels", value: { a: { model: "no-slash-id", reasoning: null } } },
+    });
+    panel.receive({
+      type: "omoSetSetting",
+      payload: { key: "runtimeFallbackParams", value: { max_fallback_attempts: 21 } },
+    });
+
+    const replies = messagesOfType(panel, "omoSettingSaved");
+    expect(replies.length).toBe(4);
+    for (const reply of replies) {
+      expect(reply).toEqual({
+        type: "omoSettingSaved",
+        payload: { ok: false, key: expect.any(String), error: "设置请求格式无法识别" },
+      });
+    }
+    expect((replies[0] as { payload: { key: string } }).payload.key).toBe("disabledAgents");
+    expect((replies[2] as { payload: { key: string } }).payload.key).toBe("omoModels");
+    expect(fs.readFileSync(path.join(root, "oh-my-opencode.json")).equals(bytesBefore)).toBe(true);
+  });
+
+  it("tuiTheme writes round-trip into tui.json, re-push opencodeInit, and never create opencode.json", async () => {
+    const { deps, refreshes, root } = makeDeps();
+    const panel = await bootedPanel(deps);
+    const before = panel.posted.length;
+    panel.receive({ type: "opencodeSetSetting", payload: { key: "tuiTheme", value: "dracula" } });
+
+    expect(panel.posted).toContainEqual({ type: "opencodeSettingSaved", payload: { ok: true, key: "tuiTheme" } });
+    expect(panel.posted.slice(before).filter((m) => (m as { type?: string }).type === "opencodeInit").length).toBe(1);
+    expect(refreshes.length).toBe(1);
+    expect(JSON.parse(fs.readFileSync(path.join(root, "tui.json"), "utf8"))).toEqual({ theme: "dracula" });
+    expect(fs.existsSync(path.join(root, "opencode.json"))).toBe(false); // the tui face never touches opencode.json
+
+    const inits = messagesOfType(panel, "opencodeInit");
+    const tui = (inits[inits.length - 1] as { payload: { tui: { theme: string | null } } }).payload.tui;
+    expect(tui.theme).toBe("dracula");
+  });
 });

@@ -163,6 +163,8 @@ export function activate(ctx: vscode.ExtensionContext): void {
     "AGENTS.md",
     "models.json",
     "quota.json",
+    // external hand-edits of the tui.json theme re-sync the open manager panel
+    "tui.json",
     // lockfile churn in configDir = npm/bun install touched the plugin set
     "package.json",
     "package-lock.json",
