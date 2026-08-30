@@ -2,6 +2,15 @@
 
 > 版本与日期以 git 历史为准；0.8.0–0.14.0、0.16.x、0.18.0 等中间版本为本地打包、版本号未入库，相关变更归并入下一个入库版本。
 
+## 0.44.0 (2026-08-30)
+
+- **设置补齐批（官方文档对账）**：对照 oh-my-openagent GitHub 文档（dev 分支 schema `87e1e9e`）与 opencode.ai 官方 config schema，把两页设置中缺失的高频+中频配置全部补齐；8 个子批次均经「开发 → Oracle 审查 → 测试 → 修复」闭环。
+- **OMO 选项卡 24 项**：`auto_update`/`model_fallback`/`new_task_system_enabled`/`preemptive_compaction`/`dynamic_context_pruning`/`memory`（shared 顶层，enabled+tool_exposure）/`ulw_execute`+`start_work.auto_commit`/`default_run_agent`/`disabled_providers`（OMO 侧）/`disabled_skills`/`disabled_hooks`/`disabled_tools`/`mcp_env_allowlist`/`model_capabilities`/babysitting 超时/`openclaw.enabled`/monitor 限额+`allowed_commands`/team_mode 补 2 字段；新 kind **numberMap**（并发映射 provider/modelConcurrency、agent/category 温度覆写，自由键=模型目录字符集、固定键=KNOWN_AGENTS，小数合法、嵌套叶整值 null 永不触碰共享块）；agentTextMap 自由键策略（分类 `prompt_append`）
+- **OpenCode 选项卡**：`enabled_providers` 白名单 chips、`agent.*.steps`×4、`default_agent` 放开为自由字符串（自定义 primary 智能体名）、compaction 补 `preserve_recent_tokens`/`reserved`、`skills.paths/urls`、`experimental` 6 键、`server.*` 服务器监听组、agent 四智能体扩展行（`prompt` 多行 ≤8000/`hidden`/`color`/`top_p` + 6 项 per-agent permission 枚举叶）与 general/explore 温度/禁用对齐、**provider 自定义供应商编辑器**（name/npm/API Key/Base URL/黑白名单；点路径字段键 `options.apiKey`）、**plugin 插件列表**（npm 名带 @版本 与本地路径 `~/`、`file://` 均可；元组/超长条目受 `PLUGIN_PROTECTED` 保护拒绝 UI 覆写）、**references 参考仓库**（repository XOR path 跨字段耦合，字符串简写条目字节级保全）
+- **基础设施**：字段类型扩展（shallowObject 叶子 +string/stringList/multiline，recordEditor 字段 +number/stringMap；KEY=VALUE 行编辑器 `StringMapEditor`、`NumberMapEditor`）；**recordEditor 写路径重构为逐叶编辑**——触碰过的条目中手写未知叶（provider `models` 块、`options.timeout`、mcp oauth、权限 pattern 对象等）永不误删，空字段条目零编辑，条目删除仅显式 null 标记；共享父级（agent.*）浅对象永不折叠、单字段提交（partialCommit）；mcp 条目补 `environment`/`headers`/`timeout`/`cwd`
+- **审查修复**：plugin 字符集曾排除 `~`/`file://` 路径条目（与 pluginResolver 一等公民前缀矛盾，且会把含此类条目的行「砖死」）、超长/空白字符串条目曾绕过 protected 谓词致静默清空（两处 NEEDS_FIX 均已修复并钉测）；Oracle 全批次审查（7 批 PASS + 1 批 NEEDS_FIX→闭环）
+- **降级不做项**（schema 依据，代码注释在案）：`ralph_loop`（自由形状 map）、`experimental.policies`（对象数组）、mcp `oauth`（object|false 联合）、provider `models.<id>` 子块（UI 明示手写且逐叶编辑保证安全）。测试：根套件 924、webview 209、e2e 77 checks 全绿
+
 ## 0.43.0 (2026-08-30)
 
 - **可视化配置第五批（收官批）**：探索报告剩余工作项全部闭环。设计方案见 `docs/plans/2026-08-30-visual-config-batch5-design.md`
