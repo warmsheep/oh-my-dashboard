@@ -520,6 +520,29 @@ fieldset[disabled] {
   white-space: nowrap;
 }
 
+/* Expandable sub-panel under one ctl-row (agentTextMap per-agent textarea + 完成). */
+.ctl-expand {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+  margin: 2px 0 4px;
+  padding: 8px;
+  background: var(--inp-bg);
+  border: 1px solid var(--hairline);
+  border-radius: 2px;
+}
+
+/* Free-text textarea of the expandable rows (monospace, freely resizable). */
+.ctl-textarea {
+  width: 100%;
+  min-height: 110px;
+  resize: vertical;
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
 /* ---------- footer ---------- */
 
 .footer {

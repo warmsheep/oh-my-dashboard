@@ -33,7 +33,8 @@ describe("groupOmoMiscSettings", () => {
 
   it("pins the group-label sequence of the real OMO_MISC_SETTINGS in first-appearance order", () => {
     // Late descriptors merge into earlier groups (团队模式/智能体开关), so the batch-3
-    // groups MCP 与命令/引擎后端/Git appear once at their first-appearance position.
+    // groups MCP 与命令/引擎后端/Git and the batch-5 groups 覆写矩阵/提示词/兼容层/
+    // 关键词/目标循环/工具链/通知 appear once at their first-appearance position.
     const groups = groupOmoMiscSettings(OMO_MISC_SETTINGS);
     expect(groups.map((g) => g.label)).toEqual([
       "遥测",
@@ -47,7 +48,32 @@ describe("groupOmoMiscSettings", () => {
       "MCP 与命令",
       "引擎后端",
       "Git",
+      "覆写矩阵",
+      "提示词",
+      "兼容层",
+      "关键词",
+      "目标循环",
+      "工具链",
+      "通知",
     ]);
+  });
+
+  it("derives the batch-5 groups purely from descriptor data (kinds + row counts)", () => {
+    const groups = groupOmoMiscSettings(OMO_MISC_SETTINGS);
+    const overrides = groups.find((g) => g.label === "覆写矩阵");
+    expect(overrides?.settings.map((s) => s.kind)).toEqual(["agentPairMap", "agentPairMap"]);
+    const prompts = groups.find((g) => g.label === "提示词");
+    expect(prompts?.settings.map((s) => s.kind)).toEqual(["agentTextMap", "agentTextMap"]);
+    const expectedCounts: Record<string, number> = {
+      兼容层: 1,
+      关键词: 1,
+      目标循环: 1,
+      工具链: 3, // codegraph + monitorParams + i18nLocale
+      通知: 1,
+    };
+    for (const [label, count] of Object.entries(expectedCounts)) {
+      expect(groups.find((g) => g.label === label)?.settings).toHaveLength(count);
+    }
   });
 });
 

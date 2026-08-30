@@ -1,4 +1,6 @@
 import type {
+  AgentPairMapValue,
+  AgentTextMapValue,
   ConfigInitPayload,
   ExtToWebview,
   ModelCatalogValue,
@@ -11,6 +13,8 @@ import { OMO_MISC_SETTINGS, OMO_REASONING_LEVELS } from "@shared/protocol";
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { SECTIONS, VARIANT_ORDER } from "../constants";
+import AgentPairMapEditor from "../controls/AgentPairMapEditor";
+import AgentTextMapEditor from "../controls/AgentTextMapEditor";
 import ChipsEditor from "../controls/ChipsEditor";
 import { isWideSettingKind } from "../controls/helpers";
 import ModelCatalogEditor from "../controls/ModelCatalogEditor";
@@ -182,6 +186,14 @@ function toModelCatalogValue(value: OmoSettingValue | undefined): ModelCatalogVa
   return value !== null && typeof value === "object" && !Array.isArray(value) ? (value as ModelCatalogValue) : null;
 }
 
+function toAgentPairMapValue(value: OmoSettingValue | undefined): AgentPairMapValue | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? (value as AgentPairMapValue) : null;
+}
+
+function toAgentTextMapValue(value: OmoSettingValue | undefined): AgentTextMapValue | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? (value as AgentTextMapValue) : null;
+}
+
 /**
  * One 功能设置 row: boolean → switch, number → draft-text input committing on
  * blur/Enter, enum → 未设置+options select, composite kinds → the shared
@@ -322,6 +334,30 @@ function OmoSettingRow({
         <ShallowObjectFields
           fields={setting.fields ?? []}
           value={current}
+          disabled={pending}
+          onChange={(next) => onApplyValue(setting, next, current ?? null)}
+        />
+      );
+    }
+    if (setting.kind === "agentPairMap") {
+      const current = toAgentPairMapValue(value);
+      return (
+        <AgentPairMapEditor
+          value={current}
+          agents={setting.options ?? []}
+          models={models}
+          reasoningLevels={OMO_REASONING_LEVELS}
+          disabled={pending}
+          onChange={(next) => onApplyValue(setting, next, current ?? null)}
+        />
+      );
+    }
+    if (setting.kind === "agentTextMap") {
+      const current = toAgentTextMapValue(value);
+      return (
+        <AgentTextMapEditor
+          value={current}
+          agents={setting.options ?? []}
           disabled={pending}
           onChange={(next) => onApplyValue(setting, next, current ?? null)}
         />

@@ -15,13 +15,11 @@ import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "rea
 import ChipsEditor from "../controls/ChipsEditor";
 import {
   isWideSettingKind,
-  mcpToggleEdit,
   parseNumberFieldInput,
   permissionToolEdit,
   recordAggregateAfterCommit,
 } from "../controls/helpers";
 import type { PermissionAction } from "../controls/helpers";
-import McpToggleList from "../controls/McpToggleList";
 import OrderedListEditor from "../controls/OrderedListEditor";
 import PermissionEditor from "../controls/PermissionEditor";
 import RecordEditor from "../controls/RecordEditor";
@@ -62,7 +60,6 @@ const DEV_PAYLOAD: OpencodeSettingsPayload = {
     { id: "deepseek/deepseek-v3", provider: "deepseek", model: "deepseek-v3", label: "DeepSeek V3" },
   ],
   permission: { shorthand: null, tools: {}, advancedTools: [] },
-  mcp: [],
   tui: { theme: null, path: "~/.config/opencode/tui.json" },
   records: {
     command: {
@@ -78,11 +75,19 @@ const DEV_PAYLOAD: OpencodeSettingsPayload = {
       booleanValue: null,
       entries: { typescript: { extensions: ["ts", "tsx"] } },
     },
+    mcp: {
+      mode: "entries",
+      booleanValue: null,
+      entries: {
+        memory: { type: "local", command: ["npx", "-y", "@modelcontextprotocol/server-memory"] },
+        fetch: { type: "remote", url: "https://mcp.example.com/fetch", enabled: true },
+      },
+    },
   },
 };
 
 /**
- * Pre-edit snapshot of a dedicated payload slot (permission / mcp / tui / records) —
+ * Pre-edit snapshot of a dedicated payload slot (permission / tui / records) —
  * the revert source on a !ok reply for keys whose display state does NOT live in
  * payload.values. The records variant snapshots only the ONE affected aggregate:
  * reverting a failed formatterEntries write must not clobber an in-flight optimistic
@@ -90,7 +95,6 @@ const DEV_PAYLOAD: OpencodeSettingsPayload = {
  */
 type StructuredSnapshot =
   | { slot: "permission"; state: OpencodePermissionState }
-  | { slot: "mcp"; servers: { name: string; disabled: boolean }[] }
   | { slot: "tui"; theme: string | null }
   | { slot: "records"; key: keyof OpencodeRecordStates; aggregate: RecordAggregate };
 
@@ -102,8 +106,6 @@ function applyStructuredSnapshot(
   switch (snapshot.slot) {
     case "permission":
       return { ...payload, permission: snapshot.state };
-    case "mcp":
-      return { ...payload, mcp: snapshot.servers };
     case "tui":
       return { ...payload, tui: { ...payload.tui, theme: snapshot.theme } };
     case "records":
@@ -111,7 +113,7 @@ function applyStructuredSnapshot(
   }
 }
 
-/** The records-slot key of a record descriptor (path root; command/formatter/lsp today). */
+/** The records-slot key of a record descriptor (path root; command/formatter/lsp/mcp today). */
 function recordSlotKey(setting: OpencodeSetting): keyof OpencodeRecordStates {
   return setting.path[0] as keyof OpencodeRecordStates;
 }
@@ -121,7 +123,7 @@ function recordSlotKey(setting: OpencodeSetting): keyof OpencodeRecordStates {
  * OPENCODE_SETTINGS. Every control commits immediately (one opencodeSetSetting post,
  * optimistic with revert on a !ok reply, per-key pending disable and a stale-reply
  * guard — the same contract as the OMO tab's model rows). Scalar kinds patch
- * payload.values; the permission / mcp / tui faces patch their dedicated payload
+ * payload.values; the permission / tui / records faces patch their dedicated payload
  * slots through the structured-edit path below. State comes from opencodeInit pushes
  * only — the tab never requests data.
  */
@@ -134,7 +136,7 @@ export default function OpenCodeApp() {
 
   // Pre-edit values of keys with an in-flight save — the revert source on a !ok reply.
   const preEditRef = useRef(new Map<string, OpencodeSettingValue>());
-  // Same revert source for the dedicated payload slots (permission / mcp / tui faces).
+  // Same revert source for the dedicated payload slots (permission / tui / records faces).
   const preStructuredRef = useRef(new Map<string, StructuredSnapshot>());
   // Key of the focused text input — opencodeInit pushes must never clobber its draft.
   const focusedKeyRef = useRef<string | null>(null);
@@ -229,7 +231,7 @@ export default function OpenCodeApp() {
 
   /**
    * Optimistically patch a dedicated payload slot and post the value — the structured
-   * twin of applySetting (permission / mcp / tui faces); same per-key in-flight rule.
+   * twin of applySetting (permission / tui / records faces); same per-key in-flight rule.
    */
   const applyStructured = useCallback(
     (
@@ -363,23 +365,6 @@ export default function OpenCodeApp() {
         }
         return { ...p, permission: { ...p.permission, tools } };
       },
-    );
-  };
-
-  /** Commit ONE server's disabled flag as a single-key snapshot map. */
-  const commitMcpToggle = (name: string, nextDisabled: boolean) => {
-    if (payload === null) {
-      return;
-    }
-    const index = payload.mcp.findIndex((server) => server.name === name);
-    if (index < 0) {
-      return;
-    }
-    applyStructured(
-      "mcpServers",
-      mcpToggleEdit(name, nextDisabled),
-      { slot: "mcp", servers: payload.mcp.map((server) => ({ ...server })) },
-      (p) => ({ ...p, mcp: p.mcp.map((server, i) => (i === index ? { ...server, disabled: nextDisabled } : server)) }),
     );
   };
 
@@ -678,18 +663,9 @@ export default function OpenCodeApp() {
             onToolChange={commitPermissionTool}
           />
         );
-      case "mcpServers":
-        return (
-          <McpToggleList
-            servers={payload?.mcp ?? []}
-            configPath={payload?.configPath ?? ""}
-            disabled={isPending}
-            onToggle={commitMcpToggle}
-          />
-        );
       case "recordEditor": {
-        // Masterless record path (command): a standalone entries editor fed from the
-        // records slot; the paired paths (formatter/lsp) render inside RecordGroup.
+        // Masterless record path (command / mcp): a standalone entries editor fed
+        // from the records slot; the paired paths (formatter/lsp) render inside RecordGroup.
         const slotKey = recordSlotKey(setting);
         const aggregate = payload?.records[slotKey] ?? { mode: "unset" as const, booleanValue: null, entries: {} };
         return (
@@ -699,6 +675,7 @@ export default function OpenCodeApp() {
             disabled={isPending}
             modelOptions={payload?.models ?? []}
             nameRules={setting.record}
+            settingKey={setting.key}
             onChange={(next) => commitRecordEntries(setting, next)}
           />
         );

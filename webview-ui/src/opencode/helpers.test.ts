@@ -96,9 +96,11 @@ describe("recordMasterPairs", () => {
     expect(pairs.get("lspMaster")?.key).toBe("lspEntries");
   });
 
-  it("never pairs the masterless command editor (renders standalone)", () => {
+  it("never pairs the masterless editors (command / mcp render standalone)", () => {
     const pairs = recordMasterPairs(OPENCODE_SETTINGS);
-    expect([...pairs.values()].map((setting) => setting.key)).not.toContain("command");
+    const pairedKeys = [...pairs.values()].map((setting) => setting.key);
+    expect(pairedKeys).not.toContain("command");
+    expect(pairedKeys).not.toContain("mcpEntries");
   });
 
   it("skips a master whose path root has no recordEditor (defensive)", () => {

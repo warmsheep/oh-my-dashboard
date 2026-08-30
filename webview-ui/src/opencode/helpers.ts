@@ -127,7 +127,7 @@ export function parseTuiThemeInput(raw: string): OpencodeStringParse {
  * Pair each recordMaster descriptor with the recordEditor descriptor sharing its
  * path root (formatter/lsp). The pair's entries row is rendered INSIDE the
  * RecordGroup of the master row, so the entries descriptor itself is hidden from
- * the group's row list; command has no master and renders standalone.
+ * the group's row list; command and mcp have no master and render standalone.
  */
 export function recordMasterPairs(settings: readonly OpencodeSetting[]): Map<string, OpencodeSetting> {
   const editorsByPathRoot = new Map<string, OpencodeSetting>();
