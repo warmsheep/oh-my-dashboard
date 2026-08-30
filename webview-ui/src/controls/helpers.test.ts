@@ -30,8 +30,10 @@ import {
   isAgentPairReasoningLocked,
   isPermissionShorthandLocked,
   isPermissionToolsLocked,
+  isRecordEditorLeaf,
   isRecordEntriesLocked,
   isRecordMasterLocked,
+  isStringMapLeaf,
   isWideSettingKind,
   modelAliasError,
   moveListEntry,
@@ -574,6 +576,26 @@ const REFERENCE_FIELDS: RecordFieldDef[] = [
 function aggregate(partial: Partial<RecordAggregate>): RecordAggregate {
   return { mode: "unset", booleanValue: null, entries: {}, ...partial };
 }
+
+describe("isStringMapLeaf / isRecordEditorLeaf (record field-leaf discriminators)", () => {
+  it("isStringMapLeaf accepts string/null maps only, rejecting nested record leaves", () => {
+    expect(isStringMapLeaf({ KEY: "v", GONE: null })).toBe(true);
+    expect(isStringMapLeaf({})).toBe(true);
+    expect(isStringMapLeaf({ pro: { name: "P" } })).toBe(false);
+    expect(isStringMapLeaf(["a", "b"])).toBe(false);
+    expect(isStringMapLeaf("KEY=v")).toBe(false);
+    expect(isStringMapLeaf(null)).toBe(false);
+  });
+
+  it("isRecordEditorLeaf accepts record/null entries only, rejecting string maps and arrays", () => {
+    expect(isRecordEditorLeaf({ pro: { name: "P" }, gone: null })).toBe(true);
+    expect(isRecordEditorLeaf({})).toBe(true);
+    expect(isRecordEditorLeaf({ KEY: "v" })).toBe(false);
+    expect(isRecordEditorLeaf({ KEY: null, pro: { name: "P" } })).toBe(true);
+    expect(isRecordEditorLeaf(["pro"])).toBe(false);
+    expect(isRecordEditorLeaf(null)).toBe(false);
+  });
+});
 
 describe("recordEntryNameError (add-row validation)", () => {
   it("accepts trimmed npm-ish names and rejects empty / charset / length violations", () => {

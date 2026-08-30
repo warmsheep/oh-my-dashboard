@@ -425,6 +425,33 @@ export function withoutStringMapEntry(value: StringMapValue | null, key: string)
 // recordEditor / recordMaster kinds
 // ---------------------------------------------------------------------------
 
+/**
+ * Narrow a record field leaf to the stringMap shape — a kind "record" value is
+ * also an object, so the map's values must be checked (string or null only).
+ */
+export function isStringMapLeaf(leaf: RecordFieldValue): leaf is StringMapValue {
+  return (
+    typeof leaf === "object" &&
+    leaf !== null &&
+    !Array.isArray(leaf) &&
+    Object.values(leaf).every((entry) => entry === null || typeof entry === "string")
+  );
+}
+
+/**
+ * Narrow a record field leaf to the nested recordEditor shape (entries are
+ * records or null markers) — the twin discriminator of {@link isStringMapLeaf};
+ * both accept an empty/all-null object, the field kind decides the editor.
+ */
+export function isRecordEditorLeaf(leaf: RecordFieldValue): leaf is RecordEditorValue {
+  return (
+    typeof leaf === "object" &&
+    leaf !== null &&
+    !Array.isArray(leaf) &&
+    Object.values(leaf).every((entry) => entry === null || (typeof entry === "object" && !Array.isArray(entry)))
+  );
+}
+
 /** Name rules of one recordEditor descriptor (OpencodeSetting["record"] minus fields). */
 export interface RecordNameRules {
   namePattern?: string;

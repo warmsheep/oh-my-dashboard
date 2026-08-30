@@ -9,6 +9,8 @@ import { useMemo, useState } from "react";
 
 import { groupModelsByProvider } from "../helpers";
 import {
+  isRecordEditorLeaf,
+  isStringMapLeaf,
   parseNumberFieldInput,
   parseRecordTextField,
   planRecordCommit,
@@ -26,9 +28,10 @@ import StringMapEditor from "./StringMapEditor";
  * entry (name button selects it, 删除 commits a null deletion marker for live names
  * or drops a never-committed draft locally) plus a 新增名称 row and the selected
  * entry's per-field form (text input, multiline textarea, s-switch, stringList,
- * stringMap KEY/VALUE rows, number input, enum / provider-grouped model selects).
- * EVERY change commits the FULL snapshot — including null deletion markers,
- * collapsing to null when no live entry remains.
+ * stringMap KEY/VALUE rows, number input, enum / provider-grouped model selects,
+ * and "record"-kind fields rendering ONE nested RecordEditor level — e.g. the
+ * provider entry's models block). EVERY change commits the FULL snapshot —
+ * including null deletion markers, collapsing to null when no live entry remains.
  * Required-field gate: while any LIVE entry leaves a required field empty, no
  * onChange may fire; the change is held in a local working copy (surviving init
  * pushes, cleared with the entry on deletion) until the gap is fixed or the entry
@@ -261,7 +264,11 @@ export default function RecordEditor({
   /** The selected entry's form: one row per RecordFieldDef, laid out per kind. */
   const renderField = (name: string, field: RecordFieldDef) => {
     const leaf = entryOf(name)[field.key] ?? null;
-    const wide = field.kind === "multiline" || field.kind === "stringList" || field.kind === "stringMap";
+    const wide =
+      field.kind === "multiline" ||
+      field.kind === "stringList" ||
+      field.kind === "stringMap" ||
+      field.kind === "record";
     return (
       <div className={wide ? "rec-field rec-field-wide" : "rec-field"} key={field.key}>
         <span className="rec-field-label" title={field.label}>
@@ -343,8 +350,18 @@ export default function RecordEditor({
         )}
         {field.kind === "stringMap" && (
           <StringMapEditor
-            value={leaf !== null && typeof leaf === "object" && !Array.isArray(leaf) ? leaf : null}
+            value={leaf !== null && isStringMapLeaf(leaf) ? leaf : null}
             disabled={disabled}
+            onChange={(next) => setLeaf(name, field, next)}
+          />
+        )}
+        {field.kind === "record" && (
+          <RecordEditor
+            fields={field.record?.fields ?? []}
+            value={leaf !== null && isRecordEditorLeaf(leaf) ? leaf : null}
+            disabled={disabled}
+            modelOptions={modelOptions}
+            nameRules={field.record}
             onChange={(next) => setLeaf(name, field, next)}
           />
         )}

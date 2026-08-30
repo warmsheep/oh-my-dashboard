@@ -108,6 +108,12 @@
   gap: 2px;
 }
 
+/* Nested record editor (e.g. provider entry's models block): inset one level. */
+.rec-field-wide .ctl-record {
+  padding-left: 8px;
+  border-left: 2px solid var(--hairline);
+}
+
 .rec-field-label {
   display: flex;
   flex-direction: column;

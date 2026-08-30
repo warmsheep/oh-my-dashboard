@@ -113,7 +113,12 @@ const DEV_PAYLOAD: OpencodeSettingsPayload = {
       mode: "entries",
       booleanValue: null,
       entries: {
-        mygw: { name: "My Gateway", "options.baseURL": "https://gw.example.internal/v1", whitelist: ["gw/pro"] },
+        mygw: {
+          name: "My Gateway",
+          "options.baseURL": "https://gw.example.internal/v1",
+          models: { pro: { name: "GW Pro", "limit.context": 128000, "limit.output": 8192 } },
+          whitelist: ["gw/pro"],
+        },
       },
     },
     references: {
