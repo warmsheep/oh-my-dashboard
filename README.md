@@ -18,7 +18,7 @@ VSCode 扩展：管理 [opencode](https://opencode.ai) 与 [oh-my-opencode](http
 - **Open Base Opencode**（命令面板）：在编辑器区域新开一个**普通终端**直接运行 opencode TUI——无 tmux 与其环境修正，适用于不需要 agent team 模式或 tmux 的场景；同样**固定一个随机空闲端口**（`opencode --port <P>`，终端环境附带 `OPENCODE_PORT` 兜底），其他终端可 `opencode attach http://127.0.0.1:<P>` 或工具直连。直连 VSCode 终端时 TUI 原生获得 truecolor 配色并经 OSC 背景探测自动跟随明暗主题；**三平台原生支持**（Linux/macOS/本地 Windows——命令仅为 `opencode --port <数字>`，经终端 `cwd` 选项定位工作区，无 shell 方言差异；缺省 opencode 时由终端自身报错）
 - **Open Tmux Opencode**（命令面板）：在编辑器区域新开一个终端页，通过 tmux 启动 opencode TUI，并绑定一个随机空闲端口（同时导出 `OPENCODE_PORT` 供 oh-my-openagent 兜底）——这是 oh-my-openagent agent team 模式的兼容启动方式（opencode TUI 必须带 `--port` 才会启用真实 HTTP 服务，team 模式据此用 `opencode attach` 拉起成员窗格）。tmux 会话按工作区命名（`opencode-<项目名>`），重复执行直接 attach 已有会话（保留原端口）；自动修正 pane 颜色环境（TERM 升级至 256 色、旧 tmux 清空泄漏的 COLORTERM，team 成员窗格同样继承），避免 TUI 全黑；**启动主题跟随 VSCode 明暗配色**（亮色主题 → opencode 亮色模式，暗色 → 暗色；tmux 下终端背景探测失效，通过逐次状态目录锁定 TUI 的 `theme_mode_lock` 并写入会话环境实现，主 Agent 与 team 成员窗格一并继承，不改动全局配置）；未安装 tmux 时给出中文安装指引。team 模式本身需在 `~/.omo/omo.jsonc` 开启 `team_mode.enabled`（可视化另需 `tmux_visualization`）。**平台支持**：Linux 与 macOS 原生支持（macOS 需 `brew install tmux`；tmux ≥ 2.1 才有 team 分栏所需的百分比窗格尺寸）；Windows 经 **Remote-WSL** 完整支持（用 WSL 打开工作区、WSL 内安装 tmux 即可，与 Linux 行为一致）——本地 Windows 无 tmux 时命令给出 WSL 指引后降级，不做 PowerShell 原生桥接（team 模式可视化本身依赖 POSIX tmux）
 - **Coding Plan 额度**（状态栏右侧）：实时显示 Kimi / GLM / MiMo / DeepSeek 剩余额度（5 小时额度、周额度；MiMo 为月额度+余额；DeepSeek 为按量计费余额）
-  - 点击打开**管理面板**（类设置页的编辑器窗口，与「打开设置」同页），「额度/设置」选项卡切换；额度页按供应商分组展示各窗口进度条、剩余百分比与重置时间，每组可单独「刷新」，底部「刷新全部」；面板打开期间跟随自动刷新实时更新
+  - 点击打开**管理面板**（类设置页的编辑器窗口，与「打开设置」同页），顶部 OMO / OpenCode / 额度 / 设置 / 模板 / 技能六选项卡随时切换；额度页按供应商分组展示各窗口进度条、剩余百分比与重置时间，每组可单独「刷新」，底部「刷新全部」；面板打开期间跟随自动刷新实时更新
   - 每个供应商分组头部有**「状态栏」开关**：关闭后状态栏不再显示该供应商，也不再定时刷新其额度（仅在管理面板打开期间刷新，节省请求）；开关状态存于 `quota.json` 的 `statusBar` 块
   - Kimi / GLM / DeepSeek 自动读取 opencode 凭据（`~/.local/share/opencode/auth.json`），面板内只读显示检测状态，更换请运行 `opencode auth login`；DeepSeek 官方仅提供余额接口，显示 `¥余额` 与币种
   - MiMo 官方仅提供 Dashboard API：在其分组内粘贴 `platform.xiaomimimo.com` 的浏览器 Cookie 保存（存入 `quota.json`，留空不改动；也可经「Coding Plan 额度：配置 MiMo Cookie…」直达该分组）
@@ -50,7 +50,12 @@ code --install-extension build/packages/opencode-config-manager-<版本>.vsix
 
 ### 设置
 
-入口：侧边栏面板标题栏的齿轮按钮（或命令面板「OpenCode: 打开设置」），打开「OpenCode 管理」面板并落在首个**配置选项卡**（与状态栏额度点击打开的额度选项卡同页，页面顶部选项卡随时切换，设置项在「设置」选项卡）。**配置选项卡**（排在最前）分两块：当前 OMO 的 agent/分类模型配置——页内下拉即时修改并写入检测到的目标文件（`~/.omo/omo.jsonc` 或旧版），显示写入目标路径；Skills 只读清单——列出全部已发现技能的名称与描述（读取各 SKILL.md 的 frontmatter），按目录分组并标注 全局/项目：
+入口：侧边栏面板标题栏的齿轮按钮（或命令面板「OpenCode: 打开设置」），打开「OpenCode 管理」面板并落在首个 **OMO 选项卡**（与状态栏额度点击打开的额度选项卡同页，页面顶部选项卡随时切换）。管理面板共六个选项卡，前两个为即时编辑页：
+
+- **OMO**（排在最前）：当前 OMO 的 agent/分类模型配置——页内下拉即时修改并写入检测到的目标文件（`~/.omo/omo.jsonc` 或旧版），显示写入目标路径；下方「功能设置」区可视化编辑 oh-my-openagent 常用功能开关（遥测、团队模式、行内编辑、Sisyphus 编排、后台任务并发数等），开关/输入即时写入，文件未设置时按默认值显示，清空数字输入即恢复默认
+- **OpenCode**：可视化编辑 opencode.json 常用设置——默认模型/小模型/build 与 plan 智能体模型（按供应商分组的下拉）、会话分享、自动更新、文件快照、默认智能体、用户名、禁用的供应商（复选 chips）；「未设置」即删除该键回到默认行为，顶部显示配置文件路径
+- **技能**（末位）：Skills 只读清单——列出全部已发现技能的名称与描述（读取各 SKILL.md 的 frontmatter），按目录分组并标注 全局/项目
+- **额度 / 模板**：见「Coding Plan 额度」与「模板」功能节；**设置**即本节下述内容：
 
 - **分区自动刷新**：配置 / 模板 / 备份 / 模型 / 插件五个分区各自独立开关（切换按钮），开启后可配置轮询间隔（秒，默认 30，范围 1–3600）；关闭（默认）时仅保留文件变更监听 + 手动刷新
 - **Coding Plan 额度刷新频率**：默认 30 秒（0 = 关闭自动刷新），与状态栏/额度页同源生效，更改后立即按新频率查询
@@ -76,8 +81,8 @@ src/core/      纯逻辑（无 vscode 依赖，vitest 单测）
   atomicFile / pathSafety / errors / watchManager  基础设施
 src/tree/      树节点纯构建器 + 单一分区 Explorer
 src/ui/        命令 / QuickPick / 状态栏（模板 + 额度）/ 设置读写
-src/webview/   Webview 宿主（管理面板〔配置/额度/设置/模板选项卡〕+ 模板会话控制器；CSP + postMessage 协议）
-webview-ui/    React 前端（Vite 单入口管理页：配置 + 额度 + 设置 + 模板四选项卡，VSCode CSS 变量主题）
+src/webview/   Webview 宿主（管理面板〔OMO/OpenCode/额度/设置/模板/技能选项卡〕+ 模板会话控制器；CSP + postMessage 协议）
+webview-ui/    React 前端（Vite 单入口管理页：OMO + OpenCode + 额度 + 设置 + 模板 + 技能六选项卡，VSCode CSS 变量主题）
 ```
 
 数据位置：模板 `~/.config/opencode/presets/*.json`；备份 `~/.config/opencode/backups/<ISO时间戳>-manual/`（含 `manifest.json` 与展示名称，覆盖检测到的实际配置文件与 `~/.agents/skills`）。模板应用/捕获的写入目标由本机检测结果决定（`~/.omo/omo.jsonc` 或旧版 `oh-my-opencode.json[c]`）。

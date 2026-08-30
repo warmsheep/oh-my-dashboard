@@ -2,6 +2,14 @@
 
 > 版本与日期以 git 历史为准；0.8.0–0.14.0、0.16.x、0.18.0 等中间版本为本地打包、版本号未入库，相关变更归并入下一个入库版本。
 
+## 0.39.0 (2026-08-30)
+
+- **管理面板选项卡重构：四选项卡 → 六选项卡（OMO · OpenCode · 额度 · 设置 · 模板 · 技能）**。设计方案见 `docs/plans/2026-08-30-manager-tabs-omo-opencode-skills-design.md`（基于 oh-my-openagent `omo.schema.json` 与 opencode 官方 `config.json` schema 的配置项调研）
+- **「技能」选项卡（末位）**：Skills 只读清单从原「配置」选项卡拆出为独立选项卡，按目录分组/全局项目徽标/可折叠不变，数据继续随 configInit 推送
+- **「配置」→「OMO」（首位，选项卡 id 不变）**：保留智能体/分类模型配置，新增「功能设置」区——oh-my-openagent 13 项高频设置可视化即时编辑（遥测、团队模式/团队可视化/tmux 集成、hashline 编辑、实验任务系统、Sisyphus 编排五开关、运行时回退、后台并发数）；写入自动区分 `~/.omo/omo.jsonc` `[opencode]` 块与 legacy 顶层，JSONC 注释/`$schema` 保真
+- **新增「OpenCode」选项卡（第二位）**：opencode.json 常用键可视化编辑 10 项（主模型/小模型下拉复用模型清单、默认智能体、分享、自动更新三态、文件快照、用户名、禁用供应商多选、build/plan 智能体模型覆写）；调研确认的废弃键（theme/keybinds/tui 等，opencode 加载时静默删除）不提供编辑
+- 配置项描述符收口在 `shared/protocol.ts`（`OMO_MISC_SETTINGS`/`OPENCODE_SETTINGS`），宿主校验与 UI 渲染同源；即时写 + 乐观更新 + 失败回滚 + 12s 无响应守卫；新消息经 parseMessage 白名单校验 + 拒绝回执兜底；修复审查发现的 init 推送草稿保护（focusedFieldRef 模式）与迟到失败回执守卫。测试：根套件 617、webview 105、e2e 53 checks 全绿
+
 ## 0.38.0 (2026-08-29)
 
 - **Open Base Opencode 同样固定随机端口**：启动命令改为 `opencode --port <随机空闲端口>`（复用 core `pickFreePort`，探测失败经 `FREE_PORT_UNAVAILABLE` 中文降级），终端环境经 `TerminalOptions.env`（合并模式）附带 `OPENCODE_PORT` 兜底（与 tmux 启动一致，覆盖旧版 opencode 的 ctx.serverUrl 缺失场景）——其他终端可 `opencode attach http://127.0.0.1:<P>`、外部工具可直连；启动后弹出端口提示。纯数字 flag 保持 bash/zsh/fish/PowerShell/cmd 全方言兼容，三平台原生支持不变
