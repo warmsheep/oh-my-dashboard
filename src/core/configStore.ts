@@ -3,7 +3,13 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import { OMO_MISC_SETTINGS, OPENCODE_SETTINGS } from "../shared/protocol";
-import type { OmoMiscValues, OmoSettingValue, OpencodePermissionState, OpencodeSettingValue } from "../shared/protocol";
+import type {
+  OmoMiscValues,
+  OmoSettingValue,
+  OpencodePermissionState,
+  OpencodeRecordStates,
+  OpencodeSettingValue,
+} from "../shared/protocol";
 import { agentAssignmentEdits } from "./agentAssignment";
 import { writeFileAtomic } from "./atomicFile";
 import { ensureLocalModelsFile, mergeModelOptions } from "./builtinModels";
@@ -15,6 +21,7 @@ import {
   readMcpServers,
   readOpencodeSettingValues,
   readPermissionState,
+  readRecordStates,
 } from "./opencodeSettings";
 import { declaredPluginSpecifiers, listDeclaredPlugins } from "./pluginResolver";
 import { readdirSafe, readDirTree, skillDirCandidates, skillNamesFromTree, TREE_EXCLUDES } from "./skillScanner";
@@ -383,7 +390,8 @@ export class ConfigStore {
    * Descriptors carrying file:"tui" route to tui.json ({@link setTuiTheme}); the rest
    * write opencode.json[c] with the same contract as setAgentModel: descriptor key +
    * value validated first (OPENCODE_SETTING_INVALID), readTextForEdit, JSONC syntax
-   * abort, atomic write; creates the file when missing.
+   * abort, atomic write; creates the file when missing. A record root whose file shape
+   * conflicts with the write (e.g. `"command": "x"`) aborts with OPENCODE_SETTING_CONFLICT.
    */
   setOpencodeSetting(key: string, value: OpencodeSettingValue): void {
     const setting = OPENCODE_SETTINGS.find((entry) => entry.key === key);
@@ -401,7 +409,19 @@ export class ConfigStore {
     if (parse.errors.length > 0) {
       throw new JsoncSyntaxError(parse.errors);
     }
-    const next = applyEdits(raw.length > 0 ? raw : "{}", opencodeSettingEdits(setting, value));
+    let next: string;
+    try {
+      next = applyEdits(raw.length > 0 ? raw : "{}", opencodeSettingEdits(setting, value));
+    } catch (error) {
+      // jsonc-parser leaks raw English on shape conflicts (e.g. adding an entry under
+      // a string-typed `command` root throws "Can not add index to parent of type
+      // string"); translate exactly those to the coded error FRIENDLY_ERRORS maps.
+      // Everything else propagates untouched.
+      if (error instanceof Error && /^Can not (add|remove|delete)/i.test(error.message)) {
+        throw new Error("OPENCODE_SETTING_CONFLICT");
+      }
+      throw error;
+    }
     defaultFs.mkdirSync(path.dirname(target), { recursive: true });
     this.writeAtomic(target, next);
   }
@@ -414,6 +434,11 @@ export class ConfigStore {
   /** The permission aggregate (shorthand + per-tool actions + advanced tool list) for the OpenCode tab payload. */
   permissionState(): OpencodePermissionState {
     return readPermissionState(this.readTextOrEmpty(this.resolveOpencodeConfigPath()));
+  }
+
+  /** Record aggregates of the 命令/格式化/LSP groups (OpenCode tab payload view, display-tolerant). */
+  recordStates(): OpencodeRecordStates {
+    return readRecordStates(this.readTextOrEmpty(this.resolveOpencodeConfigPath()));
   }
 
   /** Path of the standalone tui.json face (the TUI theme lives here, never in opencode.json). */

@@ -1253,6 +1253,149 @@ describe("ConfigStore.setOpencodeSetting / opencodeSettingValues", () => {
   });
 });
 
+describe("ConfigStore recordEditor / recordMaster (batch-4 record kinds)", () => {
+  it("writes a command entry with template+model, preserving JSONC comments and siblings", () => {
+    const dir = sandbox();
+    writeFileSync(path.join(dir, "opencode.json"), '// header\n{\n  "model": "a/b",\n}\n');
+    const store = new ConfigStore({ configDirOverride: dir, homeDir: sandbox() });
+
+    store.setOpencodeSetting("command", { fix: { template: "run fix $ARGUMENTS", model: "zhipuai/glm-5" } });
+
+    const text = readFileSync(path.join(dir, "opencode.json"), "utf8");
+    expect(validate(text)).toEqual([]);
+    expect(text).toContain("// header");
+    expect(getValue(text, ["command", "fix"])).toEqual({ template: "run fix $ARGUMENTS", model: "zhipuai/glm-5" });
+    expect(getValue(text, ["model"])).toBe("a/b");
+    expect(store.recordStates().command).toEqual({
+      mode: "entries",
+      booleanValue: null,
+      entries: { fix: { template: "run fix $ARGUMENTS", model: "zhipuai/glm-5" } },
+    });
+  });
+
+  it("renames and deletes entries per-name; absent names stay untouched", () => {
+    const dir = sandbox();
+    writeFileSync(
+      path.join(dir, "opencode.json"),
+      '{\n  "command": {\n    "old": { "template": "t", "custom": 1 },\n    "keep": { "template": "k" },\n  },\n}\n',
+    );
+    const store = new ConfigStore({ configDirOverride: dir, homeDir: sandbox() });
+
+    store.setOpencodeSetting("command", { old: null, renamed: { template: "t" } });
+
+    let text = readFileSync(path.join(dir, "opencode.json"), "utf8");
+    expect(getValue(text, ["command"])).toEqual({ renamed: { template: "t" }, keep: { template: "k" } });
+
+    store.setOpencodeSetting("command", { renamed: null });
+
+    text = readFileSync(path.join(dir, "opencode.json"), "utf8");
+    expect(getValue(text, ["command"])).toEqual({ keep: { template: "k" } });
+    expect(store.recordStates().command).toEqual({
+      mode: "entries",
+      booleanValue: null,
+      entries: { keep: { template: "k" } },
+    });
+  });
+
+  it("formatterMaster=false writes the boolean and the aggregate reports the master form", () => {
+    const dir = sandbox();
+    writeFileSync(path.join(dir, "opencode.json"), "{}\n");
+    const store = new ConfigStore({ configDirOverride: dir, homeDir: sandbox() });
+
+    store.setOpencodeSetting("formatterMaster", false);
+
+    expect(getValue(readFileSync(path.join(dir, "opencode.json"), "utf8"), ["formatter"])).toBe(false);
+    expect(store.recordStates().formatter).toEqual({ mode: "boolean", booleanValue: false, entries: {} });
+
+    store.setOpencodeSetting("formatterMaster", null);
+
+    expect(getValue(readFileSync(path.join(dir, "opencode.json"), "utf8"), ["formatter"])).toBeUndefined();
+    expect(store.recordStates().formatter.mode).toBe("unset");
+  });
+
+  it("formatterEntries add writes the entry object form and merges per-name", () => {
+    const dir = sandbox();
+    writeFileSync(path.join(dir, "opencode.json"), '{ "formatter": { "existing": { "command": ["x"] } } }\n');
+    const store = new ConfigStore({ configDirOverride: dir, homeDir: sandbox() });
+
+    store.setOpencodeSetting("formatterEntries", {
+      prettier: { command: ["npx", "prettier"], extensions: ["ts", "tsx"] },
+    });
+
+    const text = readFileSync(path.join(dir, "opencode.json"), "utf8");
+    expect(getValue(text, ["formatter", "prettier"])).toEqual({
+      command: ["npx", "prettier"],
+      extensions: ["ts", "tsx"],
+    });
+    expect(getValue(text, ["formatter", "existing"])).toEqual({ command: ["x"] });
+  });
+
+  it("lspEntries add/remove round-trips through recordStates", () => {
+    const dir = sandbox();
+    writeFileSync(path.join(dir, "opencode.json"), "{}\n");
+    const store = new ConfigStore({ configDirOverride: dir, homeDir: sandbox() });
+
+    store.setOpencodeSetting("lspEntries", { typescript: { command: ["tsgo"], disabled: true } });
+
+    expect(getValue(readFileSync(path.join(dir, "opencode.json"), "utf8"), ["lsp", "typescript"])).toEqual({
+      command: ["tsgo"],
+      disabled: true,
+    });
+    expect(store.recordStates().lsp).toEqual({
+      mode: "entries",
+      booleanValue: null,
+      entries: { typescript: { command: ["tsgo"], disabled: true } },
+    });
+
+    store.setOpencodeSetting("lspEntries", { typescript: null });
+
+    expect(getValue(readFileSync(path.join(dir, "opencode.json"), "utf8"), ["lsp", "typescript"])).toBeUndefined();
+  });
+
+  it("throws OPENCODE_SETTING_INVALID for invalid record values and writes nothing", () => {
+    const dir = sandbox();
+    const target = path.join(dir, "opencode.json");
+    writeFileSync(target, '{ "model": "a/b" }\n');
+    const store = new ConfigStore({ configDirOverride: dir, homeDir: sandbox() });
+    const before = readFileSync(target);
+
+    expect(() => store.setOpencodeSetting("command", { fix: { description: "missing template" } })).toThrow(
+      "OPENCODE_SETTING_INVALID",
+    );
+    expect(() => store.setOpencodeSetting("command", { "bad name!": { template: "t" } })).toThrow(
+      "OPENCODE_SETTING_INVALID",
+    );
+    expect(() => store.setOpencodeSetting("formatterMaster", "yes")).toThrow("OPENCODE_SETTING_INVALID");
+    expect(() => store.setOpencodeSetting("lspEntries", { l: { extensions: ["ts", "ts"] } })).toThrow(
+      "OPENCODE_SETTING_INVALID",
+    );
+    expect(readFileSync(target)).toEqual(before);
+  });
+
+  it("deleting the last entry via setOpencodeSetting(command, null) removes the whole key from disk", () => {
+    const dir = sandbox();
+    writeFileSync(path.join(dir, "opencode.json"), '{ "command": { "fix": { "template": "t" } } }\n');
+    const store = new ConfigStore({ configDirOverride: dir, homeDir: sandbox() });
+
+    store.setOpencodeSetting("command", null);
+
+    const onDisk = JSON.parse(readFileSync(path.join(dir, "opencode.json"), "utf8")) as Record<string, unknown>;
+    expect(Object.hasOwn(onDisk, "command")).toBe(false);
+    expect(store.recordStates().command).toEqual({ mode: "unset", booleanValue: null, entries: {} });
+  });
+
+  it("a string-typed record root surfaces OPENCODE_SETTING_CONFLICT, not the raw jsonc error", () => {
+    const dir = sandbox();
+    const target = path.join(dir, "opencode.json");
+    writeFileSync(target, '{ "command": "oops" }\n');
+    const store = new ConfigStore({ configDirOverride: dir, homeDir: sandbox() });
+    const before = readFileSync(target);
+
+    expect(() => store.setOpencodeSetting("command", { a: { template: "x" } })).toThrow("OPENCODE_SETTING_CONFLICT");
+    expect(readFileSync(target)).toEqual(before);
+  });
+});
+
 describe("ConfigStore tui.json face (tuiConfigPath / tuiTheme / setTuiTheme)", () => {
   it("tuiConfigPath points at configDir/tui.json", () => {
     const dir = sandbox();

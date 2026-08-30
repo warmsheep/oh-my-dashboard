@@ -24,6 +24,7 @@ export const FRIENDLY_ERRORS: Record<string, string> = {
   BACKUP_RESTORE_TOO_LARGE: "备份内容过大（超过 256MB 或 2 万条目上限），已中止恢复",
   CONFIG_UNREADABLE: "配置文件存在但无法读取（权限或被占用），已中止以防覆盖",
   OPENCODE_SETTING_INVALID: "OpenCode 设置项的键或值不合法",
+  OPENCODE_SETTING_CONFLICT: "配置文件中同名键的类型与写入冲突，请先修正该键或改用文件编辑",
   OMO_SETTING_INVALID: "OMO 功能设置的键或值不合法",
   TUI_THEME_INVALID: "TUI 主题名不合法",
   MIMO_COOKIE_INVALID: "MiMo Cookie 格式无法识别，请粘贴完整的 Cookie 字符串",
