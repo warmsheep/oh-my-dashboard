@@ -3,16 +3,18 @@ import { describe, expect, it } from "vitest";
 import { MANAGER_TABS, normalizeManagerTab } from "./helpers";
 
 describe("MANAGER_TABS", () => {
-  it("lists the config tab first, then quota/settings/preset", () => {
-    expect(MANAGER_TABS).toEqual(["config", "quota", "settings", "preset"]);
+  it("lists the six tabs in display order (OMO · OpenCode · 额度 · 设置 · 模板 · 技能)", () => {
+    expect(MANAGER_TABS).toEqual(["config", "opencode", "quota", "settings", "preset", "skills"]);
   });
 });
 
 describe("normalizeManagerTab", () => {
   it("passes through the known literal tabs", () => {
     expect(normalizeManagerTab("config")).toBe("config");
+    expect(normalizeManagerTab("opencode")).toBe("opencode");
     expect(normalizeManagerTab("settings")).toBe("settings");
     expect(normalizeManagerTab("preset")).toBe("preset");
+    expect(normalizeManagerTab("skills")).toBe("skills");
     expect(normalizeManagerTab("quota")).toBe("quota");
   });
 

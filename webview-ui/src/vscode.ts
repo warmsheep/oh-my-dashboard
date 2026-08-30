@@ -47,7 +47,7 @@ export function postToHost(message: WebviewToExt): void {
 }
 
 /**
- * Whole-webview state shape. The manager page is ONE webview hosting three tabs,
+ * Whole-webview state shape. The manager page is ONE webview hosting six tabs,
  * so the previously per-page getState slots are namespaced: the active tab and
  * per-preset editor drafts (keyed by the preset name the draft belongs to) must
  * not clobber each other — every writer merges into the current state object.

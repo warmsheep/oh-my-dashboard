@@ -1,8 +1,9 @@
-/* Manager page shell: a tab bar plus four always-mounted page bodies (CSS toggle —
+/* Manager page shell: a tab bar plus six always-mounted page bodies (CSS toggle —
    unmounting would drop drafts, pending markers, and the pong probe answer). */
 
 .mtabs {
   display: flex;
+  flex-wrap: wrap;
   gap: 4px;
   border-bottom: 1px solid var(--hairline);
   margin-bottom: 18px;

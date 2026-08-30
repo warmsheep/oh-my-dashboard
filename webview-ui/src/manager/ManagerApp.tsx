@@ -3,8 +3,10 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import App from "../App";
 import ConfigApp from "../config/ConfigApp";
+import OpenCodeApp from "../opencode/OpenCodeApp";
 import QuotaApp from "../quota/QuotaApp";
 import SettingsApp from "../settings/SettingsApp";
+import SkillApp from "../skills/SkillApp";
 import { getVSCodeApi, hasVSCodeApi, postToHost, setManagerTabState } from "../vscode";
 import { MANAGER_TABS, normalizeManagerTab } from "./helpers";
 
@@ -17,10 +19,17 @@ function readPersistedTab(): ManagerTab {
   }
 }
 
-const TAB_LABELS: Record<ManagerTab, string> = { config: "配置", quota: "额度", settings: "设置", preset: "模板" };
+const TAB_LABELS: Record<ManagerTab, string> = {
+  config: "OMO",
+  opencode: "OpenCode",
+  quota: "额度",
+  settings: "设置",
+  preset: "模板",
+  skills: "技能",
+};
 
 /**
- * Merged manager page: one tab bar, four always-mounted bodies (配置/额度/设置/模板).
+ * Merged manager page: one tab bar, six always-mounted bodies (OMO/OpenCode/额度/设置/模板/技能).
  * The ROOT listener owns the `ready` handshake (sent once) and the `pong`
  * liveness answer — both must work regardless of the active tab, which is also
  * why the tab contents are CSS-toggled instead of unmounted (preset drafts,
@@ -86,7 +95,7 @@ export default function ManagerApp() {
       <div className="page manager-page">
         <header className="page-head">
           <h1>OpenCode 管理</h1>
-          <p>配置总览 · 模板矩阵编辑 · Coding Plan 额度 · 插件设置</p>
+          <p>OMO 模型配置 · OpenCode 设置 · Coding Plan 额度 · 扩展设置 · 模板矩阵编辑 · 技能清单</p>
         </header>
 
         <div className="mtabs" role="tablist" aria-label="管理页分区" onKeyDown={onTablistKeyDown}>
@@ -120,6 +129,15 @@ export default function ManagerApp() {
           <ConfigApp />
         </div>
         <div
+          id="mpanel-opencode"
+          className="mtab-body"
+          role="tabpanel"
+          aria-labelledby="mtab-opencode"
+          hidden={tab !== "opencode"}
+        >
+          <OpenCodeApp />
+        </div>
+        <div
           id="mpanel-quota"
           className="mtab-body"
           role="tabpanel"
@@ -145,6 +163,15 @@ export default function ManagerApp() {
           hidden={tab !== "preset"}
         >
           <App />
+        </div>
+        <div
+          id="mpanel-skills"
+          className="mtab-body"
+          role="tabpanel"
+          aria-labelledby="mtab-skills"
+          hidden={tab !== "skills"}
+        >
+          <SkillApp />
         </div>
       </div>
     </main>

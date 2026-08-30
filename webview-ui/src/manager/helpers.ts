@@ -1,7 +1,7 @@
 import type { ManagerTab } from "@shared/protocol";
 
-/** Manager tabs in display order (config first per the panel spec; quota stays the status-bar click target). */
-export const MANAGER_TABS: readonly ManagerTab[] = ["config", "quota", "settings", "preset"];
+/** Manager tabs in display order (OMO · OpenCode · 额度 · 设置 · 模板 · 技能; quota stays the status-bar click target). */
+export const MANAGER_TABS: readonly ManagerTab[] = ["config", "opencode", "quota", "settings", "preset", "skills"];
 
 /**
  * Validate an unknown persisted tab value (webview getState is untrusted storage):
@@ -9,5 +9,7 @@ export const MANAGER_TABS: readonly ManagerTab[] = ["config", "quota", "settings
  * panel's primary purpose.
  */
 export function normalizeManagerTab(value: unknown): ManagerTab {
-  return value === "config" || value === "settings" || value === "preset" ? value : "quota";
+  return value === "config" || value === "opencode" || value === "settings" || value === "preset" || value === "skills"
+    ? value
+    : "quota";
 }
