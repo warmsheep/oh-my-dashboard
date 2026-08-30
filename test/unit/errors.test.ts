@@ -34,6 +34,7 @@ describe("FRIENDLY_ERRORS — every coded Error maps to its Chinese message", ()
     expect(FRIENDLY_ERRORS["CONFIG_UNREADABLE"]).toContain("无法读取");
     expect(FRIENDLY_ERRORS["PRESET_ALREADY_EXISTS"]).toBe("同名模板已存在");
     expect(FRIENDLY_ERRORS["MIMO_COOKIE_INVALID"]).toContain("MiMo Cookie");
+    expect(FRIENDLY_ERRORS["PLUGIN_PROTECTED"]).toContain("手动编辑文件");
   });
 
   it("also maps plain-string throws (not only Error instances)", () => {

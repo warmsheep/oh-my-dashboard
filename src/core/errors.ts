@@ -25,6 +25,7 @@ export const FRIENDLY_ERRORS: Record<string, string> = {
   CONFIG_UNREADABLE: "配置文件存在但无法读取（权限或被占用），已中止以防覆盖",
   OPENCODE_SETTING_INVALID: "OpenCode 设置项的键或值不合法",
   OPENCODE_SETTING_CONFLICT: "配置文件中同名键的类型与写入冲突，请先修正该键或改用文件编辑",
+  PLUGIN_PROTECTED: "配置包含非字符串插件条目，已阻止覆盖，请手动编辑文件",
   OMO_SETTING_INVALID: "OMO 功能设置的键或值不合法",
   TUI_THEME_INVALID: "TUI 主题名不合法",
   MIMO_COOKIE_INVALID: "MiMo Cookie 格式无法识别，请粘贴完整的 Cookie 字符串",

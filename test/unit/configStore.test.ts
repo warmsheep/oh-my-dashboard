@@ -1054,6 +1054,35 @@ describe("ConfigStore.setOpencodeSetting / opencodeSettingValues", () => {
     expect(store.opencodeSettingValues().agentBuildModel).toBe("kimi/k2");
   });
 
+  it("agent extras partial commit survives the real write path: pattern objects and siblings stay", () => {
+    const dir = sandbox();
+    writeFileSync(
+      path.join(dir, "opencode.json"),
+      '{\n  // tuned\n  "agent": {\n    "build": {\n      "model": "a/b",\n      "permission": { "bash": { "git *": "allow" }, "read": "deny" },\n    },\n  },\n}\n',
+    );
+    const store = new ConfigStore({ configDirOverride: dir, homeDir: sandbox() });
+
+    store.setOpencodeSetting("agentBuildExtras", { "permission.edit": "ask" });
+
+    const text = readFileSync(path.join(dir, "opencode.json"), "utf8");
+    expect(validate(text)).toEqual([]);
+    expect(text).toContain("// tuned");
+    expect(getValue(text, ["agent", "build", "model"])).toBe("a/b");
+    expect(getValue(text, ["agent", "build", "permission"])).toEqual({
+      bash: { "git *": "allow" },
+      read: "deny",
+      edit: "ask",
+    });
+    expect(store.opencodeSettingValues().agentBuildExtras).toMatchObject({ "permission.edit": "ask" });
+
+    // Clearing the last set extras leaf never collapses the shared agent.build parent.
+    store.setOpencodeSetting("agentBuildExtras", { "permission.edit": null });
+    const cleared = readFileSync(path.join(dir, "opencode.json"), "utf8");
+    expect(getValue(cleared, ["agent", "build", "model"])).toBe("a/b");
+    expect(getValue(cleared, ["agent", "build", "permission", "edit"])).toBeUndefined();
+    expect(getValue(cleared, ["agent", "build", "permission", "bash"])).toEqual({ "git *": "allow" });
+  });
+
   it("null removes the key (「未设置」)", () => {
     const dir = sandbox();
     writeFileSync(path.join(dir, "opencode.json"), '{ "model": "a/b" }\n');
@@ -1142,8 +1171,8 @@ describe("ConfigStore.setOpencodeSetting / opencodeSettingValues", () => {
     );
     const store = new ConfigStore({ configDirOverride: dir, homeDir: sandbox() });
 
-    // Full-entry snapshot semantics (same as every recordEditor): writing a name
-    // replaces that entry; names absent from the map stay untouched.
+    // Per-leaf snapshot semantics (batch-8): writing a name edits only the fields
+    // present in the submitted entry; names absent from the map stay untouched.
     store.setOpencodeSetting("mcpEntries", { filesystem: { type: "local", command: ["npx"], enabled: false } });
 
     expect(getValue(readFileSync(target, "utf8"), ["mcp", "filesystem"])).toEqual({
@@ -1156,6 +1185,31 @@ describe("ConfigStore.setOpencodeSetting / opencodeSettingValues", () => {
       filesystem: { type: "local", command: ["npx"], enabled: false },
       github: { type: "local", command: ["gh"] },
     });
+  });
+
+  it("referenceEntries seam: per-name diff leaves a string-shorthand sibling byte-identical; coupling violations rejected", () => {
+    const dir = sandbox();
+    const target = path.join(dir, "opencode.json");
+    writeFileSync(
+      target,
+      '{\n  "references": {\n    "shorthand": "https://github.com/owner/repo",\n    "docs": { "repository": "https://x", "branch": "main" },\n  },\n}\n',
+    );
+    const store = new ConfigStore({ configDirOverride: dir, homeDir: sandbox() });
+
+    store.setOpencodeSetting("referenceEntries", { docs: { repository: "https://x", branch: "dev" } });
+
+    const text = readFileSync(target, "utf8");
+    expect(validate(text)).toEqual([]);
+    expect(getValue(text, ["references", "docs"])).toEqual({ repository: "https://x", branch: "dev" });
+    expect(text).toContain('"shorthand": "https://github.com/owner/repo"');
+    expect(store.recordStates().references.entries).toEqual({ docs: { repository: "https://x", branch: "dev" } });
+
+    expect(() =>
+      store.setOpencodeSetting("referenceEntries", { both: { repository: "https://x", path: "./y" } }),
+    ).toThrow("OPENCODE_SETTING_INVALID");
+    expect(() => store.setOpencodeSetting("referenceEntries", { orphan: { path: "./y", branch: "main" } })).toThrow(
+      "OPENCODE_SETTING_INVALID",
+    );
   });
 
   it("instructions round-trip: set writes the array, null removes the key", () => {
@@ -1254,6 +1308,72 @@ describe("ConfigStore.setOpencodeSetting / opencodeSettingValues", () => {
     expect(() => store.setOpencodeSetting("subagentDepth", 2.5)).toThrow("OPENCODE_SETTING_INVALID");
     expect(() => store.setOpencodeSetting("toolOutput", { max_lines: 1.5 })).toThrow("OPENCODE_SETTING_INVALID");
     expect(() => store.setOpencodeSetting("attachmentImage", { max_width: 1.5 })).toThrow("OPENCODE_SETTING_INVALID");
+  });
+
+  it("pluginList: rejects writes onto a file whose plugin array contains a tuple (PLUGIN_PROTECTED), file untouched", () => {
+    const dir = sandbox();
+    const target = path.join(dir, "opencode.json");
+    writeFileSync(target, JSON.stringify({ plugin: ["my-plugin", ["@scoped/pkg", { memory: true }]] }));
+    const store = new ConfigStore({ configDirOverride: dir, homeDir: sandbox() });
+    const before = readFileSync(target);
+
+    // Both the replace and the remove op are blocked — a stale UI must never
+    // overwrite hand-written [name, options] tuples.
+    expect(() => store.setOpencodeSetting("pluginEntries", ["other-plugin"])).toThrow("PLUGIN_PROTECTED");
+    expect(() => store.setOpencodeSetting("pluginEntries", null)).toThrow("PLUGIN_PROTECTED");
+    expect(readFileSync(target)).toEqual(before);
+    expect(store.pluginProtected()).toBe(true);
+  });
+
+  it("pluginList: also gate-protects over-length string entries (129 chars) — value reads null, write blocked", () => {
+    const dir = sandbox();
+    const target = path.join(dir, "opencode.json");
+    writeFileSync(target, JSON.stringify({ plugin: ["ok", `file:///${"x".repeat(130)}/plugin.js`] }));
+    const store = new ConfigStore({ configDirOverride: dir, homeDir: sandbox() });
+    const before = readFileSync(target);
+
+    // The entry is a STRING, not a tuple — but it fails the per-entry sanity, so
+    // an editable empty list must not be able to silently destroy it either.
+    expect(store.opencodeSettingValues().pluginEntries).toBeNull();
+    expect(store.pluginProtected()).toBe(true);
+    expect(() => store.setOpencodeSetting("pluginEntries", ["fresh-array"])).toThrow("PLUGIN_PROTECTED");
+    expect(readFileSync(target)).toEqual(before);
+  });
+
+  it("pluginList: replaces the whole array on an all-strings file and surfaces it back", () => {
+    const dir = sandbox();
+    const target = path.join(dir, "opencode.json");
+    writeFileSync(target, JSON.stringify({ plugin: ["old-one", "old-two"] }));
+    const store = new ConfigStore({ configDirOverride: dir, homeDir: sandbox() });
+
+    store.setOpencodeSetting("pluginEntries", ["new-one@1.0.0", "new-two"]);
+
+    const text = readFileSync(target, "utf8");
+    expect(validate(text)).toEqual([]);
+    expect(getValue(text, ["plugin"])).toEqual(["new-one@1.0.0", "new-two"]);
+    expect(store.opencodeSettingValues().pluginEntries).toEqual(["new-one@1.0.0", "new-two"]);
+    expect(store.pluginProtected()).toBe(false);
+
+    store.setOpencodeSetting("pluginEntries", null);
+
+    expect(getValue(readFileSync(target, "utf8"), ["plugin"])).toBeUndefined();
+    expect(store.opencodeSettingValues().pluginEntries).toBeNull();
+  });
+
+  it("pluginProtected: false for absent / all-strings / wrong-shape plugin values (display-tolerant)", () => {
+    const cases = [
+      "{}", // absent
+      JSON.stringify({ plugin: ["my-plugin"] }), // all strings
+      JSON.stringify({ plugin: [] }), // empty array
+      JSON.stringify({ plugin: "my-plugin" }), // wrong shape
+    ];
+    for (const text of cases) {
+      const dir = sandbox();
+      writeFileSync(path.join(dir, "opencode.json"), text);
+      expect(new ConfigStore({ configDirOverride: dir, homeDir: sandbox() }).pluginProtected()).toBe(false);
+    }
+    // A missing config file entirely stays unprotected too.
+    expect(new ConfigStore({ configDirOverride: sandbox(), homeDir: sandbox() }).pluginProtected()).toBe(false);
   });
 });
 

@@ -20,6 +20,7 @@ import {
   opencodeSettingEdits,
   readOpencodeSettingValues,
   readPermissionState,
+  readPluginProtected,
   readRecordStates,
 } from "./opencodeSettings";
 import { declaredPluginSpecifiers, listDeclaredPlugins } from "./pluginResolver";
@@ -408,6 +409,12 @@ export class ConfigStore {
     if (parse.errors.length > 0) {
       throw new JsoncSyntaxError(parse.errors);
     }
+    if (setting.kind === "pluginList" && readPluginProtected(raw)) {
+      // Defense in depth: pluginList writes are whole-array replacements, so a
+      // stale UI must never run one over entries it cannot express —
+      // hand-written [名称, 选项] tuples or sanity-failing strings.
+      throw new Error("PLUGIN_PROTECTED");
+    }
     let next: string;
     try {
       next = applyEdits(raw.length > 0 ? raw : "{}", opencodeSettingEdits(setting, value));
@@ -433,6 +440,11 @@ export class ConfigStore {
   /** Record aggregates of the 命令/格式化/LSP/MCP 服务器 groups (OpenCode tab payload view, display-tolerant). */
   recordStates(): OpencodeRecordStates {
     return readRecordStates(this.readTextOrEmpty(this.resolveOpencodeConfigPath()));
+  }
+
+  /** pluginList protection flag of the OpenCode tab payload (true = tuple entries, row renders read-only). */
+  pluginProtected(): boolean {
+    return readPluginProtected(this.readTextOrEmpty(this.resolveOpencodeConfigPath()));
   }
 
   /** Path of the standalone tui.json face (the TUI theme lives here, never in opencode.json). */
