@@ -457,7 +457,18 @@ export interface OmoMiscSetting {
   key: string;
   /** Key path inside the agent config, relative to the target's sectionPath prefix. */
   path: string[];
-  kind: "boolean" | "number" | "enum" | "stringList" | "orderedList" | "enumChips" | "shallowObject" | "modelCatalog";
+  kind:
+    | "boolean"
+    | "number"
+    | "enum"
+    | "string"
+    | "stringList"
+    | "orderedList"
+    | "enumChips"
+    | "shallowObject"
+    | "modelCatalog"
+    | "agentPairMap"
+    | "agentTextMap";
   label: string;
   hint?: string;
   /** Chinese section label used to group rows in the OMO tab. */
@@ -465,12 +476,29 @@ export interface OmoMiscSetting {
   /** Inclusive integer bounds of the number kind (defaults: 0..100); single source for the host validator AND the webview pre-check. */
   min?: number;
   max?: number;
+  /**
+   * Length bound of the string kind after trimming (default
+   * OPENCODE_STRING_VALUE_MAX_LENGTH); single source for the host validator
+   * and the webview pre-check.
+   */
+  maxLen?: number;
   /** Runtime default shown when the file does not set the key (null in {@link OmoMiscValues}); scalar kinds only — the new kinds default to "empty". */
   default?: boolean | number;
-  /** Selectable values for the enumChips (fixed multi-select) and enum (single-select) kinds. */
+  /**
+   * Selectable values for the enumChips (fixed multi-select) and enum (single-select) kinds;
+   * for the agentPairMap/agentTextMap kinds the field doubles as the AGENT KEY SET
+   * (KNOWN_AGENTS) — same options semantics as enumChips, applied to the value's
+   * map keys instead of array entries.
+   */
   options?: string[];
   /** Field schemas of the shallowObject kind (Wave-1 type reused, no duplicate shape). */
   fields?: OpencodeSettingField[];
+  /**
+   * agentPairMap/agentTextMap metadata: the sub-key under `agents.<name>` this
+   * descriptor owns (e.g. "ultrawork" → agents.<name>.ultrawork). The read/edit/
+   * validate paths all target [...sectionPath, "agents", name, leafKey].
+   */
+  agents?: { leafKey: string };
   /**
    * plugin (default) = the key lives under the sectionPath prefix (omo `[opencode]` block /
    * legacy top level); shared = the key lives at the TOP LEVEL of the target file for BOTH
@@ -761,6 +789,134 @@ export const OMO_MISC_SETTINGS: readonly OmoMiscSetting[] = [
     hint: "未识别名称运行时忽略",
     group: "智能体开关",
   },
+  {
+    key: "agentUltrawork",
+    path: ["agents"],
+    kind: "agentPairMap",
+    agents: { leafKey: "ultrawork" },
+    // Spread of the canonical constant (same pattern as disabledAgents).
+    options: [...KNOWN_AGENTS],
+    label: "超级工作覆写",
+    hint: "按智能体覆写 ultrawork 模式的模型与推理强度",
+    group: "覆写矩阵",
+  },
+  {
+    key: "agentCompaction",
+    path: ["agents"],
+    kind: "agentPairMap",
+    agents: { leafKey: "compaction" },
+    options: [...KNOWN_AGENTS],
+    label: "压缩覆写",
+    hint: "按智能体覆写压缩任务的模型与推理强度",
+    group: "覆写矩阵",
+  },
+  {
+    key: "agentPrompt",
+    path: ["agents"],
+    kind: "agentTextMap",
+    agents: { leafKey: "prompt" },
+    options: [...KNOWN_AGENTS],
+    label: "系统提示词",
+    hint: "每智能体系统提示词（≤8000 字符）；file:// 引用请在文件中手写",
+    group: "提示词",
+  },
+  {
+    key: "agentPromptAppend",
+    path: ["agents"],
+    kind: "agentTextMap",
+    agents: { leafKey: "prompt_append" },
+    options: [...KNOWN_AGENTS],
+    label: "提示词追加",
+    hint: "追加到系统提示词末尾的文本（≤8000 字符）",
+    group: "提示词",
+  },
+  {
+    key: "claudeCode",
+    path: ["claude_code"],
+    kind: "shallowObject",
+    label: "Claude Code 兼容层",
+    hint: "关闭对应的 Claude Code 兼容层",
+    group: "兼容层",
+    fields: [
+      { key: "mcp", kind: "boolean", label: "MCP", default: true },
+      { key: "commands", kind: "boolean", label: "命令", default: true },
+      { key: "skills", kind: "boolean", label: "技能", default: true },
+      { key: "agents", kind: "boolean", label: "智能体", default: true },
+      { key: "hooks", kind: "boolean", label: "钩子", default: true },
+      { key: "plugins", kind: "boolean", label: "插件", default: true },
+    ],
+  },
+  {
+    key: "keywordExpansions",
+    path: ["keyword_detector", "enabled_expansions"],
+    kind: "enumChips",
+    options: ["ultrawork", "team", "hyperplan", "hyperplan-ultrawork"],
+    label: "关键词展开",
+    hint: "勾选的关键词会在会话中被展开",
+    group: "关键词",
+  },
+  {
+    key: "goalParams",
+    path: ["goal"],
+    kind: "shallowObject",
+    label: "目标循环",
+    group: "目标循环",
+    fields: [
+      { key: "enabled", kind: "boolean", label: "启用" },
+      { key: "auto_start", kind: "boolean", label: "自动开始" },
+      {
+        key: "default_max_iterations",
+        kind: "number",
+        label: "默认最大迭代数",
+        min: 1,
+        max: 1000,
+        integer: true,
+        default: 100,
+      },
+    ],
+  },
+  {
+    key: "codegraph",
+    path: ["codegraph"],
+    kind: "shallowObject",
+    label: "CodeGraph",
+    group: "工具链",
+    fields: [
+      { key: "auto_init", kind: "boolean", label: "自动初始化", default: true },
+      { key: "auto_provision", kind: "boolean", label: "自动安装", default: true },
+      { key: "daemon", kind: "boolean", label: "守护进程", default: true },
+      { key: "enabled", kind: "boolean", label: "启用", default: true },
+    ],
+  },
+  {
+    key: "monitorParams",
+    path: ["monitor"],
+    kind: "shallowObject",
+    label: "监视器",
+    group: "工具链",
+    fields: [
+      { key: "enabled", kind: "boolean", label: "启用", default: false },
+      { key: "live_mode_enabled", kind: "boolean", label: "实时模式", default: false },
+    ],
+  },
+  {
+    key: "i18nLocale",
+    path: ["i18n", "locale"],
+    kind: "string",
+    maxLen: 16,
+    label: "界面语言",
+    hint: "如 en/zh，≤16 字符",
+    group: "工具链",
+  },
+  {
+    key: "notificationForce",
+    path: ["notification", "force_enable"],
+    kind: "boolean",
+    label: "强制通知",
+    hint: "无视运行环境强制启用通知",
+    group: "通知",
+    default: false,
+  },
 ];
 
 /** Current OMO misc values; null = the file does not set the key (UI shows the descriptor default). */
@@ -808,11 +964,24 @@ export type ShallowObjectValue = Record<string, boolean | number | string | null
 /** permissionTools value: tool name → action (null = remove that tool's key). */
 export type PermissionToolsValue = Record<string, "allow" | "ask" | "deny" | null>;
 
-/** mcpServers write value: server name → disabled flag (snapshot diff semantics, see opencodeSettingEdits). */
-export type McpServersValue = Record<string, boolean>;
-
 /** modelCatalog value: alias → model binding; a null entry marks "remove that alias" (UI deletion intent only). */
 export type ModelCatalogValue = Record<string, { model: string; reasoning: string | null } | null>;
+
+/**
+ * agentPairMap value: agent name → per-agent {model, reasoning} override living at
+ * agents.<name>.<leafKey>; a null entry marks "remove that agent's leafKey" (UI deletion
+ * intent only — reads never produce null).
+ */
+export type AgentPairMapValue = Record<string, { model: string; reasoning: string | null } | null>;
+
+/**
+ * agentTextMap value: agent name → free-text leaf living at agents.<name>.<leafKey>
+ * (system prompt / prompt_append); a null entry marks "remove that agent's leafKey".
+ */
+export type AgentTextMapValue = Record<string, string | null>;
+
+/** Max length of an agentTextMap entry after trimming; single source for the host validator and the webview pre-check. */
+export const AGENT_TEXT_MAX_LENGTH = 8000;
 
 /** One record field value: string (text/multiline/enum/model), boolean, string list, or null (= field unset). */
 export type RecordFieldValue = string | boolean | string[] | null;
@@ -893,7 +1062,6 @@ export interface OpencodeSetting {
     | "enumChips"
     | "shallowObject"
     | "permissionTools"
-    | "mcpServers"
     | "recordEditor"
     | "recordMaster";
   label: string;
@@ -1040,11 +1208,19 @@ export const OPENCODE_SETTINGS: readonly OpencodeSetting[] = [
     group: "规则文件",
   },
   {
-    key: "mcpServers",
+    key: "mcpEntries",
     path: ["mcp"],
-    kind: "mcpServers",
+    kind: "recordEditor",
     label: "MCP 服务器",
     group: "MCP 服务器",
+    record: {
+      fields: [
+        { key: "type", kind: "enum", label: "类型", options: ["local", "remote"], required: true },
+        { key: "url", kind: "text", label: "URL", hint: "remote 必填" },
+        { key: "command", kind: "stringList", label: "命令", hint: "local 启动命令" },
+        { key: "enabled", kind: "boolean", label: "启用" },
+      ],
+    },
   },
   {
     key: "compaction",
@@ -1246,19 +1422,19 @@ export const OPENCODE_SETTINGS: readonly OpencodeSetting[] = [
 
 /** One OpenCode setting value; null = key absent (「未设置」→ remove edit). */
 export type OpencodeSettingValue =
-  | string
-  | boolean
-  | number
-  | null
-  | StringListValue
-  | ShallowObjectValue
-  | PermissionToolsValue
-  | McpServersValue
-  | RecordEditorValue;
+  string | boolean | number | null | StringListValue | ShallowObjectValue | PermissionToolsValue | RecordEditorValue;
 
 /** One OMO tab setting value; null = remove op (恢复默认) — the shape follows the descriptor kind. */
 export type OmoSettingValue =
-  boolean | number | string | null | StringListValue | ShallowObjectValue | ModelCatalogValue;
+  | boolean
+  | number
+  | string
+  | null
+  | StringListValue
+  | ShallowObjectValue
+  | ModelCatalogValue
+  | AgentPairMapValue
+  | AgentTextMapValue;
 
 /**
  * Read/write-split permission aggregate for the OpenCode tab payload: the string
@@ -1283,11 +1459,12 @@ export interface RecordAggregate {
   entries: Record<string, RecordEntryValue>;
 }
 
-/** The OpenCode tab payload's record slot: one aggregate per recordEditor path (命令/格式化/LSP). */
+/** The OpenCode tab payload's record slot: one aggregate per recordEditor path (命令/格式化/LSP/MCP). */
 export interface OpencodeRecordStates {
   command: RecordAggregate;
   formatter: RecordAggregate;
   lsp: RecordAggregate;
+  mcp: RecordAggregate;
 }
 
 /** Boot/refresh payload of the OpenCode tab: current values + the config file path + model options. */
@@ -1297,10 +1474,8 @@ export interface OpencodeSettingsPayload {
   models: ModelOption[];
   /** Permission aggregate (read path of the 权限 group; writes go through permissionTools/shorthand keys). */
   permission: OpencodePermissionState;
-  /** Declared MCP servers with their disabled flags (read path of the MCP 服务器 group). */
-  mcp: { name: string; disabled: boolean }[];
   /** The standalone tui.json face: current theme + file path shown in the 终端界面 group. */
   tui: { theme: string | null; path: string };
-  /** Record aggregates (read path of the 命令/格式化/LSP groups; writes go through the record descriptors). */
+  /** Record aggregates (read path of the 命令/格式化/LSP/MCP 服务器 groups; writes go through the record descriptors). */
   records: OpencodeRecordStates;
 }
