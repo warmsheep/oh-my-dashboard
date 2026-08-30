@@ -1,0 +1,92 @@
+import { useState } from "react";
+
+import { parseStringListEntry, removeStringListEntry } from "./helpers";
+
+/**
+ * stringList-kind editor: read-only rows with a 删除 button plus a bottom 添加 input
+ * committing on Enter/blur. Invalid entries (empty / over-length / duplicate / cap)
+ * keep the draft and show an inline red hint without committing. Every change
+ * commits the whole list; an empty list commits null (remove the key).
+ */
+export default function StringListEditor({
+  value,
+  disabled,
+  onChange,
+}: {
+  /** Current entries; null = key absent (未设置). */
+  value: string[] | null;
+  /** Pending-write disable shared with the hosting set-row. */
+  disabled: boolean;
+  /** Commit the next list (null = empty → remove the key). */
+  onChange(next: string[] | null): void;
+}) {
+  const entries = value ?? [];
+  // Add-row draft + inline validation error — local state, cleared on commit.
+  const [draft, setDraft] = useState("");
+  const [error, setError] = useState<string | null>(null);
+
+  const commitDraft = () => {
+    const parsed = parseStringListEntry(draft, entries);
+    if (parsed.kind === "invalid") {
+      setError(parsed.error);
+      return;
+    }
+    onChange([...entries, parsed.value]);
+    setDraft("");
+    setError(null);
+  };
+
+  return (
+    <div className="ctl-list">
+      {entries.map((entry, index) => (
+        <div className="ctl-row" key={entry}>
+          <span className="ctl-text" title={entry}>
+            {entry}
+          </span>
+          <button
+            type="button"
+            className="btn secondary ctl-x"
+            disabled={disabled}
+            aria-label={`删除条目 ${entry}`}
+            onClick={() => onChange(removeStringListEntry(entries, index))}
+          >
+            删除
+          </button>
+        </div>
+      ))}
+      <div className="ctl-row ctl-row-add">
+        <input
+          className="ctl ctl-add"
+          type="text"
+          placeholder="添加条目后回车"
+          aria-label="添加条目"
+          disabled={disabled}
+          value={draft}
+          onChange={(e) => {
+            setDraft(e.target.value);
+            setError(null);
+          }}
+          onKeyDown={(e) => {
+            // Enter commits through the single blur path, so a commit can never fire twice.
+            if (e.key === "Enter") {
+              e.currentTarget.blur();
+            }
+          }}
+          onBlur={() => {
+            // Blur with empty text is a plain leave, not an invalid commit.
+            if (draft.trim() !== "") {
+              commitDraft();
+            } else {
+              setError(null);
+            }
+          }}
+        />
+      </div>
+      {error !== null && (
+        <span className="ctl-inline-error" role="alert">
+          {error}
+        </span>
+      )}
+    </div>
+  );
+}
