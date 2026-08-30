@@ -217,6 +217,7 @@ export function buildOpencodeInitPayload(deps: ManagerPanelDeps): OpencodeSettin
     permission: deps.configStore.permissionState(),
     tui: { theme: deps.configStore.tuiTheme(), path: deps.configStore.tuiConfigPath() },
     records: deps.configStore.recordStates(),
+    pluginProtected: deps.configStore.pluginProtected(),
   };
 }
 
