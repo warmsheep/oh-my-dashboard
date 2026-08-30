@@ -1,0 +1,46 @@
+/* OpenCode tab — shares main.css (.cfg-tab rows live in config.css via the manager
+   bundle: .cfg-block/.cfg-target-path, .block/.block-head, .set-row, .ctl, .s-switch)
+   and adds only the provider checkbox chips and the string input width. */
+
+.oc-text {
+  width: 220px;
+}
+
+/* Provider chips: one label+checkbox pair per provider of the model catalog. */
+.provider-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 2px 0;
+}
+
+.provider-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px;
+  font-size: 12px;
+  font-family: var(--mono);
+  color: var(--fg);
+  background: var(--inp-bg);
+  border: 1px solid var(--inp-border);
+  border-radius: 2px;
+  cursor: pointer;
+  user-select: none;
+  transition: border-color 0.12s ease;
+}
+
+.provider-chip:hover {
+  border-color: var(--focus);
+}
+
+.provider-chip input[type="checkbox"] {
+  margin: 0;
+  accent-color: var(--btn-bg);
+}
+
+/* Pending write: the chips stay clickable-looking but every checkbox is disabled. */
+.provider-chips.pending {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
