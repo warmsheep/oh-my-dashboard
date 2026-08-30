@@ -2,6 +2,13 @@
 
 > 版本与日期以 git 历史为准；0.8.0–0.14.0、0.16.x、0.18.0 等中间版本为本地打包、版本号未入库，相关变更归并入下一个入库版本。
 
+## 0.42.0 (2026-08-30)
+
+- **可视化配置第四批（recordEditor 批）**：通用命名条目编辑器基础设施落地。设计方案见 `docs/plans/2026-08-30-visual-config-batch4-design.md`
+- **OpenCode 选项卡三个新配置面**：命令 `command`（自定义斜杠命令：模板多行必填/描述/agent 枚举/模型/子代理开关）、格式化 `formatter` 与语言服务器 `lsp`（master 三态「启用内置/全部关闭」+ 条目编辑，互锁防覆写）
+- **新基础设施**：`recordEditor`/`recordMaster` kind、`RecordEditor` 控件（条目增删改/重命名/六种字段形态/必填闸门本地暂存/全量快照提交）、`RecordGroup` 互锁组件；破损条目读侧跳过且写侧不触碰（字节级保护）、null 叶剪除、空条目转删除
+- **审查修复**：删除分组最后一条目曾为静默 no-op（core 现按「空 → null 整键删除」）、读侧收敛与写校验对齐（脏条目不再以不透明错误卡死整组提交）、jsonc-parser 结构冲突错误中文化（`OPENCODE_SETTING_CONFLICT`）、records 回退快照按槽位隔离。测试：根套件 774、webview 166、e2e 73 checks 全绿
+
 ## 0.41.0 (2026-08-30)
 
 - **可视化配置第三批（P1 轻件批，14 项）**：全部复用既有描述符 kind，仅两处小扩展（shallowObject 枚举叶、orderedList）。设计方案见 `docs/plans/2026-08-30-visual-config-batch3-design.md`
