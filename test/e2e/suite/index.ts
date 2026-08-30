@@ -1350,6 +1350,29 @@ function tests(): TestCase[] {
           20_000,
           "boot configInit must carry the seeded agent row, fake skill and legacy target",
         );
+        // Batch-3 boot contract: the OMO misc values ride the SAME boot configInit.
+        // The fixture sets none of the new descriptors EXCEPT tmux — its pre-seeded
+        // tmux block reads back through tmuxParams (enum leaf present, isolation
+        // leaf unset → null); the tmuxParams write test below re-seeds that block.
+        const bootMessage = bridge.outbound.find((message) => message.type === "configInit");
+        assert.ok(bootMessage, "the boot configInit must be captured in the outbound stream");
+        const omo = (bootMessage.payload as { omo?: Record<string, unknown> }).omo;
+        for (const key of [
+          "disabledMcps",
+          "disabledCommands",
+          "browserAutomation",
+          "websearchProvider",
+          "gitMaster",
+          "teamModeLimits",
+          "agentOrder",
+        ]) {
+          assert.equal(omo?.[key], null, `boot omo.${key} must read null on the fresh sandbox`);
+        }
+        assert.deepEqual(
+          omo?.tmuxParams,
+          { layout: "main-vertical", main_pane_size: 60, isolation: null },
+          "boot omo.tmuxParams must mirror the fixture's tmux block with the isolation leaf null",
+        );
       },
     },
     {
@@ -1462,6 +1485,13 @@ function tests(): TestCase[] {
           expected[setting.key] = null;
         }
         assert.deepEqual(boot.values, expected, "every OPENCODE_SETTINGS key must be present and null");
+        // Batch 3: the six new descriptors are all scalar-map kinds (no file target,
+        // no dedicated payload face), so the deepEqual above already pins them null —
+        // named here so a future descriptor edit (e.g. an accidental `file` route)
+        // trips a loudly-labeled assertion instead of silently leaving the map.
+        for (const key of ["logLevel", "shell", "subagentDepth", "toolOutput", "attachmentImage", "watcherIgnore"]) {
+          assert.equal(boot.values[key], null, `boot values.${key} must read null on the fresh sandbox`);
+        }
         assert.equal(
           boot.configPath,
           path.join(configDir, "opencode.json"),
@@ -2082,6 +2112,287 @@ function tests(): TestCase[] {
           return Array.isArray(skills) && skills.some((skill) => skill?.name === "e2e-skill");
         });
         assert.ok(skillsFed, "boot must have pushed configInit carrying the skills list for the 技能 tab body");
+      },
+    },
+
+    // ---- Section 4d: batch-3 descriptors (same manager panel bridge) ---------
+    // Placed BEFORE the Section-5 step that seeds ~/.omo/omo.jsonc: the OMO writes
+    // here must land in the LEGACY target (top-level keys), matching the batch-2
+    // omoSetSetting tests above.
+    {
+      name: "opencodeSetSetting logLevel 写入 DEBUG 并回推，null 删除键",
+      fn: async () => {
+        assert.ok(managerBridge, "manager panel must still be open from the previous step");
+        const bridge = managerBridge;
+        const opencodeJson = path.join(configDir, "opencode.json");
+        const repliesBefore = settingSavedReplies(bridge, "opencodeSettingSaved").length;
+        const initsBefore = opencodeInits(bridge).length;
+
+        bridge.deliver({ type: "opencodeSetSetting", payload: { key: "logLevel", value: "DEBUG" } });
+        await pollUntil(
+          () =>
+            settingSavedReplies(bridge, "opencodeSettingSaved")
+              .slice(repliesBefore)
+              .some((reply) => reply.ok && reply.key === "logLevel"),
+          10_000,
+          "opencodeSetSetting(logLevel) must produce an opencodeSettingSaved(ok:true) reply",
+        );
+        await pollUntil(
+          () =>
+            opencodeInits(bridge)
+              .slice(initsBefore)
+              .some((init) => init.values.logLevel === "DEBUG"),
+          10_000,
+          "a refreshed opencodeInit carrying logLevel:DEBUG must follow the write",
+        );
+        assertNoJsoncErrors(opencodeJson);
+        let parsed = parseSafe<Record<string, unknown>>(fs.readFileSync(opencodeJson, "utf8")).value;
+        assert.ok(parsed !== null && !Array.isArray(parsed), "opencode.json must parse to an object");
+        assert.equal(parsed.logLevel, "DEBUG", 'on-disk opencode.json must contain "logLevel": "DEBUG"');
+
+        const repliesBeforeRemoval = settingSavedReplies(bridge, "opencodeSettingSaved").length;
+        bridge.deliver({ type: "opencodeSetSetting", payload: { key: "logLevel", value: null } });
+        await pollUntil(
+          () =>
+            settingSavedReplies(bridge, "opencodeSettingSaved")
+              .slice(repliesBeforeRemoval)
+              .some((reply) => reply.ok && reply.key === "logLevel"),
+          10_000,
+          "the null write must produce its own opencodeSettingSaved(ok:true) reply",
+        );
+        assertNoJsoncErrors(opencodeJson);
+        parsed = parseSafe<Record<string, unknown>>(fs.readFileSync(opencodeJson, "utf8")).value;
+        assert.ok(parsed !== null && !Array.isArray(parsed), "opencode.json must parse to an object");
+        assert.equal("logLevel" in parsed, false, "the null write must remove the logLevel key from disk");
+      },
+    },
+    {
+      name: "omoSetSetting tmuxParams 枚举叶写入：未知兄弟键与注释字节级保留",
+      fn: async () => {
+        assert.ok(managerBridge, "manager panel must still be open from the previous step");
+        const bridge = managerBridge;
+        const agentConfig = path.join(configDir, "oh-my-opencode.json");
+        // Re-seed the whole tmux block through the product's JSONC editor (replacing
+        // the fixture's default layout), then park an inline comment in front of the
+        // key — the per-leaf write below must keep BOTH the unknown sibling leaf and
+        // the comment byte-identically (same contract as the permissionTools sibling).
+        const seeded = setValues(fs.readFileSync(agentConfig, "utf8"), [
+          { path: ["tmux"], value: { layout: "tiled", custom_note: "keep" } },
+        ]);
+        const comment = "/* e2e: tmux 注释（兄弟保留断言用） */ ";
+        const commented = seeded.replace(/"tmux"\s*:/, `${comment}"tmux":`);
+        fs.writeFileSync(agentConfig, commented);
+        const commentOf = (text: string): string => /\/\* e2e:[^*]*\*\//.exec(text)?.[0] ?? "";
+        const noteOf = (text: string): string => /"custom_note"\s*:\s*"keep"/.exec(text)?.[0] ?? "";
+        const commentBefore = commentOf(commented);
+        const noteBefore = noteOf(commented);
+        assert.ok(commentBefore.length > 0, "the seeded comment must be present before the write");
+        assert.ok(noteBefore.length > 0, "the seeded custom_note sibling must be present before the write");
+
+        const repliesBefore = settingSavedReplies(bridge, "omoSettingSaved").length;
+        const configInitsBefore = bridge.outbound.filter((message) => message.type === "configInit").length;
+        bridge.deliver({
+          type: "omoSetSetting",
+          payload: { key: "tmuxParams", value: { layout: "tiled", main_pane_size: 70, isolation: null } },
+        });
+        await pollUntil(
+          () =>
+            settingSavedReplies(bridge, "omoSettingSaved")
+              .slice(repliesBefore)
+              .some((reply) => reply.ok && reply.key === "tmuxParams"),
+          10_000,
+          "omoSetSetting(tmuxParams) must produce an omoSettingSaved(ok:true) reply",
+        );
+        await pollUntil(
+          () =>
+            bridge.outbound
+              .slice(configInitsBefore)
+              .some(
+                (message) =>
+                  message.type === "configInit" &&
+                  (message.payload as { omo?: { tmuxParams?: { layout?: unknown; main_pane_size?: unknown } } })?.omo
+                    ?.tmuxParams?.layout === "tiled" &&
+                  (message.payload as { omo?: { tmuxParams?: { layout?: unknown; main_pane_size?: unknown } } })?.omo
+                    ?.tmuxParams?.main_pane_size === 70,
+              ),
+          10_000,
+          "a refreshed configInit carrying omo.tmuxParams layout:tiled + main_pane_size:70 must follow the write",
+        );
+
+        assertNoJsoncErrors(agentConfig);
+        const after = fs.readFileSync(agentConfig, "utf8");
+        // parseSafe, not JSON.parse: the file legitimately carries the seeded JSONC
+        // comment at this point.
+        const agent = parseSafe<{ tmux?: Record<string, unknown> }>(after).value;
+        assert.ok(agent !== null, "agent config must parse to an object");
+        assert.equal(agent.tmux?.layout, "tiled", "disk tmux.layout must stay tiled");
+        assert.equal(agent.tmux?.main_pane_size, 70, "disk tmux.main_pane_size must be 70");
+        assert.equal("isolation" in (agent.tmux ?? {}), false, "the null isolation leaf must not land on disk");
+        assert.equal(agent.tmux?.custom_note, "keep", "the unknown sibling leaf must survive the per-leaf write");
+        assert.equal(commentOf(after), commentBefore, "the inline comment must survive byte-identically");
+        assert.equal(noteOf(after), noteBefore, "the custom_note sibling must survive byte-identically");
+
+        // Strip the seeded comment so later chain steps can keep plain JSON.parse on
+        // this file (the Section-5 setAgentModel tests read it with JSON.parse).
+        const cleaned = after.replace(comment, "");
+        fs.writeFileSync(agentConfig, cleaned);
+        assert.doesNotThrow(() => JSON.parse(cleaned), "the legacy file must be strict-JSON clean again");
+      },
+    },
+    {
+      name: "omoSetSetting disabledMcps 写 legacy 顶层数组，null 删除键",
+      fn: async () => {
+        assert.ok(managerBridge, "manager panel must still be open from the previous step");
+        const bridge = managerBridge;
+        const agentConfig = path.join(configDir, "oh-my-opencode.json");
+        const repliesBefore = settingSavedReplies(bridge, "omoSettingSaved").length;
+
+        bridge.deliver({ type: "omoSetSetting", payload: { key: "disabledMcps", value: ["websearch", "lsp"] } });
+        await pollUntil(
+          () =>
+            settingSavedReplies(bridge, "omoSettingSaved")
+              .slice(repliesBefore)
+              .some((reply) => reply.ok && reply.key === "disabledMcps"),
+          10_000,
+          "omoSetSetting(disabledMcps) must produce an omoSettingSaved(ok:true) reply",
+        );
+        assertNoJsoncErrors(agentConfig);
+        let agent = JSON.parse(fs.readFileSync(agentConfig, "utf8")) as { disabled_mcps?: unknown };
+        assert.deepEqual(
+          agent.disabled_mcps,
+          ["websearch", "lsp"],
+          "legacy target must carry the top-level disabled_mcps array",
+        );
+
+        const repliesBeforeRemoval = settingSavedReplies(bridge, "omoSettingSaved").length;
+        bridge.deliver({ type: "omoSetSetting", payload: { key: "disabledMcps", value: null } });
+        await pollUntil(
+          () =>
+            settingSavedReplies(bridge, "omoSettingSaved")
+              .slice(repliesBeforeRemoval)
+              .some((reply) => reply.ok && reply.key === "disabledMcps"),
+          10_000,
+          "the null write must produce its own omoSettingSaved(ok:true) reply",
+        );
+        assertNoJsoncErrors(agentConfig);
+        agent = JSON.parse(fs.readFileSync(agentConfig, "utf8")) as { disabled_mcps?: unknown };
+        assert.equal("disabled_mcps" in agent, false, "the null write must remove the disabled_mcps key from disk");
+      },
+    },
+    {
+      name: "omoSetSetting agentOrder 写入与删除；重复项写入收 !ok 回执且不写盘",
+      fn: async () => {
+        assert.ok(managerBridge, "manager panel must still be open from the previous step");
+        const bridge = managerBridge;
+        const agentConfig = path.join(configDir, "oh-my-opencode.json");
+        const repliesBefore = settingSavedReplies(bridge, "omoSettingSaved").length;
+
+        bridge.deliver({
+          type: "omoSetSetting",
+          payload: { key: "agentOrder", value: ["sisyphus", "oracle", "metis"] },
+        });
+        await pollUntil(
+          () =>
+            settingSavedReplies(bridge, "omoSettingSaved")
+              .slice(repliesBefore)
+              .some((reply) => reply.ok && reply.key === "agentOrder"),
+          10_000,
+          "omoSetSetting(agentOrder) must produce an omoSettingSaved(ok:true) reply",
+        );
+        assertNoJsoncErrors(agentConfig);
+        let agent = JSON.parse(fs.readFileSync(agentConfig, "utf8")) as { agent_order?: unknown };
+        assert.deepEqual(
+          agent.agent_order,
+          ["sisyphus", "oracle", "metis"],
+          "legacy target must carry the top-level agent_order array in order",
+        );
+
+        // orderedList dedup gate: the duplicate entry fails the kind validator at the
+        // protocol layer, so the write gets the malformed-message backstop reply and
+        // the file stays byte-identical.
+        const bytesBefore = fs.readFileSync(agentConfig);
+        const repliesBeforeDupes = settingSavedReplies(bridge, "omoSettingSaved").length;
+        bridge.deliver({ type: "omoSetSetting", payload: { key: "agentOrder", value: ["sisyphus", "sisyphus"] } });
+        await pollUntil(
+          () =>
+            settingSavedReplies(bridge, "omoSettingSaved")
+              .slice(repliesBeforeDupes)
+              .some(
+                (reply) =>
+                  reply.ok === false && reply.key === "agentOrder" && (reply.error ?? "").includes("格式无法识别"),
+              ),
+          10_000,
+          "the duplicate-entries write must produce a !ok reply echoing the key",
+        );
+        assert.ok(
+          fs.readFileSync(agentConfig).equals(bytesBefore),
+          "the rejected agentOrder write must not touch the agent config",
+        );
+
+        const repliesBeforeRemoval = settingSavedReplies(bridge, "omoSettingSaved").length;
+        bridge.deliver({ type: "omoSetSetting", payload: { key: "agentOrder", value: null } });
+        await pollUntil(
+          () =>
+            settingSavedReplies(bridge, "omoSettingSaved")
+              .slice(repliesBeforeRemoval)
+              .some((reply) => reply.ok && reply.key === "agentOrder"),
+          10_000,
+          "the null write must produce its own omoSettingSaved(ok:true) reply",
+        );
+        assertNoJsoncErrors(agentConfig);
+        agent = JSON.parse(fs.readFileSync(agentConfig, "utf8")) as { agent_order?: unknown };
+        assert.equal("agent_order" in agent, false, "the null write must remove the agent_order key from disk");
+      },
+    },
+    {
+      name: "opencodeSetSetting subagentDepth 整数校验：3.5 拒绝不写盘，3 写入",
+      fn: async () => {
+        assert.ok(managerBridge, "manager panel must still be open from the previous step");
+        const bridge = managerBridge;
+        const opencodeJson = path.join(configDir, "opencode.json");
+        const bytesBefore = fs.readFileSync(opencodeJson);
+        const repliesBefore = settingSavedReplies(bridge, "opencodeSettingSaved").length;
+
+        bridge.deliver({ type: "opencodeSetSetting", payload: { key: "subagentDepth", value: 3.5 } });
+        await pollUntil(
+          () =>
+            settingSavedReplies(bridge, "opencodeSettingSaved")
+              .slice(repliesBefore)
+              .some(
+                (reply) =>
+                  reply.ok === false && reply.key === "subagentDepth" && (reply.error ?? "").includes("格式无法识别"),
+              ),
+          10_000,
+          "the fractional write must produce a !ok reply echoing the key",
+        );
+        assert.ok(
+          fs.readFileSync(opencodeJson).equals(bytesBefore),
+          "the rejected subagentDepth write must not touch opencode.json",
+        );
+
+        const repliesBeforeValid = settingSavedReplies(bridge, "opencodeSettingSaved").length;
+        const initsBefore = opencodeInits(bridge).length;
+        bridge.deliver({ type: "opencodeSetSetting", payload: { key: "subagentDepth", value: 3 } });
+        await pollUntil(
+          () =>
+            settingSavedReplies(bridge, "opencodeSettingSaved")
+              .slice(repliesBeforeValid)
+              .some((reply) => reply.ok && reply.key === "subagentDepth"),
+          10_000,
+          "the integer write must produce an opencodeSettingSaved(ok:true) reply",
+        );
+        await pollUntil(
+          () =>
+            opencodeInits(bridge)
+              .slice(initsBefore)
+              .some((init) => init.values.subagentDepth === 3),
+          10_000,
+          "a refreshed opencodeInit carrying subagentDepth:3 must follow the write",
+        );
+        assertNoJsoncErrors(opencodeJson);
+        const parsed = parseSafe<Record<string, unknown>>(fs.readFileSync(opencodeJson, "utf8")).value;
+        assert.ok(parsed !== null && !Array.isArray(parsed), "opencode.json must parse to an object");
+        assert.equal(parsed.subagent_depth, 3, "on-disk opencode.json must contain subagent_depth: 3");
       },
     },
 
