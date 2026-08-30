@@ -2,6 +2,7 @@ import type {
   AgentPairMapValue,
   AgentTextMapValue,
   ModelCatalogValue,
+  NumberMapValue,
   OpencodePermissionState,
   OpencodeSettingField,
   PermissionToolsValue,
@@ -11,8 +12,13 @@ import type {
   RecordFieldDef,
   RecordFieldValue,
   ShallowObjectValue,
+  StringMapValue,
 } from "@shared/protocol";
-import { AGENT_TEXT_MAX_LENGTH } from "@shared/protocol";
+import {
+  AGENT_TEXT_MAX_LENGTH,
+  OPENCODE_MULTILINE_VALUE_MAX_LENGTH,
+  OPENCODE_STRING_VALUE_MAX_LENGTH,
+} from "@shared/protocol";
 
 /**
  * Pure helpers behind the controls/ composite editors (stringList / enumChips /
@@ -30,10 +36,19 @@ const STRING_LIST_ENTRY_MAX_LENGTH = 256;
 // Mirror of core ORDERED_LIST_MAX_ENTRIES / ORDERED_LIST_ENTRY_MAX_LENGTH (opencodeSettings.ts).
 const ORDERED_LIST_MAX_ENTRIES = 64;
 const ORDERED_LIST_ENTRY_MAX_LENGTH = 64;
+// Mirror of core PLUGIN_LIST_MAX_ENTRIES / PLUGIN_LIST_ENTRY_MAX_LENGTH / PLUGIN_LIST_ENTRY_PATTERN
+// (opencodeSettings.ts) — the deliberately permissive npm-ish charset of the
+// pluginList kind, incl. the ~/ ./ / file:// local path prefixes pluginResolver
+// resolves (Windows drive-letter paths stay out; core comment has the note).
+const PLUGIN_LIST_MAX_ENTRIES = 32;
+const PLUGIN_LIST_ENTRY_MAX_LENGTH = 128;
+const PLUGIN_LIST_ENTRY_PATTERN = /^[@A-Za-z0-9._\-/@+:~]+$/;
 // Mirror of core MODEL_CATALOG_MAX_ENTRIES / MODEL_ALIAS_MAX_LENGTH / MODEL_ALIAS_PATTERN (omoSettings.ts).
 const MODEL_CATALOG_MAX_ENTRIES = 32;
 const MODEL_ALIAS_MAX_LENGTH = 32;
 const MODEL_ALIAS_PATTERN = /^[A-Za-z0-9._-]+$/;
+// Mirror of core NUMBER_MAP_MAX_ENTRIES (omoSettings.ts); exported for the numberMap add-row cap.
+export const NUMBER_MAP_MAX_ENTRIES = 32;
 // Mirror of core RECORD_NAME_* / RECORD_MAX_ENTRIES / RECORD_TEXT_* / RECORD_STRING_LIST_* (opencodeSettings.ts).
 const RECORD_NAME_PATTERN = /^[A-Za-z0-9._-]+$/;
 const RECORD_NAME_MAX_LENGTH = 64;
@@ -41,6 +56,13 @@ const RECORD_MAX_ENTRIES = 32;
 const RECORD_TEXT_MAX_LENGTH = 256;
 const RECORD_MULTILINE_MAX_LENGTH = 8000;
 const RECORD_STRING_LIST_MAX_ENTRIES = 8;
+// Mirror of core STRING_MAP_MAX_ENTRIES / STRING_MAP_KEY_MAX_LENGTH / STRING_MAP_VALUE_MAX_LENGTH
+// (opencodeSettings.ts stringMap recordEditor field kind); the value bound is exported
+// for the per-row value pre-check of StringMapEditor. (webview-ui cannot import src/core —
+// only @shared/protocol is aliased into its bundle.)
+const STRING_MAP_MAX_ENTRIES = 16;
+const STRING_MAP_KEY_MAX_LENGTH = 128;
+export const STRING_MAP_VALUE_MAX_LENGTH = 512;
 
 /** Permission action literals (structural mirror of PermissionToolsValue's value union). */
 export type PermissionAction = "allow" | "ask" | "deny";
@@ -92,6 +114,15 @@ export function parseStringListEntry(
 /** orderedList add-row validation (≤64 entries of ≤64 chars — core's ORDERED_LIST_* bounds). */
 export function parseOrderedListEntry(raw: string, current: readonly string[]): ListEntryParse {
   return parseUniqueListEntry(raw, current, ORDERED_LIST_MAX_ENTRIES, ORDERED_LIST_ENTRY_MAX_LENGTH);
+}
+
+/** pluginList add-row validation (≤32 entries of ≤128 npm-ish chars — core's PLUGIN_LIST_* bounds + charset). */
+export function parsePluginListEntry(raw: string, current: readonly string[]): ListEntryParse {
+  const parsed = parseUniqueListEntry(raw, current, PLUGIN_LIST_MAX_ENTRIES, PLUGIN_LIST_ENTRY_MAX_LENGTH);
+  if (parsed.kind === "commit" && !PLUGIN_LIST_ENTRY_PATTERN.test(parsed.value)) {
+    return { kind: "invalid", error: "仅支持 npm 包名（可带 @版本）" };
+  }
+  return parsed;
 }
 
 /** Remove one entry by index; an empty result becomes null (remove the whole key). */
@@ -208,11 +239,22 @@ export function effectiveShallowBoolean(value: ShallowObjectValue | null, field:
 // modelCatalog kind
 // ---------------------------------------------------------------------------
 
-/** Chinese error for an invalid add-row alias, or null when the alias is acceptable. */
-export function modelAliasError(raw: string, existingAliases: readonly string[]): string | null {
+/**
+ * Chinese error for an invalid add-row key of the free-key maps, or null when the
+ * key is acceptable: trimmed non-empty, identifier charset, ≤MODEL_ALIAS_MAX_LENGTH,
+ * unique, and the entry cap when the caller passes a finite one (Infinity = no cap —
+ * the identifier rules mirror core's isAllowedMapKey, which caps numberMap but not
+ * free-key agentTextMap).
+ */
+export function identifierKeyError(
+  raw: string,
+  existingKeys: readonly string[],
+  noun: string,
+  maxEntries: number,
+): string | null {
   const text = raw.trim();
   if (text === "") {
-    return "别名不能为空";
+    return `${noun}不能为空`;
   }
   if (text.length > MODEL_ALIAS_MAX_LENGTH) {
     return `最长 ${MODEL_ALIAS_MAX_LENGTH} 个字符`;
@@ -220,13 +262,18 @@ export function modelAliasError(raw: string, existingAliases: readonly string[])
   if (!MODEL_ALIAS_PATTERN.test(text)) {
     return "仅限字母、数字与 . _ -";
   }
-  if (existingAliases.includes(text)) {
-    return "别名已存在";
+  if (existingKeys.includes(text)) {
+    return `${noun}已存在`;
   }
-  if (existingAliases.length >= MODEL_CATALOG_MAX_ENTRIES) {
-    return `最多 ${MODEL_CATALOG_MAX_ENTRIES} 条别名`;
+  if (existingKeys.length >= maxEntries) {
+    return `最多 ${maxEntries} 条${noun}`;
   }
   return null;
+}
+
+/** modelCatalog add-row alias validation — the 别名-flavored {@link identifierKeyError}. */
+export function modelAliasError(raw: string, existingAliases: readonly string[]): string | null {
+  return identifierKeyError(raw, existingAliases, "别名", MODEL_CATALOG_MAX_ENTRIES);
 }
 
 /** Count of live (non-null) entries — null entries are deletion markers only. */
@@ -278,6 +325,100 @@ export function parseBoundedStringInput(
     return { kind: "invalid", error: `最长 ${maxLength} 个字符` };
   }
   return { kind: "commit", value: text };
+}
+
+/**
+ * Parse a shallowObject string-leaf commit: the same rules with the field's
+ * bound (field.maxLen ?? the protocol-shared OPENCODE_STRING_VALUE_MAX_LENGTH —
+ * the exact default core's isValidShallowObjectLeaf applies, so the pre-check
+ * can never drift from the host validator).
+ */
+export function parseShallowStringInput(
+  raw: string,
+  field: OpencodeSettingField,
+): { kind: "commit"; value: string | null } | { kind: "invalid"; error: string } {
+  return parseBoundedStringInput(raw, field.maxLen ?? OPENCODE_STRING_VALUE_MAX_LENGTH);
+}
+
+/**
+ * Parse a shallowObject multiline-leaf commit (agent 系统提示词): the shared
+ * bounded-string rules with the multiline bound (field.maxLen ?? the
+ * protocol-shared OPENCODE_MULTILINE_VALUE_MAX_LENGTH — the exact default
+ * core's isValidShallowObjectLeaf applies; protocol-shared constant, no mirror).
+ */
+export function parseShallowMultilineInput(
+  raw: string,
+  field: OpencodeSettingField,
+): { kind: "commit"; value: string | null } | { kind: "invalid"; error: string } {
+  return parseBoundedStringInput(raw, field.maxLen ?? OPENCODE_MULTILINE_VALUE_MAX_LENGTH);
+}
+
+/**
+ * Single-field edit map of one shallowObject leaf commit (partial-commit rows —
+ * shared-parent descriptors like the agent 扩展): the host applies per-leaf
+ * edits for keys PRESENT in the value, so only the edited leaf is ever touched
+ * and sibling leaves the read cannot surface (hand-written permission pattern
+ * objects) are never collateral damage — same convention as permissionToolEdit.
+ */
+export function shallowLeafEdit(fieldKey: string, leaf: ShallowObjectValue[string]): ShallowObjectValue {
+  return { [fieldKey]: leaf };
+}
+
+// ---------------------------------------------------------------------------
+// stringMap field rows (recordEditor environment/headers)
+// ---------------------------------------------------------------------------
+
+/** Result of a stringMap add-row commit: commit posts, invalid keeps the draft + shows the red hint. */
+export type StringMapEntryParse = { kind: "commit"; key: string; value: string } | { kind: "invalid"; error: string };
+
+/**
+ * Add-row validation of the stringMap field kind: key trimmed non-empty
+ * ≤128 chars, unique among the map's CURRENT keys (deletion markers included —
+ * they still count toward the cap), map stays ≤16 keys, value ≤512 chars (empty
+ * LEGAL — env FOO="") — the same rules core's isValidRecordFieldLeaf(stringMap)
+ * enforces on the write path.
+ */
+export function parseStringMapEntry(
+  rawKey: string,
+  rawValue: string,
+  currentKeys: readonly string[],
+): StringMapEntryParse {
+  const key = rawKey.trim();
+  if (key === "") {
+    return { kind: "invalid", error: "键不能为空" };
+  }
+  if (key.length > STRING_MAP_KEY_MAX_LENGTH) {
+    return { kind: "invalid", error: `键最长 ${STRING_MAP_KEY_MAX_LENGTH} 个字符` };
+  }
+  if (currentKeys.includes(key)) {
+    return { kind: "invalid", error: "该键已存在" };
+  }
+  if (currentKeys.length >= STRING_MAP_MAX_ENTRIES) {
+    return { kind: "invalid", error: `最多 ${STRING_MAP_MAX_ENTRIES} 条` };
+  }
+  if (rawValue.length > STRING_MAP_VALUE_MAX_LENGTH) {
+    return { kind: "invalid", error: `值最长 ${STRING_MAP_VALUE_MAX_LENGTH} 个字符` };
+  }
+  return { kind: "commit", key, value: rawValue };
+}
+
+/** Upsert one KEY/VALUE pair into the full-map snapshot (aggregated full-map commit semantics). */
+export function withStringMapEntry(value: StringMapValue | null, key: string, entry: string): StringMapValue {
+  return { ...(value ?? {}), [key]: entry };
+}
+
+/**
+ * Delete one key with a null deletion marker (the host removes just that key).
+ * NEVER collapses to a whole null: pending markers must survive in the snapshot
+ * until the host applies them (a null leaf would mean "field unset" and skip
+ * the per-key removes).
+ */
+export function withoutStringMapEntry(value: StringMapValue | null, key: string): StringMapValue {
+  const next: StringMapValue = { ...(value ?? {}) };
+  if (next[key] !== undefined) {
+    next[key] = null;
+  }
+  return next;
 }
 
 // ---------------------------------------------------------------------------
@@ -407,6 +548,32 @@ export function recordMcpRemoteUrlGaps(value: RecordEditorValue | null): RecordR
   return gaps;
 }
 
+/**
+ * Cross-field rule, deliberately inline (mirror of core's isValidOpencodeSettingValue
+ * recordEditor branch — design: NOT a generic framework): a referenceEntries entry
+ * must carry EXACTLY ONE of repository/path, and branch rides only on the
+ * repository form. Couplings per-field schemas cannot express. Live entries only
+ * (null markers are deletions); the descriptor key is checked at the call site
+ * (planRecordCommit).
+ */
+export function recordReferenceGaps(value: RecordEditorValue | null): RecordRequiredGap[] {
+  const gaps: RecordRequiredGap[] = [];
+  for (const [name, entry] of Object.entries(value ?? {})) {
+    if (entry === null) {
+      continue;
+    }
+    const hasRepository = typeof entry.repository === "string" && entry.repository.trim() !== "";
+    const hasPath = typeof entry.path === "string" && entry.path.trim() !== "";
+    const hasBranch = typeof entry.branch === "string" && entry.branch.trim() !== "";
+    if (hasRepository === hasPath) {
+      gaps.push({ name, label: "Git 仓库", notice: "的 Git 仓库与本地路径必须二选一" });
+    } else if (hasBranch && !hasRepository) {
+      gaps.push({ name, label: "分支", notice: "的分支仅在填写 Git 仓库时可用" });
+    }
+  }
+  return gaps;
+}
+
 /** Chinese notice naming the entry that blocks a commit (other entries first, the edited one last). */
 export function recordBlockedCommitError(gaps: readonly RecordRequiredGap[], editedName: string): string | null {
   const first = gaps.find((gap) => gap.name !== editedName) ?? gaps[0];
@@ -479,11 +646,15 @@ export function planRecordCommit(
     snapshot[name] = deletedName === name ? null : { ...entry, ...edits[name] };
   }
   const gaps = recordRequiredGaps(fields, snapshot);
-  // Cross-field rule, deliberately inline (design: NOT a generic framework — mirror
+  // Cross-field rules, deliberately inline (design: NOT a generic framework — mirror
   // of core's isValidOpencodeSettingValue recordEditor branch): an mcpEntries entry
-  // of type=remote must carry a usable url, a coupling per-field schemas cannot express.
+  // of type=remote must carry a usable url, and a referenceEntries entry must carry
+  // exactly one of repository/path — couplings per-field schemas cannot express.
   if (settingKey === "mcpEntries") {
     gaps.push(...recordMcpRemoteUrlGaps(snapshot));
+  }
+  if (settingKey === "referenceEntries") {
+    gaps.push(...recordReferenceGaps(snapshot));
   }
   if (gaps.length > 0) {
     return { kind: "blocked", gaps };
@@ -551,6 +722,7 @@ const WIDE_KINDS: ReadonlySet<string> = new Set([
   "providers",
   "stringList",
   "orderedList",
+  "pluginList",
   "enumChips",
   "shallowObject",
   "permissionTools",
@@ -559,6 +731,7 @@ const WIDE_KINDS: ReadonlySet<string> = new Set([
   "recordMaster",
   "agentPairMap",
   "agentTextMap",
+  "numberMap",
 ]);
 
 /** True when the descriptor's control needs the wrapping full-width set-row layout. */
@@ -688,4 +861,67 @@ export function parseAgentTextInput(
   raw: string,
 ): { kind: "commit"; value: string | null } | { kind: "invalid"; error: string } {
   return parseBoundedStringInput(raw, AGENT_TEXT_MAX_LENGTH);
+}
+
+// ---------------------------------------------------------------------------
+// numberMap kind (OMO 编排 / 覆写矩阵)
+// ---------------------------------------------------------------------------
+
+/** Live row of a numberMap editor (null entries are deletion markers, not rows). */
+export interface NumberMapRow {
+  key: string;
+  value: number;
+}
+
+/** Live entries in insertion order — null markers are deletions already covered by the snapshot. */
+export function numberMapRows(value: NumberMapValue | null): NumberMapRow[] {
+  const rows: NumberMapRow[] = [];
+  for (const [key, entry] of Object.entries(value ?? {})) {
+    if (entry !== null) {
+      rows.push({ key, value: entry });
+    }
+  }
+  return rows;
+}
+
+/** Upsert one entry into the full-map snapshot (aggregated full-map commit semantics). */
+export function withNumberMapEntry(value: NumberMapValue | null, key: string, entry: number): NumberMapValue {
+  return { ...(value ?? {}), [key]: entry };
+}
+
+/**
+ * Delete one entry: a null deletion marker when the row was ever present in the
+ * snapshot; collapses to null (remove the whole key) ONLY for flat maps — a
+ * nested leaf map never collapses (null whole-value = 无编辑, never wipes the
+ * shared agents/categories block; an all-null MAP is the valid "remove every
+ * listed entry" commit).
+ */
+export function withoutNumberMapEntry(
+  value: NumberMapValue | null,
+  key: string,
+  wholeKeyRemove: boolean,
+): NumberMapValue | null {
+  const next: NumberMapValue = { ...(value ?? {}) };
+  if (next[key] !== undefined && next[key] !== null) {
+    next[key] = null;
+  } else {
+    delete next[key];
+  }
+  return wholeKeyRemove && numberMapLiveCount(next) === 0 ? null : next;
+}
+
+/** Count of live (non-null) entries — null entries are deletion markers only. */
+function numberMapLiveCount(value: NumberMapValue): number {
+  return Object.values(value).filter((entry) => entry !== null).length;
+}
+
+// ---------------------------------------------------------------------------
+// free-key agentTextMap rows (提示词 / 分类提示词追加)
+// ---------------------------------------------------------------------------
+
+/** Live rows of a free-key agentTextMap editor (options-absent descriptors, e.g. categories). */
+export function freeAgentTextRows(value: AgentTextMapValue | null): AgentTextRow[] {
+  return Object.entries(value ?? {})
+    .filter(([, text]) => text !== null)
+    .map(([agent, text]) => ({ agent, text: text as string }));
 }

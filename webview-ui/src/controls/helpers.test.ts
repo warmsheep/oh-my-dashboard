@@ -1,7 +1,9 @@
 import type {
   AgentPairMapValue,
   AgentTextMapValue,
+  NumberMapValue,
   OpencodePermissionState,
+  OpencodeSetting,
   OpencodeSettingField,
   RecordAggregate,
   RecordEditorValue,
@@ -10,9 +12,12 @@ import type {
 } from "@shared/protocol";
 import {
   AGENT_TEXT_MAX_LENGTH,
+  isSharedShallowObjectParent,
   OMO_MISC_SETTINGS,
+  OPENCODE_MULTILINE_VALUE_MAX_LENGTH,
   OPENCODE_PERMISSION_TOOLS,
   OPENCODE_SETTINGS,
+  OPENCODE_STRING_VALUE_MAX_LENGTH,
 } from "@shared/protocol";
 import { describe, expect, it } from "vitest";
 
@@ -20,6 +25,8 @@ import {
   agentPairRows,
   agentTextRows,
   effectiveShallowBoolean,
+  freeAgentTextRows,
+  identifierKeyError,
   isAgentPairReasoningLocked,
   isPermissionShorthandLocked,
   isPermissionToolsLocked,
@@ -28,11 +35,16 @@ import {
   isWideSettingKind,
   modelAliasError,
   moveListEntry,
+  numberMapRows,
   parseAgentTextInput,
   parseNumberFieldInput,
   parseOrderedListEntry,
+  parsePluginListEntry,
   parseRecordTextField,
+  parseShallowMultilineInput,
+  parseShallowStringInput,
   parseStringListEntry,
+  parseStringMapEntry,
   permissionToolEdit,
   planRecordCommit,
   recordAggregateAfterCommit,
@@ -40,17 +52,23 @@ import {
   recordEntryNameError,
   recordFieldMaxLen,
   recordMcpRemoteUrlGaps,
+  recordReferenceGaps,
   recordRequiredGaps,
   removeListEntry,
+  shallowLeafEdit,
   toggleChipValue,
   withAgentPairEntry,
   withAgentTextEntry,
   withCatalogEntry,
+  withNumberMapEntry,
   withoutAgentPairEntry,
   withoutAgentTextEntry,
   withoutCatalogAlias,
+  withoutNumberMapEntry,
   withoutRecordEntry,
+  withoutStringMapEntry,
   withRecordEntry,
+  withStringMapEntry,
 } from "./helpers";
 
 describe("parseStringListEntry (add-row validation)", () => {
@@ -117,6 +135,45 @@ describe("parseOrderedListEntry (add-row validation, orderedList bounds 64/64)",
     const full = Array.from({ length: 64 }, (_, i) => `agent-${i}`);
     expect(parseOrderedListEntry("new", full)).toEqual({ kind: "invalid", error: "最多 64 条" });
     expect(parseOrderedListEntry("new", full.slice(0, 63))).toEqual({ kind: "commit", value: "new" });
+  });
+});
+
+describe("parsePluginListEntry (add-row validation, pluginList bounds 32/128 + charset)", () => {
+  it("commits trimmed npm-ish entries — scoped names, @version suffixes, local path prefixes", () => {
+    expect(parsePluginListEntry("  my-plugin  ", [])).toEqual({ kind: "commit", value: "my-plugin" });
+    expect(parsePluginListEntry("@scoped/pkg@1.2.3", [])).toEqual({ kind: "commit", value: "@scoped/pkg@1.2.3" });
+    expect(parsePluginListEntry("./local/plugin", ["x"])).toEqual({ kind: "commit", value: "./local/plugin" });
+    expect(parsePluginListEntry("~/plugins/x", [])).toEqual({ kind: "commit", value: "~/plugins/x" });
+    expect(parsePluginListEntry("file://srv/plugin", [])).toEqual({ kind: "commit", value: "file://srv/plugin" });
+  });
+
+  it("rejects empty and whitespace-only input", () => {
+    expect(parsePluginListEntry("", [])).toEqual({ kind: "invalid", error: "条目不能为空" });
+    expect(parsePluginListEntry("   ", ["x"])).toEqual({ kind: "invalid", error: "条目不能为空" });
+  });
+
+  it("rejects duplicates against the current list (after trimming)", () => {
+    expect(parsePluginListEntry("my-plugin", ["my-plugin"])).toEqual({ kind: "invalid", error: "该条目已存在" });
+    expect(parsePluginListEntry(" my-plugin ", ["my-plugin"])).toEqual({ kind: "invalid", error: "该条目已存在" });
+  });
+
+  it("rejects entries longer than 128 characters", () => {
+    expect(parsePluginListEntry("x".repeat(129), [])).toEqual({ kind: "invalid", error: "最长 128 个字符" });
+    expect(parsePluginListEntry("x".repeat(128), [])).toEqual({ kind: "commit", value: "x".repeat(128) });
+  });
+
+  it("rejects adds once the list holds 32 entries", () => {
+    const full = Array.from({ length: 32 }, (_, i) => `plugin-${i}`);
+    expect(parsePluginListEntry("new", full)).toEqual({ kind: "invalid", error: "最多 32 条" });
+    expect(parsePluginListEntry("new", full.slice(0, 31))).toEqual({ kind: "commit", value: "new" });
+  });
+
+  it("rejects non-npm charset (mirror of core's permissive PLUGIN_LIST_ENTRY_PATTERN)", () => {
+    expect(parsePluginListEntry("bad name!", [])).toEqual({ kind: "invalid", error: "仅支持 npm 包名（可带 @版本）" });
+    expect(parsePluginListEntry("C:\\plugins\\x", [])).toEqual({
+      kind: "invalid",
+      error: "仅支持 npm 包名（可带 @版本）",
+    });
   });
 });
 
@@ -390,6 +447,111 @@ describe("agentTextMap row ops", () => {
 });
 
 // ---------------------------------------------------------------------------
+// numberMap kind + free-key map add-rows (OMO 编排 / 覆写矩阵 / 提示词)
+// ---------------------------------------------------------------------------
+
+describe("identifierKeyError (free-key add-row validation)", () => {
+  it("validates the identifier charset with the caller's noun and the passed entry cap", () => {
+    expect(identifierKeyError("zhipuai", [], "键名", 32)).toBeNull();
+    expect(identifierKeyError("  zhipuai  ", [], "键名", 32)).toBeNull();
+    expect(identifierKeyError("", [], "键名", 32)).toBe("键名不能为空");
+    expect(identifierKeyError("bad key!", [], "键名", 32)).toBe("仅限字母、数字与 . _ -");
+    expect(identifierKeyError("x".repeat(33), [], "键名", 32)).toBe("最长 32 个字符");
+    expect(identifierKeyError("a", ["a"], "键名", 32)).toBe("键名已存在");
+    expect(
+      identifierKeyError(
+        "new",
+        Array.from({ length: 32 }, (_, i) => `k-${i}`),
+        "键名",
+        32,
+      ),
+    ).toBe("最多 32 条键名");
+  });
+
+  it("runs uncapped when the caller passes Infinity (agentTextMap free keys have no host-side cap)", () => {
+    const many = Array.from({ length: 40 }, (_, i) => `k-${i}`);
+    expect(identifierKeyError("new", many, "键名", Number.POSITIVE_INFINITY)).toBeNull();
+  });
+
+  it("keeps modelAliasError as the 别名-flavored wrapper (message parity with the cap)", () => {
+    expect(modelAliasError("", [])).toBe("别名不能为空");
+    expect(modelAliasError("a", ["a"])).toBe("别名已存在");
+    expect(
+      modelAliasError(
+        "new",
+        Array.from({ length: 32 }, (_, i) => `alias-${i}`),
+      ),
+    ).toBe("最多 32 条别名");
+  });
+});
+
+describe("numberMap row ops", () => {
+  it("builds live rows only — null markers are deletions already covered by the snapshot", () => {
+    const value: NumberMapValue = { zhipuai: 4, moonshotai: 2.5, ghost: null };
+    expect(numberMapRows(value)).toEqual([
+      { key: "zhipuai", value: 4 },
+      { key: "moonshotai", value: 2.5 },
+    ]);
+    expect(numberMapRows(null)).toEqual([]);
+  });
+
+  it("upserts entries onto the full-map snapshot (markers overwritten)", () => {
+    expect(withNumberMapEntry(null, "zhipuai", 4)).toEqual({ zhipuai: 4 });
+    expect(withNumberMapEntry({ kimi: 2, ghost: null }, "kimi", 0)).toEqual({ kimi: 0, ghost: null });
+  });
+
+  it("deletes with a null marker; flat maps collapse to null when nothing live remains, nested maps never", () => {
+    expect(withoutNumberMapEntry({ zhipuai: 4 }, "zhipuai", true)).toBeNull();
+    expect(withoutNumberMapEntry({ zhipuai: 4, kimi: 2 }, "zhipuai", true)).toEqual({ zhipuai: null, kimi: 2 });
+    expect(withoutNumberMapEntry({ zhipuai: 4 }, "zhipuai", false)).toEqual({ zhipuai: null });
+    expect(withoutNumberMapEntry(null, "backend", false)).toEqual({});
+  });
+
+  it("commits numberMap entries with descriptor-bounded decimals via parseNumberFieldInput", () => {
+    const agentTemperature = OMO_MISC_SETTINGS.find((setting) => setting.key === "agentTemperature");
+    expect(agentTemperature).toMatchObject({ kind: "numberMap", min: 0, max: 2 });
+    expect(parseNumberFieldInput("1.75", agentTemperature!)).toEqual({ kind: "commit", value: 1.75 });
+    expect(parseNumberFieldInput("2", agentTemperature!)).toEqual({ kind: "commit", value: 2 });
+    expect(parseNumberFieldInput("2.1", agentTemperature!)).toEqual({ kind: "invalid", error: "需为 0–2 的数值" });
+    expect(parseNumberFieldInput("-0.1", agentTemperature!)).toEqual({ kind: "invalid", error: "需为 0–2 的数值" });
+    expect(parseNumberFieldInput("", agentTemperature!)).toEqual({ kind: "commit", value: null });
+
+    const providerConcurrency = OMO_MISC_SETTINGS.find((setting) => setting.key === "providerConcurrency");
+    expect(parseNumberFieldInput("2.5", providerConcurrency!)).toEqual({ kind: "commit", value: 2.5 });
+    expect(parseNumberFieldInput("-1", providerConcurrency!)).toEqual({
+      kind: "invalid",
+      error: "需为不小于 0 的数值",
+    });
+  });
+
+  it("marks numberMap as a wide (full-row) control", () => {
+    expect(isWideSettingKind("numberMap")).toBe(true);
+  });
+});
+
+describe("freeAgentTextRows (free-key agentTextMap)", () => {
+  it("builds rows from the live free keys — null markers are deletions, not rows", () => {
+    const value: AgentTextMapValue = { backend: "追加文本", "my-custom": "自定义", ghost: null };
+    expect(freeAgentTextRows(value)).toEqual([
+      { agent: "backend", text: "追加文本" },
+      { agent: "my-custom", text: "自定义" },
+    ]);
+    expect(freeAgentTextRows(null)).toEqual([]);
+  });
+
+  it("pins the real free-key descriptors (categoryTemperature / categoryPromptAppend carry no options)", () => {
+    const categoryTemperature = OMO_MISC_SETTINGS.find((setting) => setting.key === "categoryTemperature");
+    expect(categoryTemperature).toMatchObject({ kind: "numberMap", path: ["categories"] });
+    expect(categoryTemperature?.options).toBeUndefined();
+    expect(categoryTemperature?.agents).toEqual({ leafKey: "temperature" });
+    const categoryPromptAppend = OMO_MISC_SETTINGS.find((setting) => setting.key === "categoryPromptAppend");
+    expect(categoryPromptAppend).toMatchObject({ kind: "agentTextMap", path: ["categories"] });
+    expect(categoryPromptAppend?.options).toBeUndefined();
+    expect(categoryPromptAppend?.agents).toEqual({ leafKey: "prompt_append" });
+  });
+});
+
+// ---------------------------------------------------------------------------
 // recordEditor / recordMaster kinds (命令 / 格式化 / LSP)
 // ---------------------------------------------------------------------------
 
@@ -403,6 +565,10 @@ const FORMATTER_FIELDS: RecordFieldDef[] = [
 /** The real mcpEntries descriptor fields (type enum required + url/command/enabled). */
 const MCP_FIELDS: RecordFieldDef[] = [
   (OPENCODE_SETTINGS.find((setting) => setting.key === "mcpEntries")?.record?.fields ?? []) as RecordFieldDef[],
+][0];
+/** The real referenceEntries descriptor fields (repository/branch/path/description/hidden). */
+const REFERENCE_FIELDS: RecordFieldDef[] = [
+  (OPENCODE_SETTINGS.find((setting) => setting.key === "referenceEntries")?.record?.fields ?? []) as RecordFieldDef[],
 ][0];
 
 function aggregate(partial: Partial<RecordAggregate>): RecordAggregate {
@@ -549,6 +715,33 @@ describe("recordMcpRemoteUrlGaps (mcpEntries cross-field gate)", () => {
   });
 });
 
+describe("recordReferenceGaps (referenceEntries cross-field gate)", () => {
+  it("flags live entries violating the repository⇔path rule; valid entries and null markers pass", () => {
+    const value: RecordEditorValue = {
+      repo: { repository: "https://github.com/a/b", branch: "dev" },
+      local: { path: "./docs" },
+      both: { repository: "https://x", path: "./y" },
+      neither: { description: "d" },
+      orphanBranch: { path: "./y", branch: "main" },
+      deleted: null,
+    };
+    expect(recordReferenceGaps(value)).toEqual([
+      { name: "both", label: "Git 仓库", notice: "的 Git 仓库与本地路径必须二选一" },
+      { name: "neither", label: "Git 仓库", notice: "的 Git 仓库与本地路径必须二选一" },
+      { name: "orphanBranch", label: "分支", notice: "的分支仅在填写 Git 仓库时可用" },
+    ]);
+    expect(recordReferenceGaps(null)).toEqual([]);
+  });
+
+  it("feeds the Chinese blocked-commit notice (others first, the edited one last)", () => {
+    const gaps = recordReferenceGaps({ edited: {}, elsewhere: { repository: "https://x", path: "./y" } });
+    expect(recordBlockedCommitError(gaps, "edited")).toBe("「elsewhere」的 Git 仓库与本地路径必须二选一，修改已暂存");
+    expect(recordBlockedCommitError(gaps.slice(0, 1), "edited")).toBe(
+      "「edited」的 Git 仓库与本地路径必须二选一，修改已暂存",
+    );
+  });
+});
+
 describe("planRecordCommit (full-snapshot assembly)", () => {
   it("applies held overlays onto live entries and posts the full snapshot", () => {
     const value: RecordEditorValue = { lint: { template: "a" }, fmt: {} };
@@ -632,6 +825,25 @@ describe("planRecordCommit (full-snapshot assembly)", () => {
     expect(planRecordCommit(MCP_FIELDS, value, {}, null).kind).toBe("commit");
     expect(planRecordCommit(MCP_FIELDS, value, {}, null, "command").kind).toBe("commit");
   });
+
+  it("blocks referenceEntries commits while a live entry violates the repository⇔path rule (descriptor-keyed, core parity)", () => {
+    const value: RecordEditorValue = { bad: {}, ok: { repository: "https://x" } };
+    expect(
+      planRecordCommit(REFERENCE_FIELDS, value, { ok: { repository: "https://y" } }, null, "referenceEntries"),
+    ).toEqual({
+      kind: "blocked",
+      gaps: [{ name: "bad", label: "Git 仓库", notice: "的 Git 仓库与本地路径必须二选一" }],
+    });
+    // Fixing the entry (held overlay) unblocks the same commit.
+    const fixed = planRecordCommit(REFERENCE_FIELDS, value, { bad: { path: "./docs" } }, null, "referenceEntries");
+    expect(fixed.kind).toBe("commit");
+  });
+
+  it("applies the repository⇔path gate ONLY to the referenceEntries key (other descriptors commit through)", () => {
+    const value: RecordEditorValue = { both: { repository: "https://x", path: "./y" } };
+    expect(planRecordCommit(REFERENCE_FIELDS, value, {}, null).kind).toBe("commit");
+    expect(planRecordCommit(REFERENCE_FIELDS, value, {}, null, "mcpEntries").kind).toBe("commit");
+  });
 });
 
 describe("record interlocks + optimistic aggregate patch", () => {
@@ -668,6 +880,7 @@ describe("isWideSettingKind", () => {
       "providers",
       "stringList",
       "orderedList",
+      "pluginList",
       "enumChips",
       "shallowObject",
       "permissionTools",
@@ -682,5 +895,118 @@ describe("isWideSettingKind", () => {
     for (const kind of ["model", "enum", "tristate", "boolean", "string", "number"]) {
       expect(isWideSettingKind(kind)).toBe(false);
     }
+  });
+});
+
+describe("stringMap row ops (recordEditor environment/headers)", () => {
+  it("parseStringMapEntry validates the add-row (mirror of core's stringMap bounds)", () => {
+    expect(parseStringMapEntry("  KEY  ", "v", [])).toEqual({ kind: "commit", key: "KEY", value: "v" });
+    expect(parseStringMapEntry("", "v", [])).toEqual({ kind: "invalid", error: "键不能为空" });
+    expect(parseStringMapEntry("   ", "v", [])).toEqual({ kind: "invalid", error: "键不能为空" });
+    expect(parseStringMapEntry("x".repeat(129), "v", [])).toEqual({ kind: "invalid", error: "键最长 128 个字符" });
+    expect(parseStringMapEntry("x".repeat(128), "v", [])).toEqual({ kind: "commit", key: "x".repeat(128), value: "v" });
+    expect(parseStringMapEntry("K", "v", ["K"])).toEqual({ kind: "invalid", error: "该键已存在" });
+    expect(parseStringMapEntry("K", "v", ["Other"])).toEqual({ kind: "commit", key: "K", value: "v" });
+    const sixteenKeys = Array.from({ length: 16 }, (_, i) => `K${i}`);
+    expect(parseStringMapEntry("K", "v", sixteenKeys)).toEqual({ kind: "invalid", error: "最多 16 条" });
+    expect(parseStringMapEntry("K", "v", fifteenOf(sixteenKeys))).toEqual({ kind: "commit", key: "K", value: "v" });
+    expect(parseStringMapEntry("K", "x".repeat(513), [])).toEqual({ kind: "invalid", error: "值最长 512 个字符" });
+    expect(parseStringMapEntry("K", "x".repeat(512), [])).toEqual({ kind: "commit", key: "K", value: "x".repeat(512) });
+    expect(parseStringMapEntry("K", "", [])).toEqual({ kind: "commit", key: "K", value: "" }); // empty value legal (env FOO="")
+  });
+
+  it("withStringMapEntry upserts; withoutStringMapEntry marks null and never collapses to whole-null", () => {
+    expect(withStringMapEntry(null, "A", "1")).toEqual({ A: "1" });
+    expect(withStringMapEntry({ A: "1" }, "B", "")).toEqual({ A: "1", B: "" });
+    expect(withStringMapEntry({ A: "1" }, "A", "2")).toEqual({ A: "2" });
+    expect(withoutStringMapEntry({ A: "1", B: "2" }, "A")).toEqual({ A: null, B: "2" });
+    // A pending deletion marker must reach the host — an all-marker map stays a map.
+    expect(withoutStringMapEntry({ A: "1" }, "A")).toEqual({ A: null });
+    expect(withoutStringMapEntry(null, "A")).toEqual({});
+  });
+});
+
+/** First N keys of a key list (add-row cap boundary helper). */
+function fifteenOf(keys: readonly string[]): string[] {
+  return keys.slice(0, 15);
+}
+
+describe("parseShallowStringInput (shallowObject string-leaf commits)", () => {
+  const field: OpencodeSettingField = { key: "hostname", kind: "string", label: "主机名" };
+
+  it("trims into a commit; empty commits null (field 未设置)", () => {
+    expect(parseShallowStringInput("  0.0.0.0  ", field)).toEqual({ kind: "commit", value: "0.0.0.0" });
+    expect(parseShallowStringInput("", field)).toEqual({ kind: "commit", value: null });
+    expect(parseShallowStringInput("   ", field)).toEqual({ kind: "commit", value: null });
+  });
+
+  it("defaults to the protocol-shared string bound and honors field.maxLen (core parity)", () => {
+    expect(parseShallowStringInput("x".repeat(OPENCODE_STRING_VALUE_MAX_LENGTH), field)).toEqual({
+      kind: "commit",
+      value: "x".repeat(OPENCODE_STRING_VALUE_MAX_LENGTH),
+    });
+    expect(parseShallowStringInput("x".repeat(OPENCODE_STRING_VALUE_MAX_LENGTH + 1), field)).toEqual({
+      kind: "invalid",
+      error: `最长 ${OPENCODE_STRING_VALUE_MAX_LENGTH} 个字符`,
+    });
+    const bounded: OpencodeSettingField = { ...field, maxLen: 8 };
+    expect(parseShallowStringInput("12345678", bounded)).toEqual({ kind: "commit", value: "12345678" });
+    expect(parseShallowStringInput("123456789", bounded)).toEqual({ kind: "invalid", error: "最长 8 个字符" });
+  });
+});
+
+describe("parseShallowMultilineInput (shallowObject multiline-leaf commits)", () => {
+  const field: OpencodeSettingField = { key: "prompt", kind: "multiline", label: "系统提示词" };
+
+  it("trims into a commit (newlines kept inside); empty commits null", () => {
+    expect(parseShallowMultilineInput("  You are build.\nBe careful.  ", field)).toEqual({
+      kind: "commit",
+      value: "You are build.\nBe careful.",
+    });
+    expect(parseShallowMultilineInput("", field)).toEqual({ kind: "commit", value: null });
+    expect(parseShallowMultilineInput("   \n  ", field)).toEqual({ kind: "commit", value: null });
+  });
+
+  it("defaults to the protocol-shared multiline bound and honors field.maxLen (core parity)", () => {
+    expect(parseShallowMultilineInput("x".repeat(OPENCODE_MULTILINE_VALUE_MAX_LENGTH), field)).toEqual({
+      kind: "commit",
+      value: "x".repeat(OPENCODE_MULTILINE_VALUE_MAX_LENGTH),
+    });
+    expect(parseShallowMultilineInput("x".repeat(OPENCODE_MULTILINE_VALUE_MAX_LENGTH + 1), field)).toEqual({
+      kind: "invalid",
+      error: `最长 ${OPENCODE_MULTILINE_VALUE_MAX_LENGTH} 个字符`,
+    });
+    const bounded: OpencodeSettingField = { ...field, maxLen: 8 };
+    expect(parseShallowMultilineInput("12345678", bounded)).toEqual({ kind: "commit", value: "12345678" });
+    expect(parseShallowMultilineInput("123456789", bounded)).toEqual({ kind: "invalid", error: "最长 8 个字符" });
+  });
+});
+
+describe("shallowLeafEdit (partial-commit single-field maps)", () => {
+  it("carries exactly one field — the edited leaf — null marking the remove intent", () => {
+    expect(shallowLeafEdit("permission.edit", "allow")).toEqual({ "permission.edit": "allow" });
+    expect(shallowLeafEdit("prompt", null)).toEqual({ prompt: null });
+    expect(shallowLeafEdit("top_p", 0.9)).toEqual({ top_p: 0.9 });
+  });
+});
+
+describe("agent 扩展 partial-commit derivation (isSharedShallowObjectParent parity)", () => {
+  it("the four extras descriptors are shared parents; single-owner shallowObjects are not", () => {
+    for (const key of ["agentBuildExtras", "agentPlanExtras", "agentGeneralExtras", "agentExploreExtras"]) {
+      const descriptor = OPENCODE_SETTINGS.find((entry) => entry.key === key);
+      expect(descriptor !== undefined).toBe(true);
+      expect(isSharedShallowObjectParent(descriptor as OpencodeSetting)).toBe(true);
+    }
+    for (const key of ["compaction", "toolOutput", "attachmentImage", "serverConfig"]) {
+      const descriptor = OPENCODE_SETTINGS.find((entry) => entry.key === key);
+      expect(isSharedShallowObjectParent(descriptor as OpencodeSetting)).toBe(false);
+    }
+  });
+
+  it("OMO shallowObject descriptors keep the full-map convention (no OMO parent is probed)", () => {
+    // The derivation is OpenCode-side only; every OMO shallowObject stays full-map
+    // (the OMO tab never passes partialCommit).
+    const omoShallow = OMO_MISC_SETTINGS.filter((entry) => entry.kind === "shallowObject");
+    expect(omoShallow.length).toBeGreaterThan(0);
   });
 });
