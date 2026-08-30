@@ -1,46 +1,63 @@
-import type { PresetRow, SkillSummary } from "@shared/protocol";
+import type { OmoMiscSetting, PresetRow } from "@shared/protocol";
 
-/** One skills-location group of the config tab's read-only list (grouped by locationLabel). */
-export interface SkillGroup {
-  locationLabel: string;
-  scope: SkillSummary["scope"];
-  skills: SkillSummary[];
+/** One 功能设置 sub-block: OMO_MISC_SETTINGS rows sharing the same group label. */
+export interface OmoSettingGroup {
+  label: string;
+  settings: OmoMiscSetting[];
 }
 
-/**
- * Group skills by their location label, preserving first-appearance order of
- * both the groups and the skills within a group (mirrors groupModelsByProvider).
- * A location is either global or project, so the group scope comes from its
- * first entry.
- */
-export function groupSkillsByLocation(skills: readonly SkillSummary[]): SkillGroup[] {
-  const groups: SkillGroup[] = [];
-  const byLabel = new Map<string, SkillGroup>();
-  for (const skill of skills) {
-    let group = byLabel.get(skill.locationLabel);
+/** Group OMO_MISC_SETTINGS by their group field, preserving first-appearance order. */
+export function groupOmoMiscSettings(settings: readonly OmoMiscSetting[]): OmoSettingGroup[] {
+  const groups: OmoSettingGroup[] = [];
+  const byLabel = new Map<string, OmoSettingGroup>();
+  for (const setting of settings) {
+    let group = byLabel.get(setting.group);
     if (!group) {
-      group = { locationLabel: skill.locationLabel, scope: skill.scope, skills: [] };
-      byLabel.set(skill.locationLabel, group);
+      group = { label: setting.group, settings: [] };
+      byLabel.set(setting.group, group);
       groups.push(group);
     }
-    group.skills.push(skill);
+    group.settings.push(setting);
   }
   return groups;
 }
 
-const SKILL_SCOPE_LABELS: Record<SkillSummary["scope"], string> = {
-  global: "全局",
-  project: "项目",
-};
-
-/** Chinese badge label of a skill scope (全局/项目). */
-export function skillScopeLabel(scope: SkillSummary["scope"]): string {
-  return SKILL_SCOPE_LABELS[scope];
+/** Effective value a control shows: file value ?? descriptor default (null = unset in file). */
+export function effectiveOmoValue(
+  value: boolean | number | null | undefined,
+  setting: OmoMiscSetting,
+): boolean | number {
+  return value ?? setting.default;
 }
 
-/** Display text of a skill description; empty/whitespace degrades to the 无描述 placeholder. */
-export function skillDescriptionLabel(description: string): string {
-  return description.trim() === "" ? "无描述" : description;
+/**
+ * Result of parsing a 功能设置 number commit: "commit" posts the value (null = empty →
+ * remove the key, back to the descriptor default), "noop" keeps the state unchanged and
+ * posts nothing (non-integer text), "invalid" keeps the raw draft and shows the Chinese
+ * bounds error without posting.
+ */
+export type OmoNumberParse =
+  { kind: "commit"; value: number | null } | { kind: "noop" } | { kind: "invalid"; error: string };
+
+/**
+ * Parse a 功能设置 number-field commit against the descriptor bounds (min ?? 0,
+ * max ?? 100 — the same source core's isValidOmoMiscValue validates against).
+ */
+export function parseOmoNumberInput(raw: string, setting: OmoMiscSetting): OmoNumberParse {
+  const text = raw.trim();
+  if (text === "") {
+    return { kind: "commit", value: null };
+  }
+  if (!/^[+-]?\d+$/.test(text)) {
+    return { kind: "noop" };
+  }
+  const min = setting.min ?? 0;
+  const max = setting.max ?? 100;
+  const value = Number.parseInt(text, 10);
+  if (value < min || value > max) {
+    return { kind: "invalid", error: `需为 ${min}–${max} 的整数` };
+  }
+  return { kind: "commit", value };
 }
 
 /**

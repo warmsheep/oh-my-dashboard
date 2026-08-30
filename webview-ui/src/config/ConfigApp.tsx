@@ -1,21 +1,25 @@
-import type { ConfigInitPayload, ExtToWebview, PresetRow } from "@shared/protocol";
+import type { ConfigInitPayload, ExtToWebview, OmoMiscSetting, PresetRow } from "@shared/protocol";
+import { OMO_MISC_SETTINGS } from "@shared/protocol";
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { SECTIONS, VARIANT_ORDER } from "../constants";
 import { countConfigured, groupModelsByProvider, isKnownVariant, mergeRows, type ModelOption } from "../helpers";
+import { mergeIncomingDrafts } from "../settings/helpers";
 import { postToHost } from "../vscode";
-import { groupSkillsByLocation, skillDescriptionLabel, skillScopeLabel, upsertRow, type SkillGroup } from "./helpers";
+import { effectiveOmoValue, groupOmoMiscSettings, parseOmoNumberInput, upsertRow } from "./helpers";
 
 /**
  * Pre-init (and dev-preview) state: the host pushes configInit on boot/navigation,
  * so the tab renders clean empty sections until the first payload lands — no fake
- * data, and nothing is posted on mount.
+ * data, and nothing is posted on mount. All OMO misc keys default to null (unset
+ * in file, controls show the descriptor defaults).
  */
 const EMPTY_PAYLOAD: ConfigInitPayload = {
   rows: [],
   models: [],
   skills: [],
   target: { kind: "omo", path: "" },
+  omo: Object.fromEntries(OMO_MISC_SETTINGS.map((setting) => [setting.key, null])),
 };
 
 function rowKey(section: PresetRow["section"], name: string): string {
@@ -151,57 +155,90 @@ function ModelSection({
   );
 }
 
-/** One read-only skills location group (collapsible; the list itself has no controls). */
-function SkillLocationGroup({
-  group,
-  collapsed,
+/** One 功能设置 row: boolean → switch, number → draft-text input committing on blur/Enter. */
+function OmoSettingRow({
+  setting,
+  value,
+  pending,
+  draft,
+  onDraft,
   onToggle,
+  onCommit,
+  onFocusKey,
 }: {
-  group: SkillGroup;
-  collapsed: boolean;
-  onToggle: () => void;
+  setting: OmoMiscSetting;
+  value: boolean | number | null | undefined;
+  pending: boolean;
+  draft: string | undefined;
+  onDraft(key: string, raw: string): void;
+  onToggle(setting: OmoMiscSetting, fileValue: boolean | number | null): void;
+  onCommit(setting: OmoMiscSetting, raw: string, fileValue: boolean | number | null): void;
+  onFocusKey(key: string): void;
 }) {
+  const hintText =
+    setting.kind === "number"
+      ? [setting.hint, `默认 ${setting.default}`].filter(Boolean).join("；")
+      : (setting.hint ?? "");
   return (
-    <section className="block">
-      <button type="button" className="block-head" onClick={onToggle} aria-expanded={!collapsed}>
-        <span className={`chev${collapsed ? "" : " open"}`} aria-hidden="true">
-          ▸
-        </span>
-        <span className="block-title skill-group-title" title={group.locationLabel}>
-          {group.locationLabel}
-        </span>
-        <span className="scope-pill">{skillScopeLabel(group.scope)}</span>
-        <span className="block-count">{group.skills.length} 项</span>
-      </button>
-      {!collapsed && (
-        <ul className="block-body skill-list">
-          {group.skills.map((skill) => (
-            <li className="skill-row" key={skill.name}>
-              <span className="skill-name" title={skill.name}>
-                {skill.name}
-              </span>
-              <span className="skill-desc">{skillDescriptionLabel(skill.description)}</span>
-            </li>
-          ))}
-        </ul>
+    <div className="set-row">
+      <span className="set-row-main">
+        <span className="set-row-label">{setting.label}</span>
+        {hintText !== "" && <span className="set-row-hint">{hintText}</span>}
+      </span>
+      {setting.kind === "boolean" ? (
+        <label className="s-switch">
+          <input
+            type="checkbox"
+            className="s-switch-input"
+            aria-label={setting.label}
+            checked={effectiveOmoValue(value, setting) === true}
+            disabled={pending}
+            onChange={() => onToggle(setting, value ?? null)}
+          />
+          <span className="s-switch-track" aria-hidden="true" />
+        </label>
+      ) : (
+        <input
+          className="ctl s-num"
+          type="number"
+          step={1}
+          disabled={pending}
+          aria-label={setting.label}
+          value={draft ?? (value === null || value === undefined ? "" : String(value))}
+          onFocus={() => onFocusKey(setting.key)}
+          onBlur={(e) => onCommit(setting, e.currentTarget.value, value ?? null)}
+          onKeyDown={(e) => {
+            // Enter commits through the single blur path, so a commit can never fire twice.
+            if (e.key === "Enter") {
+              e.currentTarget.blur();
+            }
+          }}
+          onChange={(e) => onDraft(setting.key, e.target.value)}
+        />
       )}
-    </section>
+    </div>
   );
 }
 
 /**
- * 配置 tab: the live OMO model assignments (editable, one configSetModel post per
- * row change, optimistic with revert on a !ok reply) plus the read-only skills
- * list. State comes from configInit pushes only — the tab never requests data.
+ * OMO tab (原「配置」): the live OMO model assignments (editable, one configSetModel
+ * post per row change) plus the 功能设置 section driven by OMO_MISC_SETTINGS
+ * descriptors (one omoSetSetting post per toggle/commit; optimistic with revert on
+ * a !ok reply). State comes from configInit pushes only — the tab never requests data.
  */
 export default function ConfigApp() {
   const [payload, setPayload] = useState<ConfigInitPayload>(EMPTY_PAYLOAD);
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
   const [pending, setPending] = useState<ReadonlySet<string>>(new Set());
   const [error, setError] = useState<string | null>(null);
+  const [omoDrafts, setOmoDrafts] = useState<Partial<Record<string, string>>>({});
 
   // Pre-edit values of rows with an in-flight save — the revert source on a !ok reply.
   const preEditRef = useRef(new Map<string, { model: string | null; variant: string | null }>());
+  // Same revert source for 功能设置 keys (boolean | number | null file values).
+  const preOmoEditRef = useRef(new Map<string, boolean | number | null>());
+  // Key of the focused 功能设置 number input — configInit pushes must never clobber its draft.
+  const focusedOmoKeyRef = useRef<string | null>(null);
 
   useEffect(() => {
     const onMessage = (event: MessageEvent) => {
@@ -211,11 +248,15 @@ export default function ConfigApp() {
       }
       if (msg.type === "configInit") {
         // Full replace: the pushed payload is the source of truth and supersedes
-        // any in-flight optimistic edit (its own configModelSaved settles the row).
+        // any in-flight optimistic edit (its own saved reply settles the key).
         setPayload(msg.payload);
         preEditRef.current.clear();
+        preOmoEditRef.current.clear();
         setPending(new Set());
         setError(null);
+        // Drafts full-replace too, but the focused input keeps its in-progress text
+        // (mergeIncomingDrafts semantics — see settings/SettingsApp).
+        setOmoDrafts((current) => mergeIncomingDrafts(current, focusedOmoKeyRef.current));
       } else if (msg.type === "configModelSaved") {
         const { ok, section, name } = msg.payload;
         const key = rowKey(section, name);
@@ -235,6 +276,26 @@ export default function ConfigApp() {
           }
           setError(msg.payload.error ?? "保存失败，请重试");
         }
+      } else if (msg.type === "omoSettingSaved") {
+        const { ok, key } = msg.payload;
+        const prev = preOmoEditRef.current.get(key);
+        preOmoEditRef.current.delete(key);
+        setPending((current) => {
+          if (!current.has(key)) {
+            return current;
+          }
+          const next = new Set(current);
+          next.delete(key);
+          return next;
+        });
+        if (!ok) {
+          // Revert only when the pre-edit value still exists — an intervening configInit
+          // full replace (or the stale-reply guard) already made the push authoritative.
+          if (prev !== undefined) {
+            setPayload((current) => ({ ...current, omo: { ...current.omo, [key]: prev ?? null } }));
+          }
+          setError(msg.payload.error ?? "保存失败，请重试");
+        }
       }
     };
     window.addEventListener("message", onMessage);
@@ -242,13 +303,14 @@ export default function ConfigApp() {
   }, []);
 
   // Stale-reply guard (mirror of the preset editor's awaitingResult timeout): a lost
-  // host reply must not leave a row's selects disabled forever.
+  // host reply must not leave a control disabled forever.
   useEffect(() => {
     if (pending.size === 0) {
       return;
     }
     const t = window.setTimeout(() => {
       preEditRef.current.clear();
+      preOmoEditRef.current.clear();
       setPending(new Set());
       setError("保存无响应，请重试");
     }, 12_000);
@@ -271,6 +333,61 @@ export default function ConfigApp() {
     });
   }, []);
 
+  /** Optimistically flip a 功能设置 boolean and post the explicit new value. */
+  const toggleOmoSetting = useCallback((setting: OmoMiscSetting, fileValue: boolean | number | null) => {
+    if (preOmoEditRef.current.has(setting.key)) {
+      return;
+    }
+    const next = !(effectiveOmoValue(fileValue, setting) === true);
+    preOmoEditRef.current.set(setting.key, fileValue);
+    setPending((current) => new Set(current).add(setting.key));
+    setError(null);
+    setPayload((current) => ({ ...current, omo: { ...current.omo, [setting.key]: next } }));
+    postToHost({ type: "omoSetSetting", payload: { key: setting.key, value: next } });
+  }, []);
+
+  /**
+   * Commit a 功能设置 number draft: empty → null (remove key); out-of-bounds keeps the
+   * draft and shows the descriptor-bounds error without posting; no-op when unchanged.
+   */
+  const commitOmoNumber = useCallback((setting: OmoMiscSetting, raw: string, fileValue: boolean | number | null) => {
+    // The blur path is the only caller, so focus tracking ends here.
+    focusedOmoKeyRef.current = null;
+    const parsed = parseOmoNumberInput(raw, setting);
+    if (parsed.kind === "invalid") {
+      // Keep the draft so the user can fix the text; post nothing.
+      setError(parsed.error);
+      return;
+    }
+    setOmoDrafts((current) => {
+      const next = { ...current };
+      delete next[setting.key];
+      return next;
+    });
+    if (parsed.kind === "noop") {
+      return;
+    }
+    const value = parsed.value;
+    const prev = typeof fileValue === "number" ? fileValue : null;
+    if (value === prev || preOmoEditRef.current.has(setting.key)) {
+      return;
+    }
+    preOmoEditRef.current.set(setting.key, prev);
+    setPending((current) => new Set(current).add(setting.key));
+    setError(null);
+    setPayload((current) => ({ ...current, omo: { ...current.omo, [setting.key]: value } }));
+    postToHost({ type: "omoSetSetting", payload: { key: setting.key, value } });
+  }, []);
+
+  /** Mark a 功能设置 number input as focused — its draft survives init pushes. */
+  const focusOmoField = useCallback((key: string) => {
+    focusedOmoKeyRef.current = key;
+  }, []);
+
+  const setOmoDraft = useCallback((key: string, raw: string) => {
+    setOmoDrafts((current) => ({ ...current, [key]: raw }));
+  }, []);
+
   const toggleCollapsed = useCallback((key: string) => {
     setCollapsed((c) => ({ ...c, [key]: !(c[key] ?? false) }));
   }, []);
@@ -284,7 +401,7 @@ export default function ConfigApp() {
     }
     return map;
   }, [payload.rows]);
-  const skillGroups = useMemo(() => groupSkillsByLocation(payload.skills), [payload.skills]);
+  const omoGroups = useMemo(() => groupOmoMiscSettings(OMO_MISC_SETTINGS), []);
 
   const targetLabel = payload.target.kind === "omo" ? "oh-my-openagent" : "legacy";
 
@@ -326,24 +443,44 @@ export default function ConfigApp() {
         ))}
       </section>
 
-      {/* Read-only by construction: the skills list renders no interactive elements.
-          (aria-readonly is NOT set — it is invalid ARIA on non-widget containers.) */}
-      <section className="cfg-block" aria-label="Skills">
+      <section className="cfg-block" aria-label="功能设置">
         <header className="cfg-block-head">
-          <h2>Skills</h2>
+          <h2>功能设置</h2>
+          <p className="cfg-target">oh-my-openagent 常用功能开关，即时写入</p>
         </header>
-        {skillGroups.length === 0 ? (
-          <div className="empty">未发现 Skills</div>
-        ) : (
-          skillGroups.map((group) => (
-            <SkillLocationGroup
-              key={group.locationLabel}
-              group={group}
-              collapsed={collapsed[`skills:${group.locationLabel}`] ?? false}
-              onToggle={() => toggleCollapsed(`skills:${group.locationLabel}`)}
-            />
-          ))
-        )}
+        {omoGroups.map((group) => (
+          <section className="block" key={group.label}>
+            <button
+              type="button"
+              className="block-head"
+              onClick={() => toggleCollapsed(`omo:${group.label}`)}
+              aria-expanded={!(collapsed[`omo:${group.label}`] ?? false)}
+            >
+              <span className={`chev${collapsed[`omo:${group.label}`] ? "" : " open"}`} aria-hidden="true">
+                ▸
+              </span>
+              <span className="block-title">{group.label}</span>
+              <span className="block-count">{group.settings.length} 项</span>
+            </button>
+            {!(collapsed[`omo:${group.label}`] ?? false) && (
+              <div className="block-body">
+                {group.settings.map((setting) => (
+                  <OmoSettingRow
+                    key={setting.key}
+                    setting={setting}
+                    value={payload.omo[setting.key]}
+                    pending={pending.has(setting.key)}
+                    draft={omoDrafts[setting.key]}
+                    onDraft={setOmoDraft}
+                    onToggle={toggleOmoSetting}
+                    onCommit={commitOmoNumber}
+                    onFocusKey={focusOmoField}
+                  />
+                ))}
+              </div>
+            )}
+          </section>
+        ))}
       </section>
     </div>
   );

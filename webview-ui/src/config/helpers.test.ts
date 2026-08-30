@@ -1,50 +1,91 @@
-import type { PresetRow, SkillSummary } from "@shared/protocol";
+import type { OmoMiscSetting, PresetRow } from "@shared/protocol";
+import { OMO_MISC_SETTINGS } from "@shared/protocol";
 import { describe, expect, it } from "vitest";
 
-import { groupSkillsByLocation, skillDescriptionLabel, skillScopeLabel, upsertRow } from "./helpers";
+import { effectiveOmoValue, groupOmoMiscSettings, parseOmoNumberInput, upsertRow } from "./helpers";
 
-function skill(name: string, locationLabel: string, scope: SkillSummary["scope"] = "global"): SkillSummary {
-  return { name, description: "", scope, locationLabel };
+function booleanSetting(key: string, group: string): OmoMiscSetting {
+  return { key, path: [key], kind: "boolean", label: key, group, default: false };
 }
 
-describe("groupSkillsByLocation", () => {
-  it("groups by location label preserving first-appearance order of groups and skills", () => {
-    const groups = groupSkillsByLocation([
-      skill("alpha", "~/.agents/skills"),
-      skill("beta", ".claude/skills", "project"),
-      skill("gamma", "~/.agents/skills"),
+describe("groupOmoMiscSettings", () => {
+  it("groups by the group field preserving first-appearance order", () => {
+    const groups = groupOmoMiscSettings([
+      booleanSetting("a", "团队模式"),
+      booleanSetting("b", "遥测"),
+      booleanSetting("c", "团队模式"),
     ]);
-    expect(groups.map((g) => g.locationLabel)).toEqual(["~/.agents/skills", ".claude/skills"]);
-    expect(groups[0]?.skills.map((s) => s.name)).toEqual(["alpha", "gamma"]);
-    expect(groups[1]?.skills.map((s) => s.name)).toEqual(["beta"]);
+    expect(groups.map((g) => g.label)).toEqual(["团队模式", "遥测"]);
+    expect(groups[0]?.settings.map((s) => s.key)).toEqual(["a", "c"]);
+    expect(groups[1]?.settings.map((s) => s.key)).toEqual(["b"]);
   });
 
-  it("takes the group scope from its first entry", () => {
-    const groups = groupSkillsByLocation([skill("a", "x", "project"), skill("b", "x", "global")]);
-    expect(groups).toHaveLength(1);
-    expect(groups[0]?.scope).toBe("project");
+  it("returns an empty array for no settings", () => {
+    expect(groupOmoMiscSettings([])).toEqual([]);
   });
 
-  it("returns an empty array when there are no skills", () => {
-    expect(groupSkillsByLocation([])).toEqual([]);
-  });
-});
-
-describe("skillScopeLabel", () => {
-  it("maps scopes to Chinese labels", () => {
-    expect(skillScopeLabel("global")).toBe("全局");
-    expect(skillScopeLabel("project")).toBe("项目");
+  it("covers every OMO_MISC_SETTINGS descriptor exactly once", () => {
+    const groups = groupOmoMiscSettings(OMO_MISC_SETTINGS);
+    const keys = groups.flatMap((g) => g.settings.map((s) => s.key));
+    expect(keys).toHaveLength(OMO_MISC_SETTINGS.length);
+    expect(new Set(keys).size).toBe(OMO_MISC_SETTINGS.length);
   });
 });
 
-describe("skillDescriptionLabel", () => {
-  it("passes through a real description", () => {
-    expect(skillDescriptionLabel("审查代码")).toBe("审查代码");
+describe("effectiveOmoValue", () => {
+  const setting: OmoMiscSetting = { key: "k", path: ["k"], kind: "boolean", label: "k", group: "g", default: true };
+
+  it("returns the file value when set", () => {
+    expect(effectiveOmoValue(false, setting)).toBe(false);
+    expect(effectiveOmoValue(5, { ...setting, kind: "number", default: 0 })).toBe(5);
   });
 
-  it("degrades empty and whitespace-only descriptions to the placeholder", () => {
-    expect(skillDescriptionLabel("")).toBe("无描述");
-    expect(skillDescriptionLabel("   ")).toBe("无描述");
+  it("falls back to the descriptor default when the file does not set the key", () => {
+    expect(effectiveOmoValue(null, setting)).toBe(true);
+    expect(effectiveOmoValue(undefined, setting)).toBe(true);
+  });
+});
+
+describe("parseOmoNumberInput", () => {
+  /** Real descriptor lookup by key; throws on typos so a bad test key fails loudly. */
+  function descriptor(key: string): OmoMiscSetting {
+    const found = OMO_MISC_SETTINGS.find((entry) => entry.key === key);
+    if (found === undefined) {
+      throw new Error(`unknown test key: ${key}`);
+    }
+    return found;
+  }
+  const concurrency = descriptor("backgroundConcurrency");
+
+  it("parses integer text (with surrounding whitespace and sign) into a commit", () => {
+    expect(parseOmoNumberInput("5", concurrency)).toEqual({ kind: "commit", value: 5 });
+    expect(parseOmoNumberInput("  12 ", concurrency)).toEqual({ kind: "commit", value: 12 });
+    expect(parseOmoNumberInput("0", concurrency)).toEqual({ kind: "commit", value: 0 });
+    expect(parseOmoNumberInput("+7", concurrency)).toEqual({ kind: "commit", value: 7 });
+  });
+
+  it("commits null for empty input (remove the key, back to default)", () => {
+    expect(parseOmoNumberInput("", concurrency)).toEqual({ kind: "commit", value: null });
+    expect(parseOmoNumberInput("   ", concurrency)).toEqual({ kind: "commit", value: null });
+  });
+
+  it("is a noop for non-integer text (no commit, no error, keep state)", () => {
+    expect(parseOmoNumberInput("abc", concurrency)).toEqual({ kind: "noop" });
+    expect(parseOmoNumberInput("1.5", concurrency)).toEqual({ kind: "noop" });
+    expect(parseOmoNumberInput("1e3", concurrency)).toEqual({ kind: "noop" });
+  });
+
+  it("rejects out-of-bounds integers with the descriptor-bounds error", () => {
+    expect(parseOmoNumberInput("-1", concurrency)).toEqual({ kind: "invalid", error: "需为 0–100 的整数" });
+    expect(parseOmoNumberInput("101", concurrency)).toEqual({ kind: "invalid", error: "需为 0–100 的整数" });
+    expect(parseOmoNumberInput("100", concurrency)).toEqual({ kind: "commit", value: 100 });
+  });
+
+  it("reads bounds from the descriptor, not a hardcoded 0–100", () => {
+    const custom: OmoMiscSetting = { ...concurrency, min: 10, max: 20 };
+    expect(parseOmoNumberInput("5", custom)).toEqual({ kind: "invalid", error: "需为 10–20 的整数" });
+    expect(parseOmoNumberInput("15", custom)).toEqual({ kind: "commit", value: 15 });
+    expect(parseOmoNumberInput("21", custom)).toEqual({ kind: "invalid", error: "需为 10–20 的整数" });
   });
 });
 

@@ -83,15 +83,20 @@ export function mergeIncomingSettings(
   };
 }
 
-/** Keep only the focused field's raw draft when adopting a push, so in-progress typing is never clobbered. */
-export function mergeIncomingDrafts(
-  drafts: Readonly<Partial<Record<SettingsFieldKey, string>>>,
-  focusedField: SettingsFieldKey | null,
-): Partial<Record<SettingsFieldKey, string>> {
+/**
+ * Keep only the focused field's raw draft when adopting a push, so in-progress typing
+ * is never clobbered. The drafts map accepts any string keys (the settings page uses
+ * SettingsFieldKey, the OMO/OpenCode tabs use plain setting keys); K pins the focused
+ * field and the returned single-entry map.
+ */
+export function mergeIncomingDrafts<K extends string>(
+  drafts: Readonly<Partial<Record<string, string>>>,
+  focusedField: K | null,
+): Partial<Record<K, string>> {
   if (focusedField === null || drafts[focusedField] === undefined) {
     return {};
   }
-  const next: Partial<Record<SettingsFieldKey, string>> = {};
+  const next: Partial<Record<K, string>> = {};
   next[focusedField] = drafts[focusedField];
   return next;
 }

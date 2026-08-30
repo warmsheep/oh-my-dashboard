@@ -399,6 +399,54 @@ fieldset[disabled] {
   color: var(--desc);
 }
 
+/* ---------- descriptor setting rows (OMO 功能设置 / OpenCode tabs) ---------- */
+
+/* Label + hint stacked on the left, control on the right (switch/select/input). */
+.set-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 34px;
+  padding: 5px 10px;
+  border-bottom: 1px solid var(--hairline);
+}
+
+.set-row:last-child {
+  border-bottom: none;
+}
+
+/* Wide controls (provider chips) wrap onto their own full-width line. */
+.set-row-wrap {
+  flex-wrap: wrap;
+}
+
+.set-row-wrap .provider-chips {
+  flex-basis: 100%;
+}
+
+.set-row-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.set-row-label {
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.set-row-hint {
+  font-size: 11px;
+  color: var(--desc);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* ---------- footer ---------- */
 
 .footer {

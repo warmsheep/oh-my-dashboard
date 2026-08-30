@@ -1,6 +1,6 @@
-/* 配置 tab — shares main.css (theme tokens, .block/.block-head/.row/.ctl/.empty) and
-   adds the two top-level block headers, the write-target subtitle, the read-only
-   skills list and the scope pill. */
+/* OMO tab (原「配置」) — shares main.css (theme tokens, .block/.block-head/.row/.ctl/.empty
+    and the .set-row descriptor rows) and adds the two top-level block headers plus
+    the write-target subtitle. The skills list styles live in skills/skills.css. */
 
 .cfg-block {
   margin-top: 14px;
@@ -34,66 +34,4 @@
 .cfg-target-path {
   margin-left: 6px;
   font-family: var(--mono);
-}
-
-/* Skill group titles are location paths: mono, and never uppercased by .block-head. */
-.skill-group-title {
-  font-family: var(--mono);
-  text-transform: none;
-  letter-spacing: 0.02em;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* Scope badge inside a .block-head: cancel its uppercase/600 inheritance. */
-.scope-pill {
-  flex: none;
-  padding: 0 6px;
-  font-size: 10px;
-  font-weight: 400;
-  letter-spacing: 0.02em;
-  text-transform: none;
-  line-height: 16px;
-  color: var(--fg);
-  background: var(--bg);
-  border: 1px solid var(--hairline);
-  border-radius: 2px;
-}
-
-/* Skills are read-only: name + description lines, no controls. */
-.skill-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-}
-
-.skill-row {
-  display: flex;
-  align-items: baseline;
-  gap: 12px;
-  padding: 5px 10px;
-  border-bottom: 1px solid var(--hairline);
-}
-
-.skill-row:last-child {
-  border-bottom: none;
-}
-
-.skill-name {
-  flex: none;
-  width: 180px;
-  font-family: var(--mono);
-  font-size: 12px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.skill-desc {
-  flex: 1;
-  min-width: 0;
-  font-size: 12px;
-  color: var(--desc);
-  overflow-wrap: break-word;
 }
