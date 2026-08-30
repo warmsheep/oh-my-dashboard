@@ -545,12 +545,10 @@ interface OpencodeInitMessage {
   models: unknown[];
   /** 权限 group read aggregate (batch 2): string shorthand + per-tool actions + pattern-object tools. */
   permission?: { shorthand?: unknown; tools?: Record<string, unknown>; advancedTools?: unknown[] };
-  /** MCP 服务器 group read aggregate (batch 2): declared servers with their disabled flags. */
-  mcp?: { name?: unknown; disabled?: unknown }[];
   /** 终端界面 group face (batch 2): current tui.json theme + the tui.json path. */
   tui?: { theme?: unknown; path?: unknown };
-  /** 命令/格式化/LSP group read aggregates (batch 4): one per recordEditor path root. */
-  records?: { command?: RecordAggregate; formatter?: RecordAggregate; lsp?: RecordAggregate };
+  /** 命令/格式化/LSP/MCP group read aggregates (batch 4 + the batch-5 mcp migration): one per recordEditor path root. */
+  records?: { command?: RecordAggregate; formatter?: RecordAggregate; lsp?: RecordAggregate; mcp?: RecordAggregate };
 }
 
 function opencodeInits(bridge: PanelBridge): OpencodeInitMessage[] {
@@ -588,8 +586,11 @@ function settingSavedReplies(
     .map((message) => message.payload);
 }
 
-/** Entries map of one record slot (command/formatter/lsp) from an init message. */
-function recordEntriesOf(init: OpencodeInitMessage, slot: "command" | "formatter" | "lsp"): Record<string, unknown> {
+/** Entries map of one record slot (command/formatter/lsp/mcp) from an init message. */
+function recordEntriesOf(
+  init: OpencodeInitMessage,
+  slot: "command" | "formatter" | "lsp" | "mcp",
+): Record<string, unknown> {
   return init.records?.[slot]?.entries ?? {};
 }
 
@@ -1380,6 +1381,29 @@ function tests(): TestCase[] {
           { layout: "main-vertical", main_pane_size: 60, isolation: null },
           "boot omo.tmuxParams must mirror the fixture's tmux block with the isolation leaf null",
         );
+        // Batch-5 boot contract: the fixture seeds an `agents` block but none of the
+        // per-agent leaf keys, so the four agent-map kinds read as EMPTY maps (a null
+        // would mean the whole `agents` block were missing); the seven scalar/shallow
+        // kinds read null — the fixture carries no claude_code / keyword_detector /
+        // goal / codegraph / monitor / i18n / notification keys.
+        for (const key of [
+          "claudeCode",
+          "keywordExpansions",
+          "goalParams",
+          "codegraph",
+          "monitorParams",
+          "i18nLocale",
+          "notificationForce",
+        ]) {
+          assert.equal(omo?.[key], null, `boot omo.${key} must read null on the fresh sandbox`);
+        }
+        for (const key of ["agentUltrawork", "agentCompaction", "agentPrompt", "agentPromptAppend"]) {
+          assert.deepEqual(
+            omo?.[key],
+            {},
+            `boot omo.${key} must read an empty map — agents exists but no agent sets the leaf`,
+          );
+        }
       },
     },
     {
@@ -1482,17 +1506,13 @@ function tests(): TestCase[] {
         const boot = opencodeInits(bridge)[0];
         // Fresh sandbox: the seeded fixture opencode.json sets none of the descriptors.
         // Product rule (core readOpencodeSettingValues): file-targeted descriptors
-        // (tui.json) and the mcpServers/recordEditor/recordMaster kinds are EXCLUDED
-        // from the scalar values map — their data rides the payload's dedicated
-        // tui/mcp/records fields (next test + the batch-4 section at the chain end).
+        // (tui.json) and the recordEditor/recordMaster kinds (incl. the batch-5
+        // mcpEntries migration of the old mcpServers kind) are EXCLUDED from the
+        // scalar values map — their data rides the payload's dedicated
+        // tui/records fields (next test + the batch-4 section at the chain end).
         const expected: Record<string, null> = {};
         for (const setting of OPENCODE_SETTINGS) {
-          if (
-            setting.file !== undefined ||
-            setting.kind === "mcpServers" ||
-            setting.kind === "recordEditor" ||
-            setting.kind === "recordMaster"
-          ) {
+          if (setting.file !== undefined || setting.kind === "recordEditor" || setting.kind === "recordMaster") {
             continue;
           }
           expected[setting.key] = null;
@@ -1526,22 +1546,41 @@ function tests(): TestCase[] {
       },
     },
     {
-      name: "OpenCode tab: boot opencodeInit 携带权限聚合、MCP 清单与 tui.json 路径（批量二载荷）",
+      name: "OpenCode tab: boot opencodeInit 携带权限聚合、records.mcp 聚合与 tui.json 路径（批量五迁移）",
       fn: async () => {
         assert.ok(managerBridge, "manager panel must still be open from the previous step");
         const boot = opencodeInits(managerBridge)[0];
         assert.ok(boot, "the boot opencodeInit must still be captured");
-        // The fixture seeds no `permission` key → all-empty aggregate; its single
-        // declared mcp server (openmemory, enabled:true) reads as NOT disabled.
+        // The fixture seeds no `permission` key → all-empty aggregate.
         assert.deepEqual(
           boot.permission,
           { shorthand: null, tools: {}, advancedTools: [] },
           "boot permission aggregate must be empty on a permission-less fixture",
         );
+        // Batch-5 migration: the batch-2 mcpServers toggle list is GONE — the mcp face
+        // now rides the payload's records.mcp aggregate (mode/entries from the fixture
+        // seed). The read surfaces only the descriptor fields (type/url/command/enabled):
+        // the fixture's advanced `headers` object stays disk-only (write-side
+        // preservation pinned by the mcpEntries write-through test below).
         assert.deepEqual(
-          boot.mcp,
-          [{ name: "openmemory", disabled: false }],
-          "boot mcp list must mirror the fixture's declared server as enabled",
+          boot.records?.mcp,
+          {
+            mode: "entries",
+            booleanValue: null,
+            entries: {
+              openmemory: {
+                type: "remote",
+                url: "https://mcp.example.internal:8787/mcp",
+                enabled: true,
+              },
+            },
+          },
+          "boot records.mcp must mirror the fixture's openmemory entry with descriptor fields only",
+        );
+        assert.equal(
+          "mcp" in boot,
+          false,
+          "the legacy payload-level mcp list slot must be gone (batch-5 records.mcp migration)",
         );
         assert.deepEqual(
           boot.tui,
@@ -1663,113 +1702,215 @@ function tests(): TestCase[] {
       },
     },
     {
-      name: "opencodeSetSetting mcpServers 开关翻转：禁用写 enabled:false、启用移除 enabled、其余字段保留",
+      name: "opencodeSetSetting mcpEntries 写入：remote/local 条目落盘、缺 url 拒绝、null 标记改名/删除、openmemory 兄弟字节级保留",
       fn: async () => {
         assert.ok(managerBridge, "manager panel must still be open from the previous step");
         const bridge = managerBridge;
         const opencodeJson = path.join(configDir, "opencode.json");
-        const url = (server: string): string => `https://${server}.mcp.example.internal/mcp`;
-        // Seed two extra declared servers next to the fixture's openmemory entry:
-        // context7 starts ENABLED (no enabled key), websearch starts DISABLED.
-        fs.writeFileSync(
-          opencodeJson,
-          setValues(fs.readFileSync(opencodeJson, "utf8"), [
-            { path: ["mcp", "context7"], value: { type: "remote", url: url("context7") } },
-            { path: ["mcp", "websearch"], value: { type: "remote", url: url("websearch"), enabled: false } },
-          ]),
-        );
-        // Observe the seeded pre-state through the panel's own re-read: a permissionTools
-        // write with an EMPTY map produces zero edits (file stays byte-identical) but still
-        // gets its ok reply + fresh opencodeInit re-push. The watcher echo is deliberately
-        // NOT relied upon — in the e2e host the extension's fs.watch re-push is not
-        // dependable (existing tests treat it as "may add one more").
-        const bytesBeforeTrigger = fs.readFileSync(opencodeJson);
-        const repliesBeforeTrigger = settingSavedReplies(bridge, "opencodeSettingSaved").length;
+        // The fixture's openmemory entry carries an advanced `headers` object — a key
+        // outside the descriptor fields. Every write below only touches names present
+        // in the posted value, so the whole openmemory block (headers included) must
+        // survive byte-identically (same protection contract as the lsp priority leaf).
+        const snippetOf = (text: string): string => /"x-api-key"\s*:\s*"REDACTED-LOCAL-DEV"/.exec(text)?.[0] ?? "";
+        const snippetBefore = snippetOf(fs.readFileSync(opencodeJson, "utf8"));
+        assert.ok(snippetBefore.length > 0, "the fixture's openmemory headers leaf must be present before the writes");
+
+        // Add a remote entry — the pruned entry (type+url only) lands on disk.
+        const repliesBefore = settingSavedReplies(bridge, "opencodeSettingSaved").length;
         const initsBefore = opencodeInits(bridge).length;
-        bridge.deliver({ type: "opencodeSetSetting", payload: { key: "permissionTools", value: {} } });
+        const context7Url = "https://mcp.context7.com/mcp";
+        bridge.deliver({
+          type: "opencodeSetSetting",
+          payload: { key: "mcpEntries", value: { context7: { type: "remote", url: context7Url } } },
+        });
+        await pollUntil(
+          () =>
+            settingSavedReplies(bridge, "opencodeSettingSaved")
+              .slice(repliesBefore)
+              .some((reply) => reply.ok && reply.key === "mcpEntries"),
+          10_000,
+          "opencodeSetSetting(mcpEntries context7) must produce an opencodeSettingSaved(ok:true) reply",
+        );
         await pollUntil(
           () =>
             opencodeInits(bridge)
               .slice(initsBefore)
               .some(
                 (init) =>
-                  Array.isArray(init.mcp) &&
-                  init.mcp.some((server) => server.name === "context7" && server.disabled === false) &&
-                  init.mcp.some((server) => server.name === "websearch" && server.disabled === true),
+                  init.records?.mcp?.mode === "entries" &&
+                  JSON.stringify(recordEntriesOf(init, "mcp")["context7"]) ===
+                    JSON.stringify({ type: "remote", url: context7Url }),
               ),
           10_000,
-          "the no-op write's re-push must carry the seeded mcp list (context7 enabled, websearch disabled)",
-        );
-        await pollUntil(
-          () =>
-            settingSavedReplies(bridge, "opencodeSettingSaved")
-              .slice(repliesBeforeTrigger)
-              .some((reply) => reply.ok && reply.key === "permissionTools"),
-          10_000,
-          "the no-op permissionTools write must produce an opencodeSettingSaved(ok:true) reply",
-        );
-        assert.ok(
-          fs.readFileSync(opencodeJson).equals(bytesBeforeTrigger),
-          "the empty permissionTools trigger write must leave opencode.json byte-identical",
-        );
-
-        const repliesBefore = settingSavedReplies(bridge, "opencodeSettingSaved").length;
-        bridge.deliver({ type: "opencodeSetSetting", payload: { key: "mcpServers", value: { context7: true } } });
-        await pollUntil(
-          () =>
-            settingSavedReplies(bridge, "opencodeSettingSaved")
-              .slice(repliesBefore)
-              .some((reply) => reply.ok && reply.key === "mcpServers"),
-          10_000,
-          "the context7 disable write must produce an opencodeSettingSaved(ok:true) reply",
+          "a refreshed opencodeInit carrying records.mcp.entries[context7] must follow the write",
         );
         assertNoJsoncErrors(opencodeJson);
         let parsed = parseSafe<{ mcp?: Record<string, Record<string, unknown>> }>(
           fs.readFileSync(opencodeJson, "utf8"),
         ).value;
         assert.ok(parsed !== null, "opencode.json must parse to an object");
-        assert.equal(parsed.mcp?.context7?.enabled, false, "disabling context7 must set mcp.context7.enabled=false");
-        assert.equal(parsed.mcp?.context7?.url, url("context7"), "the disable write must preserve context7's url");
-        assert.equal(parsed.mcp?.context7?.type, "remote", "the disable write must preserve context7's type");
-        assert.equal(parsed.mcp?.openmemory?.enabled, true, "unrelated entries must stay untouched");
+        assert.deepEqual(
+          parsed.mcp?.context7,
+          { type: "remote", url: context7Url },
+          "on-disk mcp.context7 must carry exactly type+url",
+        );
+        assert.ok(parsed.mcp?.openmemory, "the fixture's openmemory entry must survive the sibling write");
 
-        const repliesBeforeSecond = settingSavedReplies(bridge, "opencodeSettingSaved").length;
-        const initsBeforeSecond = opencodeInits(bridge).length;
-        bridge.deliver({ type: "opencodeSetSetting", payload: { key: "mcpServers", value: { websearch: false } } });
+        // Cross-field rule (remote ⇒ url required): the entry fails the kind validator,
+        // so the write lands on the generic malformed-message backstop — !ok key echo,
+        // no file write.
+        const bytesBefore = fs.readFileSync(opencodeJson);
+        const repliesBeforeReject = settingSavedReplies(bridge, "opencodeSettingSaved").length;
+        bridge.deliver({
+          type: "opencodeSetSetting",
+          payload: { key: "mcpEntries", value: { broke: { type: "remote" } } },
+        });
         await pollUntil(
           () =>
             settingSavedReplies(bridge, "opencodeSettingSaved")
-              .slice(repliesBeforeSecond)
-              .some((reply) => reply.ok && reply.key === "mcpServers"),
+              .slice(repliesBeforeReject)
+              .some(
+                (reply) =>
+                  reply.ok === false && reply.key === "mcpEntries" && (reply.error ?? "").includes("格式无法识别"),
+              ),
           10_000,
-          "the websearch enable write must produce an opencodeSettingSaved(ok:true) reply",
+          "the remote-without-url entry must produce a !ok reply echoing the key",
+        );
+        assert.ok(
+          fs.readFileSync(opencodeJson).equals(bytesBefore),
+          "the rejected remote-without-url write must leave opencode.json byte-identical",
+        );
+
+        // Add a local entry with an explicit enabled:true leaf — boolean true is
+        // non-null, so the prune keeps it and disk carries the full triple.
+        const docsEntry = { type: "local", command: ["npx", "docs-server"], enabled: true };
+        const repliesBeforeDocs = settingSavedReplies(bridge, "opencodeSettingSaved").length;
+        const initsBeforeDocs = opencodeInits(bridge).length;
+        bridge.deliver({ type: "opencodeSetSetting", payload: { key: "mcpEntries", value: { docs: docsEntry } } });
+        await pollUntil(
+          () =>
+            settingSavedReplies(bridge, "opencodeSettingSaved")
+              .slice(repliesBeforeDocs)
+              .some((reply) => reply.ok && reply.key === "mcpEntries"),
+          10_000,
+          "the docs entry write must produce its own opencodeSettingSaved(ok:true) reply",
         );
         await pollUntil(
           () =>
             opencodeInits(bridge)
-              .slice(initsBeforeSecond)
-              .some(
-                (init) =>
-                  Array.isArray(init.mcp) &&
-                  init.mcp.some((server) => server.name === "context7" && server.disabled === true) &&
-                  init.mcp.some((server) => server.name === "websearch" && server.disabled === false),
-              ),
+              .slice(initsBeforeDocs)
+              .some((init) => JSON.stringify(recordEntriesOf(init, "mcp")["docs"]) === JSON.stringify(docsEntry)),
           10_000,
-          "a refreshed opencodeInit must reflect both toggles (context7 disabled, websearch enabled)",
+          "a refreshed opencodeInit carrying records.mcp.entries[docs] (enabled:true included) must follow the write",
         );
-
         assertNoJsoncErrors(opencodeJson);
         parsed = parseSafe<{ mcp?: Record<string, Record<string, unknown>> }>(
           fs.readFileSync(opencodeJson, "utf8"),
         ).value;
         assert.ok(parsed !== null, "opencode.json must parse to an object");
-        assert.equal(
-          "enabled" in (parsed.mcp?.websearch ?? {}),
-          false,
-          "enabling websearch must REMOVE its enabled override key",
+        assert.deepEqual(
+          parsed.mcp?.docs,
+          docsEntry,
+          "on-disk mcp.docs must carry type+command+enabled (the boolean true leaf is kept)",
         );
-        assert.equal(parsed.mcp?.websearch?.url, url("websearch"), "the enable write must preserve websearch's url");
-        assert.equal(parsed.mcp?.context7?.enabled, false, "context7 must stay disabled after the second write");
+
+        // Rename = old name null + new name set in ONE value (per-name diff semantics).
+        const repliesBeforeRename = settingSavedReplies(bridge, "opencodeSettingSaved").length;
+        bridge.deliver({
+          type: "opencodeSetSetting",
+          payload: {
+            key: "mcpEntries",
+            value: { context7: null, context8: { type: "remote", url: context7Url } },
+          },
+        });
+        await pollUntil(
+          () =>
+            settingSavedReplies(bridge, "opencodeSettingSaved")
+              .slice(repliesBeforeRename)
+              .some((reply) => reply.ok && reply.key === "mcpEntries"),
+          10_000,
+          "the rename write must produce its own opencodeSettingSaved(ok:true) reply",
+        );
+        assertNoJsoncErrors(opencodeJson);
+        parsed = parseSafe<{ mcp?: Record<string, Record<string, unknown>> }>(
+          fs.readFileSync(opencodeJson, "utf8"),
+        ).value;
+        assert.ok(parsed !== null, "opencode.json must parse to an object");
+        assert.equal("context7" in (parsed.mcp ?? {}), false, "the old name must be gone after the rename");
+        assert.deepEqual(
+          parsed.mcp?.context8,
+          { type: "remote", url: context7Url },
+          "the new name must carry the remote entry",
+        );
+
+        // Delete the extra names; only the fixture's openmemory remains, its advanced
+        // headers leaf byte-identical throughout.
+        const repliesBeforeDelete = settingSavedReplies(bridge, "opencodeSettingSaved").length;
+        const initsBeforeDelete = opencodeInits(bridge).length;
+        bridge.deliver({
+          type: "opencodeSetSetting",
+          payload: { key: "mcpEntries", value: { context8: null, docs: null } },
+        });
+        await pollUntil(
+          () =>
+            settingSavedReplies(bridge, "opencodeSettingSaved")
+              .slice(repliesBeforeDelete)
+              .some((reply) => reply.ok && reply.key === "mcpEntries"),
+          10_000,
+          "the delete write must produce its own opencodeSettingSaved(ok:true) reply",
+        );
+        await pollUntil(
+          () =>
+            opencodeInits(bridge)
+              .slice(initsBeforeDelete)
+              .some(
+                (init) =>
+                  recordEntriesOf(init, "mcp")["context8"] === undefined &&
+                  recordEntriesOf(init, "mcp")["docs"] === undefined,
+              ),
+          10_000,
+          "a refreshed opencodeInit without the deleted mcp names must follow the delete",
+        );
+        assertNoJsoncErrors(opencodeJson);
+        const after = fs.readFileSync(opencodeJson, "utf8");
+        parsed = parseSafe<{ mcp?: Record<string, Record<string, unknown>> }>(after).value;
+        assert.ok(parsed !== null, "opencode.json must parse to an object");
+        assert.deepEqual(
+          Object.keys(parsed.mcp ?? {}),
+          ["openmemory"],
+          "only the fixture's openmemory entry may remain after the deletes",
+        );
+        assert.equal(snippetOf(after), snippetBefore, "the openmemory headers leaf must survive byte-identically");
+      },
+    },
+    {
+      name: "废弃 mcpServers 消息：通用 !ok 兜底回执且不写盘（批量五迁移守卫）",
+      fn: async () => {
+        assert.ok(managerBridge, "manager panel must still be open from the previous step");
+        const bridge = managerBridge;
+        const opencodeJson = path.join(configDir, "opencode.json");
+        const bytesBefore = fs.readFileSync(opencodeJson);
+        const repliesBefore = settingSavedReplies(bridge, "opencodeSettingSaved").length;
+
+        // mcpServers was REMOVED in batch 5 (replaced by mcpEntries): the key no longer
+        // resolves to a descriptor, so the write lands on the generic malformed-message
+        // backstop — a !ok key echo, never a file write.
+        bridge.deliver({ type: "opencodeSetSetting", payload: { key: "mcpServers", value: { x: true } } });
+        await pollUntil(
+          () =>
+            settingSavedReplies(bridge, "opencodeSettingSaved")
+              .slice(repliesBefore)
+              .some(
+                (reply) =>
+                  reply.ok === false && reply.key === "mcpServers" && (reply.error ?? "").includes("格式无法识别"),
+              ),
+          10_000,
+          "the stale mcpServers write must produce a !ok reply echoing the key",
+        );
+        assert.ok(
+          fs.readFileSync(opencodeJson).equals(bytesBefore),
+          "the stale mcpServers write must leave opencode.json byte-identical",
+        );
       },
     },
     {
@@ -2418,6 +2559,240 @@ function tests(): TestCase[] {
         const parsed = parseSafe<Record<string, unknown>>(fs.readFileSync(opencodeJson, "utf8")).value;
         assert.ok(parsed !== null && !Array.isArray(parsed), "opencode.json must parse to an object");
         assert.equal(parsed.subagent_depth, 3, "on-disk opencode.json must contain subagent_depth: 3");
+      },
+    },
+
+    // ---- Section 4f: batch-5 OMO descriptors (same manager panel bridge) --------
+    // Same placement contract as Section 4d: BEFORE the Section-5 step that seeds
+    // ~/.omo/omo.jsonc, the writes here land in the LEGACY target's top-level keys.
+    {
+      name: "omoSetSetting agentUltrawork 写 oracle 覆写：兄弟 model 字节级保留；null 条目删叶子不删智能体",
+      fn: async () => {
+        assert.ok(managerBridge, "manager panel must still be open from the previous step");
+        const bridge = managerBridge;
+        const agentConfig = path.join(configDir, "oh-my-opencode.json");
+        // The fixture pre-seeds agents.oracle = {model, variant} — the sibling this
+        // test must NOT disturb. The prefix regex matches the entry opening through
+        // model+variant WITHOUT a closing brace, so the same snippet stays matchable
+        // after the nested ultrawork object is appended inside the oracle entry.
+        const oraclePrefixOf = (text: string): string =>
+          /"oracle"\s*:\s*\{\s*"model"\s*:\s*"zhipuai-coding-plan\/glm-5\.2"\s*,\s*"variant"\s*:\s*"high"/.exec(
+            text,
+          )?.[0] ?? "";
+        const prefixBefore = oraclePrefixOf(fs.readFileSync(agentConfig, "utf8"));
+        assert.ok(
+          prefixBefore.length > 0,
+          "the fixture's oracle model/variant sibling must be present before the write",
+        );
+
+        const repliesBefore = settingSavedReplies(bridge, "omoSettingSaved").length;
+        const configInitsBefore = bridge.outbound.filter((message) => message.type === "configInit").length;
+        bridge.deliver({
+          type: "omoSetSetting",
+          payload: {
+            key: "agentUltrawork",
+            value: { oracle: { model: "openai/gpt-5.6-sol", reasoning: "high" } },
+          },
+        });
+        await pollUntil(
+          () =>
+            settingSavedReplies(bridge, "omoSettingSaved")
+              .slice(repliesBefore)
+              .some((reply) => reply.ok && reply.key === "agentUltrawork"),
+          10_000,
+          "omoSetSetting(agentUltrawork) must produce an omoSettingSaved(ok:true) reply",
+        );
+        await pollUntil(
+          () =>
+            bridge.outbound.slice(configInitsBefore).some((message) => {
+              if (message.type !== "configInit") {
+                return false;
+              }
+              const entry = (
+                message.payload as { omo?: { agentUltrawork?: { oracle?: { model?: unknown; reasoning?: unknown } } } }
+              )?.omo?.agentUltrawork?.oracle;
+              return entry?.model === "openai/gpt-5.6-sol" && entry?.reasoning === "high";
+            }),
+          10_000,
+          "a refreshed configInit carrying omo.agentUltrawork.oracle must follow the write",
+        );
+
+        assertNoJsoncErrors(agentConfig);
+        const after = fs.readFileSync(agentConfig, "utf8");
+        const agent = parseSafe<{ agents?: { oracle?: Record<string, unknown> } }>(after).value;
+        assert.ok(agent !== null, "agent config must parse to an object");
+        assert.deepEqual(
+          agent.agents?.oracle?.ultrawork,
+          { model: "openai/gpt-5.6-sol", reasoning: "high" },
+          "legacy target must carry top-level agents.oracle.ultrawork with model+reasoning",
+        );
+        assert.equal(
+          agent.agents?.oracle?.model,
+          "zhipuai-coding-plan/glm-5.2",
+          "the oracle model sibling must survive",
+        );
+        assert.equal(agent.agents?.oracle?.variant, "high", "the oracle variant sibling must survive");
+        assert.equal(
+          oraclePrefixOf(after),
+          prefixBefore,
+          "the oracle model/variant sibling must survive the per-leaf write byte-identically",
+        );
+
+        // Per-agent removal: the null entry deletes ONLY the ultrawork leaf — the
+        // agents.oracle entry itself (model+variant) must stay intact.
+        const repliesBeforeRemoval = settingSavedReplies(bridge, "omoSettingSaved").length;
+        bridge.deliver({ type: "omoSetSetting", payload: { key: "agentUltrawork", value: { oracle: null } } });
+        await pollUntil(
+          () =>
+            settingSavedReplies(bridge, "omoSettingSaved")
+              .slice(repliesBeforeRemoval)
+              .some((reply) => reply.ok && reply.key === "agentUltrawork"),
+          10_000,
+          "the null-entry write must produce its own omoSettingSaved(ok:true) reply",
+        );
+        assertNoJsoncErrors(agentConfig);
+        const afterRemoval = parseSafe<{ agents?: { oracle?: Record<string, unknown> } }>(
+          fs.readFileSync(agentConfig, "utf8"),
+        ).value;
+        assert.ok(afterRemoval !== null, "agent config must parse to an object");
+        assert.equal("ultrawork" in (afterRemoval.agents?.oracle ?? {}), false, "the ultrawork leaf must be gone");
+        assert.equal(
+          afterRemoval.agents?.oracle?.model,
+          "zhipuai-coding-plan/glm-5.2",
+          "agents.oracle must stay intact after the removal (model)",
+        );
+        assert.equal(
+          afterRemoval.agents?.oracle?.variant,
+          "high",
+          "agents.oracle must stay intact after the removal (variant)",
+        );
+      },
+    },
+    {
+      name: "omoSetSetting agentPromptAppend 写 metis 追加文本；null 删除叶子",
+      fn: async () => {
+        assert.ok(managerBridge, "manager panel must still be open from the previous step");
+        const bridge = managerBridge;
+        const agentConfig = path.join(configDir, "oh-my-opencode.json");
+        const repliesBefore = settingSavedReplies(bridge, "omoSettingSaved").length;
+        const configInitsBefore = bridge.outbound.filter((message) => message.type === "configInit").length;
+
+        bridge.deliver({
+          type: "omoSetSetting",
+          payload: { key: "agentPromptAppend", value: { metis: "追加提示词内容" } },
+        });
+        await pollUntil(
+          () =>
+            settingSavedReplies(bridge, "omoSettingSaved")
+              .slice(repliesBefore)
+              .some((reply) => reply.ok && reply.key === "agentPromptAppend"),
+          10_000,
+          "omoSetSetting(agentPromptAppend) must produce an omoSettingSaved(ok:true) reply",
+        );
+        await pollUntil(
+          () =>
+            bridge.outbound
+              .slice(configInitsBefore)
+              .some(
+                (message) =>
+                  message.type === "configInit" &&
+                  (message.payload as { omo?: { agentPromptAppend?: { metis?: unknown } } })?.omo?.agentPromptAppend
+                    ?.metis === "追加提示词内容",
+              ),
+          10_000,
+          "a refreshed configInit carrying omo.agentPromptAppend.metis must follow the write",
+        );
+
+        assertNoJsoncErrors(agentConfig);
+        let agent = parseSafe<{ agents?: { metis?: Record<string, unknown> } }>(
+          fs.readFileSync(agentConfig, "utf8"),
+        ).value;
+        assert.ok(agent !== null, "agent config must parse to an object");
+        assert.equal(
+          agent.agents?.metis?.prompt_append,
+          "追加提示词内容",
+          "disk agents.metis.prompt_append must carry the written text",
+        );
+        assert.equal(agent.agents?.metis?.model, "zhipuai-coding-plan/glm-5.2", "the metis model sibling must survive");
+
+        const repliesBeforeRemoval = settingSavedReplies(bridge, "omoSettingSaved").length;
+        bridge.deliver({ type: "omoSetSetting", payload: { key: "agentPromptAppend", value: { metis: null } } });
+        await pollUntil(
+          () =>
+            settingSavedReplies(bridge, "omoSettingSaved")
+              .slice(repliesBeforeRemoval)
+              .some((reply) => reply.ok && reply.key === "agentPromptAppend"),
+          10_000,
+          "the null write must produce its own omoSettingSaved(ok:true) reply",
+        );
+        assertNoJsoncErrors(agentConfig);
+        agent = parseSafe<{ agents?: { metis?: Record<string, unknown> } }>(fs.readFileSync(agentConfig, "utf8")).value;
+        assert.ok(agent !== null, "agent config must parse to an object");
+        assert.equal(
+          "prompt_append" in (agent.agents?.metis ?? {}),
+          false,
+          "the null write must remove the prompt_append leaf from disk",
+        );
+        assert.ok(agent.agents?.metis?.model, "agents.metis must stay intact after the removal");
+      },
+    },
+    {
+      name: "omoSetSetting claudeCode 部分写入：null 叶子不落盘，自定义兄弟键字节级保留",
+      fn: async () => {
+        assert.ok(managerBridge, "manager panel must still be open from the previous step");
+        const bridge = managerBridge;
+        const agentConfig = path.join(configDir, "oh-my-opencode.json");
+        // Seed a hand-written sibling under claude_code through the product's own JSONC
+        // editor — the per-leaf write below must never touch it (same contract as the
+        // permissionTools pattern sibling / lsp priority leaf).
+        const seeded = setValues(fs.readFileSync(agentConfig, "utf8"), [
+          { path: ["claude_code"], value: { custom_layer: "keep" } },
+        ]);
+        fs.writeFileSync(agentConfig, seeded);
+        const snippetOf = (text: string): string => /"custom_layer"\s*:\s*"keep"/.exec(text)?.[0] ?? "";
+        const snippetBefore = snippetOf(seeded);
+        assert.ok(snippetBefore.length > 0, "the seeded claude_code sibling must be present before the write");
+
+        const repliesBefore = settingSavedReplies(bridge, "omoSettingSaved").length;
+        const configInitsBefore = bridge.outbound.filter((message) => message.type === "configInit").length;
+        bridge.deliver({
+          type: "omoSetSetting",
+          payload: {
+            key: "claudeCode",
+            value: { mcp: false, commands: null, skills: null, agents: null, hooks: null, plugins: null },
+          },
+        });
+        await pollUntil(
+          () =>
+            settingSavedReplies(bridge, "omoSettingSaved")
+              .slice(repliesBefore)
+              .some((reply) => reply.ok && reply.key === "claudeCode"),
+          10_000,
+          "omoSetSetting(claudeCode) must produce an omoSettingSaved(ok:true) reply",
+        );
+        await pollUntil(
+          () =>
+            bridge.outbound
+              .slice(configInitsBefore)
+              .some(
+                (message) =>
+                  message.type === "configInit" &&
+                  (message.payload as { omo?: { claudeCode?: { mcp?: unknown } } })?.omo?.claudeCode?.mcp === false,
+              ),
+          10_000,
+          "a refreshed configInit carrying omo.claudeCode.mcp:false must follow the write",
+        );
+
+        assertNoJsoncErrors(agentConfig);
+        const after = fs.readFileSync(agentConfig, "utf8");
+        const agent = parseSafe<{ claude_code?: Record<string, unknown> }>(after).value;
+        assert.ok(agent !== null, "agent config must parse to an object");
+        assert.deepEqual(
+          agent.claude_code,
+          { mcp: false, custom_layer: "keep" },
+          "disk claude_code must carry ONLY the non-null descriptor leaf plus the custom sibling — no literal null leaves",
+        );
+        assert.equal(snippetOf(after), snippetBefore, "the custom sibling must survive the write byte-identically");
       },
     },
 
