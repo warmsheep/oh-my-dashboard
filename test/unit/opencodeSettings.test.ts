@@ -9,9 +9,13 @@ import {
   readMcpServers,
   readOpencodeSettingValues,
   readPermissionState,
+  readRecordState,
+  readRecordStates,
+  recordEditorEdits,
+  recordMasterEdits,
 } from "../../src/core/opencodeSettings";
 import { OPENCODE_PERMISSION_TOOLS, OPENCODE_SETTINGS } from "../../src/shared/protocol";
-import type { OpencodeSetting, OpencodeSettingField } from "../../src/shared/protocol";
+import type { OpencodeSetting, OpencodeSettingField, RecordFieldDef } from "../../src/shared/protocol";
 
 /** Descriptor lookup by key; throws on typos so a bad test key fails loudly. */
 function setting(key: string): OpencodeSetting {
@@ -23,7 +27,15 @@ function setting(key: string): OpencodeSetting {
 }
 
 /** Descriptor keys whose data rides dedicated payload fields, not the scalar values map. */
-const NON_SCALAR_KEYS = ["mcpServers", "tuiTheme"];
+const NON_SCALAR_KEYS = [
+  "mcpServers",
+  "tuiTheme",
+  "command",
+  "formatterMaster",
+  "formatterEntries",
+  "lspMaster",
+  "lspEntries",
+];
 
 describe("readOpencodeSettingValues", () => {
   it("reads present values of every kind, including nested agent paths", () => {
@@ -698,5 +710,343 @@ describe("orderedList kind", () => {
       { path: ["instructions"], value: ["a", "b"], op: "set" },
     ]);
     expect(opencodeSettingEdits(ordered, null)).toEqual([{ path: ["instructions"], value: undefined, op: "remove" }]);
+  });
+});
+
+describe("batch-4 record kinds (readRecordState / readRecordStates)", () => {
+  const commandFields: readonly RecordFieldDef[] = setting("command").record?.fields ?? [];
+  const formatterFields: readonly RecordFieldDef[] = setting("formatterEntries").record?.fields ?? [];
+
+  it("absent and wrong-shaped values read as unset", () => {
+    const unset = { mode: "unset", booleanValue: null, entries: {} };
+    expect(readRecordState("{}", ["command"], commandFields)).toEqual(unset);
+    expect(readRecordState(JSON.stringify({ command: 42 }), ["command"], commandFields)).toEqual(unset);
+    expect(readRecordState(JSON.stringify({ command: "yes" }), ["command"], commandFields)).toEqual(unset);
+  });
+
+  it("boolean value reads as the master boolean form", () => {
+    expect(readRecordState(JSON.stringify({ formatter: false }), ["formatter"], formatterFields)).toEqual({
+      mode: "boolean",
+      booleanValue: false,
+      entries: {},
+    });
+    expect(readRecordState(JSON.stringify({ formatter: true }), ["formatter"], formatterFields).booleanValue).toBe(
+      true,
+    );
+  });
+
+  it("object form reads entries, skipping non-object entries entirely", () => {
+    const state = readRecordState(
+      JSON.stringify({
+        command: {
+          fix: {
+            template: "run fix $ARGUMENTS",
+            agent: "build",
+            model: "zhipuai/glm-5",
+            subtask: true,
+            description: "修复",
+          },
+          broken: "not an object",
+          also_broken: 42,
+        },
+      }),
+      ["command"],
+      commandFields,
+    );
+    expect(state).toEqual({
+      mode: "entries",
+      booleanValue: null,
+      entries: {
+        fix: {
+          template: "run fix $ARGUMENTS",
+          agent: "build",
+          model: "zhipuai/glm-5",
+          subtask: true,
+          description: "修复",
+        },
+      },
+    });
+  });
+
+  it("wrong-typed leaves are omitted per field; a missing-template entry survives for repair", () => {
+    const state = readRecordState(
+      JSON.stringify({
+        command: { repair: { description: "no template yet", agent: 42, subtask: "yes", model: "no-slash" } },
+      }),
+      ["command"],
+      commandFields,
+    );
+    expect(state.entries.repair).toEqual({ description: "no template yet" });
+  });
+
+  it("enum leaf outside the options and wrong-shaped stringList leaves are omitted on read", () => {
+    const state = readRecordState(
+      JSON.stringify({ command: { x: { template: "t", agent: "bogus" } } }),
+      ["command"],
+      commandFields,
+    );
+    expect(state.entries.x).toEqual({ template: "t" });
+
+    const formatter = readRecordState(
+      JSON.stringify({ formatter: { prettier: { command: ["npx", "prettier"], extensions: "ts", disabled: 1 } } }),
+      ["formatter"],
+      formatterFields,
+    );
+    expect(formatter.entries.prettier).toEqual({ command: ["npx", "prettier"] });
+  });
+
+  it("validator-incompatible leaves are omitted on read: empty/whitespace and over-maxLen text", () => {
+    const state = readRecordState(
+      JSON.stringify({
+        command: {
+          x: { template: "t", description: " ", subtask: true },
+          y: { template: "t", description: "x".repeat(257) },
+        },
+      }),
+      ["command"],
+      commandFields,
+    );
+    expect(state.entries.x).toEqual({ template: "t", subtask: true });
+    expect(state.entries.y).toEqual({ template: "t" });
+  });
+
+  it("stringList reads filter to unique entries within maxEntries (0 → omit)", () => {
+    const nine = Array.from({ length: 9 }, (_, i) => `e${i}`);
+    const state = readRecordState(
+      JSON.stringify({
+        lsp: {
+          dup: { extensions: ["ts", "ts", " ts "] },
+          empty: { extensions: [] },
+          capped: { extensions: nine },
+        },
+      }),
+      ["lsp"],
+      setting("lspEntries").record?.fields ?? [],
+    );
+    expect(state.entries.dup).toEqual({ extensions: ["ts"] });
+    expect(state.entries.empty).toEqual({});
+    expect(state.entries.capped).toEqual({ extensions: nine.slice(0, 8) });
+  });
+
+  it("readRecordStates materializes the three payload slots from the recordEditor descriptors", () => {
+    const states = readRecordStates(
+      JSON.stringify({ command: { fix: { template: "t" } }, formatter: false, lsp: { broken: "skip me" } }),
+    );
+    expect(states.command).toEqual({ mode: "entries", booleanValue: null, entries: { fix: { template: "t" } } });
+    expect(states.formatter).toEqual({ mode: "boolean", booleanValue: false, entries: {} });
+    expect(states.lsp).toEqual({ mode: "entries", booleanValue: null, entries: {} });
+    expect(readRecordStates("{}")).toEqual({
+      command: { mode: "unset", booleanValue: null, entries: {} },
+      formatter: { mode: "unset", booleanValue: null, entries: {} },
+      lsp: { mode: "unset", booleanValue: null, entries: {} },
+    });
+  });
+});
+
+describe("recordEditorEdits / recordMasterEdits", () => {
+  it("emits one set/remove per name; object entries set with null leaves pruned", () => {
+    expect(recordEditorEdits(["command"], { fix: { template: "t", description: null }, old: null })).toEqual([
+      { path: ["command", "fix"], value: { template: "t" }, op: "set" },
+      { path: ["command", "old"], value: undefined, op: "remove" },
+    ]);
+  });
+
+  it("a pruned-empty entry removes the name instead of writing {}", () => {
+    expect(recordEditorEdits(["command"], { fix: { template: null, description: null } })).toEqual([
+      { path: ["command", "fix"], value: undefined, op: "remove" },
+    ]);
+    expect(
+      applyEdits('{"command":{"fix":{"template":"t"}}}', recordEditorEdits(["command"], { fix: {} })),
+    ).not.toContain('"fix"');
+  });
+
+  it("names absent from the map stay untouched (broken + intact siblings survive a write)", () => {
+    const seeded = '{\n  "command": {\n    "broken": "not an object",\n    "keep": { "template": "k" },\n  },\n}\n';
+    const next = applyEdits(seeded, recordEditorEdits(["command"], { fresh: { template: "n" } }));
+    expect(getValue(next, ["command", "broken"])).toBe("not an object");
+    expect(getValue(next, ["command", "keep"])).toEqual({ template: "k" });
+    expect(getValue(next, ["command", "fresh"])).toEqual({ template: "n" });
+  });
+
+  it("rename = old name null + new name set in one value", () => {
+    const next = applyEdits(
+      '{"command":{"old":{"template":"t"}}}',
+      recordEditorEdits(["command"], { old: null, new: { template: "t" } }),
+    );
+    expect(getValue(next, ["command"])).toEqual({ new: { template: "t" } });
+  });
+
+  it("sibling JSONC comments survive the per-name edits", () => {
+    const seeded = '// top\n{\n  "command": {\n    // user note\n    "a": { "template": "t", "custom": 1 },\n  },\n}\n';
+    const next = applyEdits(seeded, recordEditorEdits(["command"], { b: { template: "x" } }));
+    expect(next).toContain("// top");
+    expect(next).toContain("// user note");
+    expect(getValue(next, ["command", "a"])).toEqual({ template: "t", custom: 1 });
+  });
+
+  it("recordEditorEdits itself null-guards raw null / non-record input to no edits", () => {
+    expect(recordEditorEdits(["command"], null)).toEqual([]);
+    expect(recordEditorEdits(["command"], "nope")).toEqual([]);
+    expect(recordEditorEdits(["command"], {})).toEqual([]);
+  });
+
+  it("descriptor dispatch turns a null recordEditor value into a whole-key remove (empty → null 整键)", () => {
+    expect(opencodeSettingEdits(setting("command"), null)).toEqual([
+      { path: ["command"], value: undefined, op: "remove" },
+    ]);
+    expect(opencodeSettingEdits(setting("formatterEntries"), null)).toEqual([
+      { path: ["formatter"], value: undefined, op: "remove" },
+    ]);
+    // Deleting the LAST entry must leave no `command` key on disk (not a `{}` residue).
+    expect(
+      applyEdits('{"command":{"fix":{"template":"t"}}}', opencodeSettingEdits(setting("command"), null)),
+    ).not.toContain('"command"');
+  });
+
+  it("recordMasterEdits: true/false set the boolean, null removes the key", () => {
+    expect(recordMasterEdits(["formatter"], false)).toEqual([{ path: ["formatter"], value: false, op: "set" }]);
+    expect(recordMasterEdits(["formatter"], true)).toEqual([{ path: ["formatter"], value: true, op: "set" }]);
+    expect(recordMasterEdits(["formatter"], null)).toEqual([{ path: ["formatter"], value: undefined, op: "remove" }]);
+  });
+
+  it("opencodeSettingEdits dispatches the new kinds to the record builders", () => {
+    expect(opencodeSettingEdits(setting("formatterMaster"), false)).toEqual([
+      { path: ["formatter"], value: false, op: "set" },
+    ]);
+    expect(opencodeSettingEdits(setting("lspMaster"), null)).toEqual([
+      { path: ["lsp"], value: undefined, op: "remove" },
+    ]);
+    expect(opencodeSettingEdits(setting("lspEntries"), { rust: { command: ["rust-analyzer"] } })).toEqual([
+      { path: ["lsp", "rust"], value: { command: ["rust-analyzer"] }, op: "set" },
+    ]);
+  });
+});
+
+describe("recordEditor / recordMaster validation", () => {
+  const command = setting("command");
+  const lspEntries = setting("lspEntries");
+  const formatterMaster = setting("formatterMaster");
+
+  it("recordEditor: accepts well-formed entries, delete markers, empty maps and null", () => {
+    expect(
+      isValidOpencodeSettingValue(command, {
+        fix: { template: "run $ARGUMENTS", agent: "build", model: "zhipuai/glm-5", subtask: true, description: "x" },
+      }),
+    ).toBe(true);
+    expect(isValidOpencodeSettingValue(command, { fix: null })).toBe(true);
+    expect(isValidOpencodeSettingValue(command, {})).toBe(true);
+    expect(isValidOpencodeSettingValue(command, null)).toBe(true);
+  });
+
+  it("recordEditor: name charset, name length and the 32-entry cap", () => {
+    expect(isValidOpencodeSettingValue(command, { "bad name!": { template: "t" } })).toBe(false);
+    expect(isValidOpencodeSettingValue(command, { "with/slash": { template: "t" } })).toBe(false);
+    expect(isValidOpencodeSettingValue(command, { ["x".repeat(64)]: { template: "t" } })).toBe(true);
+    expect(isValidOpencodeSettingValue(command, { ["x".repeat(65)]: { template: "t" } })).toBe(false);
+    const entries = (count: number) =>
+      Object.fromEntries(Array.from({ length: count }, (_, i) => [`cmd-${i}`, { template: "t" }]));
+    expect(isValidOpencodeSettingValue(command, entries(32))).toBe(true);
+    expect(isValidOpencodeSettingValue(command, entries(33))).toBe(false);
+  });
+
+  it("recordEditor: required template must be present as a non-empty trimmed string", () => {
+    expect(isValidOpencodeSettingValue(command, { fix: {} })).toBe(false);
+    expect(isValidOpencodeSettingValue(command, { fix: { template: null } })).toBe(false);
+    expect(isValidOpencodeSettingValue(command, { fix: { template: "" } })).toBe(false);
+    expect(isValidOpencodeSettingValue(command, { fix: { template: "   " } })).toBe(false);
+    expect(isValidOpencodeSettingValue(command, { fix: { description: "no template" } })).toBe(false);
+  });
+
+  it("recordEditor: text ≤256 and multiline ≤8000 default bounds", () => {
+    expect(isValidOpencodeSettingValue(command, { fix: { template: "x".repeat(8000) } })).toBe(true);
+    expect(isValidOpencodeSettingValue(command, { fix: { template: "x".repeat(8001) } })).toBe(false);
+    expect(isValidOpencodeSettingValue(command, { fix: { template: "t", description: "x".repeat(256) } })).toBe(true);
+    expect(isValidOpencodeSettingValue(command, { fix: { template: "t", description: "x".repeat(257) } })).toBe(false);
+  });
+
+  it("recordEditor: enum ∈ options, model id shape, boolean leaves, unknown field keys rejected", () => {
+    expect(isValidOpencodeSettingValue(command, { fix: { template: "t", agent: "explore" } })).toBe(true);
+    expect(isValidOpencodeSettingValue(command, { fix: { template: "t", agent: "bogus" } })).toBe(false);
+    expect(isValidOpencodeSettingValue(command, { fix: { template: "t", model: "zhipuai/glm-5" } })).toBe(true);
+    expect(isValidOpencodeSettingValue(command, { fix: { template: "t", model: "bad" } })).toBe(false);
+    expect(isValidOpencodeSettingValue(command, { fix: { template: "t", subtask: false } })).toBe(true);
+    expect(isValidOpencodeSettingValue(command, { fix: { template: "t", subtask: "yes" } })).toBe(false);
+    expect(isValidOpencodeSettingValue(command, { fix: { template: "t", made_up: 1 } })).toBe(false);
+    expect(isValidOpencodeSettingValue(command, { fix: "not an object" })).toBe(false);
+    expect(isValidOpencodeSettingValue(command, "nope")).toBe(false);
+  });
+
+  it("recordEditor: stringList fields cap at 8 unique trimmed non-empty ≤256-char entries; null = unset", () => {
+    expect(
+      isValidOpencodeSettingValue(lspEntries, { typescript: { command: ["tsgo"], extensions: ["ts", "tsx"] } }),
+    ).toBe(true);
+    const exts = (count: number) => Array.from({ length: count }, (_, i) => `e${i}`);
+    expect(isValidOpencodeSettingValue(lspEntries, { l: { extensions: exts(8) } })).toBe(true);
+    expect(isValidOpencodeSettingValue(lspEntries, { l: { extensions: exts(9) } })).toBe(false);
+    expect(isValidOpencodeSettingValue(lspEntries, { l: { extensions: ["ts", "ts"] } })).toBe(false);
+    expect(isValidOpencodeSettingValue(lspEntries, { l: { extensions: [] } })).toBe(false);
+    expect(isValidOpencodeSettingValue(lspEntries, { l: { extensions: ["  "] } })).toBe(false);
+    expect(isValidOpencodeSettingValue(lspEntries, { l: { extensions: ["x".repeat(256)] } })).toBe(true);
+    expect(isValidOpencodeSettingValue(lspEntries, { l: { extensions: ["x".repeat(257)] } })).toBe(false);
+    expect(isValidOpencodeSettingValue(lspEntries, { l: { extensions: null, command: null, disabled: null } })).toBe(
+      true,
+    );
+  });
+
+  it("recordMaster: true/false/null only", () => {
+    expect(isValidOpencodeSettingValue(formatterMaster, true)).toBe(true);
+    expect(isValidOpencodeSettingValue(formatterMaster, false)).toBe(true);
+    expect(isValidOpencodeSettingValue(formatterMaster, null)).toBe(true);
+    expect(isValidOpencodeSettingValue(formatterMaster, "yes")).toBe(false);
+    expect(isValidOpencodeSettingValue(formatterMaster, { a: {} })).toBe(false);
+  });
+
+  it("recordEditor/recordMaster keys stay out of the scalar values map", () => {
+    const values = readOpencodeSettingValues(
+      JSON.stringify({ command: { fix: { template: "t" } }, formatter: false, lsp: true }),
+    );
+    for (const key of ["command", "formatterMaster", "formatterEntries", "lspMaster", "lspEntries"]) {
+      expect(Object.hasOwn(values, key)).toBe(false);
+    }
+  });
+});
+
+describe("record read coercion stays validator-aligned (golden pin)", () => {
+  const fieldKinds: readonly RecordFieldDef[] = [
+    { key: "text", kind: "text", label: "文本" },
+    { key: "multiline", kind: "multiline", label: "多行" },
+    { key: "boolean", kind: "boolean", label: "开关" },
+    { key: "enum", kind: "enum", label: "枚举", options: ["a"] },
+    { key: "model", kind: "model", label: "模型" },
+    { key: "list", kind: "stringList", label: "列表" },
+  ];
+  // Synthetic recordEditor descriptor over the same fields: validating the read
+  // result through it exercises exactly isValidRecordFieldLeaf per surviving leaf.
+  const descriptor: OpencodeSetting = { ...setting("command"), record: { fields: [...fieldKinds] } };
+  const badValues: unknown[] = [
+    "",
+    " ",
+    [],
+    ["a", "a"],
+    Array.from({ length: 9 }, (_, i) => `e${i}`),
+    "x".repeat(257),
+    true,
+    42,
+  ];
+
+  it("coerceRecordField(f, x) !== undefined implies isValidRecordFieldLeaf(f, x) for every kind", () => {
+    for (const field of fieldKinds) {
+      for (const bad of badValues) {
+        const state = readRecordState(
+          JSON.stringify({ command: { entry: { [field.key]: bad } } }),
+          ["command"],
+          fieldKinds,
+        );
+        const leaf = state.entries.entry?.[field.key];
+        if (leaf !== undefined) {
+          expect(isValidOpencodeSettingValue(descriptor, { entry: { [field.key]: leaf } })).toBe(true);
+        }
+      }
+    }
   });
 });

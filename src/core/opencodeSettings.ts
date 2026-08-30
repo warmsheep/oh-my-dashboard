@@ -2,10 +2,15 @@ import { MODEL_ID_PATTERN } from "../constants";
 import { OPENCODE_PERMISSION_TOOLS, OPENCODE_SETTINGS, OPENCODE_STRING_VALUE_MAX_LENGTH } from "../shared/protocol";
 import type {
   OpencodePermissionState,
+  OpencodeRecordStates,
   OpencodeSetting,
   OpencodeSettingField,
   OpencodeSettingValue,
   PermissionToolsValue,
+  RecordAggregate,
+  RecordEntryValue,
+  RecordFieldDef,
+  RecordFieldValue,
   ShallowObjectValue,
 } from "../shared/protocol";
 import { getValue } from "./jsoncEditor";
@@ -28,6 +33,14 @@ const ORDERED_LIST_ENTRY_MAX_LENGTH = 64;
 const MCP_NAME_PATTERN = /^[A-Za-z0-9._-]+$/;
 const MCP_NAME_MAX_LENGTH = 64;
 const MCP_SERVERS_MAX_ENTRIES = 32;
+/** Default recordEditor name rules (command names, formatter/lsp ids): npm-ish identifier charset. */
+const RECORD_NAME_PATTERN = /^[A-Za-z0-9._-]+$/;
+const RECORD_NAME_MAX_LENGTH = 64;
+const RECORD_MAX_ENTRIES = 32;
+/** Default bounds of recordEditor field kinds: text ≤256, multiline ≤8000, stringList fields ≤8 entries. */
+const RECORD_TEXT_MAX_LENGTH = 256;
+const RECORD_MULTILINE_MAX_LENGTH = 8000;
+const RECORD_STRING_LIST_MAX_ENTRIES = 8;
 
 /** Non-array object guard (JSONC leaves are `unknown`; arrays are objects too). */
 export function isRecord(value: unknown): value is Record<string, unknown> {
@@ -42,13 +55,19 @@ function isPermissionAction(value: unknown): value is "allow" | "ask" | "deny" {
 /**
  * Read every OPENCODE_SETTINGS value from an opencode.json[c] text (display-tolerant:
  * absent and wrong-shaped values read as null so the UI never lies about types).
- * Descriptors with a `file` target or the mcpServers kind are NOT part of this scalar
- * map — their data rides the payload's dedicated tui/mcp fields instead.
+ * Descriptors with a `file` target or a dedicated payload field (mcpServers /
+ * recordEditor / recordMaster kinds) are NOT part of this scalar map — their data
+ * rides the payload's dedicated tui/mcp/records fields instead.
  */
 export function readOpencodeSettingValues(text: string): Record<string, OpencodeSettingValue> {
   const values: Record<string, OpencodeSettingValue> = {};
   for (const setting of OPENCODE_SETTINGS) {
-    if (setting.file !== undefined || setting.kind === "mcpServers") {
+    if (
+      setting.file !== undefined ||
+      setting.kind === "mcpServers" ||
+      setting.kind === "recordEditor" ||
+      setting.kind === "recordMaster"
+    ) {
       continue;
     }
     values[setting.key] = coerceReadValue(setting, getValue<unknown>(text, setting.path));
@@ -92,7 +111,9 @@ function coerceReadValue(setting: OpencodeSetting, value: unknown): OpencodeSett
     }
     case "enumChips":
     case "mcpServers":
-      // OMO-side kind / dedicated-payload kind: no OpenCode descriptor reaches here.
+    case "recordEditor":
+    case "recordMaster":
+      // OMO-side kind / dedicated-payload kinds: no OpenCode descriptor reaches here.
       return null;
   }
 }
@@ -149,6 +170,116 @@ export function readMcpServers(text: string): { name: string; disabled: boolean 
 }
 
 /**
+ * The record aggregate of one recordEditor path (command/formatter/lsp): a boolean
+ * value reads as the master form, an object as the named-entry form (non-object
+ * entries SKIPPED; per-entry leaves failing their field kind — wrong-typed OR
+ * validator-incompatible (empty/over-long text, non-unique/over-cap stringList) — are
+ * OMITTED, not nulled; a command missing its template still shows, with the field
+ * absent, for repair); absent/garbage reads as unset. Display-tolerant like every
+ * read path, and round-trippable: whatever survives coercion passes the write validator.
+ */
+export function readRecordState(text: string, path: JsonPath, fields: readonly RecordFieldDef[]): RecordAggregate {
+  const value = getValue<unknown>(text, path);
+  if (value === undefined) {
+    return unsetRecordAggregate();
+  }
+  if (typeof value === "boolean") {
+    return { mode: "boolean", booleanValue: value, entries: {} };
+  }
+  if (!isRecord(value)) {
+    return unsetRecordAggregate();
+  }
+  const entries: Record<string, RecordEntryValue> = {};
+  for (const [name, entry] of Object.entries(value)) {
+    if (isRecord(entry)) {
+      entries[name] = coerceRecordEntry(fields, entry);
+    }
+  }
+  return { mode: "entries", booleanValue: null, entries };
+}
+
+/**
+ * All three record aggregates of the OpenCode tab payload, keyed by the recordEditor
+ * descriptors' path root (command/formatter/lsp). Paths without a matching descriptor
+ * stay unset, so the payload slot is always fully materialized.
+ */
+export function readRecordStates(text: string): OpencodeRecordStates {
+  const byPath: Record<string, RecordAggregate> = {
+    command: unsetRecordAggregate(),
+    formatter: unsetRecordAggregate(),
+    lsp: unsetRecordAggregate(),
+  };
+  for (const setting of OPENCODE_SETTINGS) {
+    if (setting.kind !== "recordEditor") {
+      continue;
+    }
+    const key = setting.path[0];
+    if (Object.hasOwn(byPath, key)) {
+      byPath[key] = readRecordState(text, setting.path, setting.record?.fields ?? []);
+    }
+  }
+  return { command: byPath.command, formatter: byPath.formatter, lsp: byPath.lsp };
+}
+
+/** Fresh unset aggregate (shared default of the read paths). */
+function unsetRecordAggregate(): RecordAggregate {
+  return { mode: "unset", booleanValue: null, entries: {} };
+}
+
+/** One raw entry → its protocol shape: ONLY fields passing their kind coercion survive. */
+function coerceRecordEntry(fields: readonly RecordFieldDef[], entry: Record<string, unknown>): RecordEntryValue {
+  const out: RecordEntryValue = {};
+  for (const field of fields) {
+    const coerced = coerceRecordField(field, entry[field.key]);
+    if (coerced !== undefined) {
+      out[field.key] = coerced;
+    }
+  }
+  return out;
+}
+
+/** One leaf against its field kind; undefined = omitted (absent, wrong-shaped or validator-incompatible). */
+function coerceRecordField(field: RecordFieldDef, leaf: unknown): RecordFieldValue | undefined {
+  switch (field.kind) {
+    case "text":
+    case "multiline": {
+      // Validator-aligned degrade: empty-trimmed and over-maxLen strings read as
+      // omitted (like wrong-typed leaves), so the read form never shows a value the
+      // write backstop would reject — a hand-broken entry surfaces as a repair gap.
+      const maxLen =
+        field.maxLen ?? (field.kind === "multiline" ? RECORD_MULTILINE_MAX_LENGTH : RECORD_TEXT_MAX_LENGTH);
+      return typeof leaf === "string" && isValidBoundedRecordText(leaf, maxLen) ? leaf : undefined;
+    }
+    case "boolean":
+      return typeof leaf === "boolean" ? leaf : undefined;
+    case "enum":
+      return typeof leaf === "string" && (field.options ?? []).includes(leaf) ? leaf : undefined;
+    case "model":
+      return typeof leaf === "string" && MODEL_ID_PATTERN.test(leaf) ? leaf : undefined;
+    case "stringList": {
+      if (!Array.isArray(leaf) || !leaf.every((entry) => typeof entry === "string")) {
+        return undefined;
+      }
+      // Filter to unique trimmed non-empty ≤256-char entries within the field cap —
+      // the same rules isValidRecordFieldLeaf enforces on the write path (0 survivors → omitted).
+      const seen = new Set<string>();
+      const kept: string[] = [];
+      for (const entry of leaf) {
+        const trimmed = entry.trim();
+        if (trimmed.length === 0 || trimmed.length > STRING_LIST_ENTRY_MAX_LENGTH || seen.has(trimmed)) {
+          continue;
+        }
+        seen.add(trimmed);
+        if (kept.length < (field.maxEntries ?? RECORD_STRING_LIST_MAX_ENTRIES)) {
+          kept.push(entry);
+        }
+      }
+      return kept.length > 0 ? kept : undefined;
+    }
+  }
+}
+
+/**
  * Per-leaf edits of a shallowObject value at its parent path — shared by the OpenCode
  * and OMO edit builders. null, an all-null map and an empty map remove the parent key
  * (恢复默认); otherwise ONE set-or-remove edit per field present in the map (null leaf →
@@ -180,13 +311,73 @@ export function shallowObjectEdits(parentPath: JsonPath, value: unknown): JsoncE
 }
 
 /**
+ * Per-name edits of a recordEditor value at its path (mirrors the modelCatalog diff):
+ * a null entry removes [...path, name]; an object entry sets the name with NULL LEAVES
+ * PRUNED (a pruned-empty entry removes the name — never writes {}); names absent from
+ * the map are untouched, so broken hand-written entries and advanced fields survive.
+ * Rename = old name null + new name set in one value. A null VALUE itself null-guards
+ * to no edits — the whole-key remove for it lives in the descriptor dispatch
+ * ({@link opencodeSettingEdits}), so raw callers can never wipe the key by accident.
+ * Pure edit builder — value validation lives in {@link isValidOpencodeSettingValue}
+ * and is enforced by callers.
+ */
+export function recordEditorEdits(path: JsonPath, value: unknown): JsoncEdit[] {
+  if (value === null || !isRecord(value)) {
+    return [];
+  }
+  const edits: JsoncEdit[] = [];
+  for (const [name, entry] of Object.entries(value)) {
+    if (entry === null) {
+      edits.push({ path: [...path, name], value: undefined, op: "remove" });
+      continue;
+    }
+    if (!isRecord(entry)) {
+      continue; // tolerated residue (callers validate first)
+    }
+    const pruned: RecordEntryValue = {};
+    for (const [fieldKey, leaf] of Object.entries(entry)) {
+      if (isRecordFieldValue(leaf)) {
+        pruned[fieldKey] = leaf;
+      }
+    }
+    edits.push(
+      Object.keys(pruned).length === 0
+        ? { path: [...path, name], value: undefined, op: "remove" as const }
+        : { path: [...path, name], value: pruned, op: "set" as const },
+    );
+  }
+  return edits;
+}
+
+/**
+ * The single set-or-remove edit of a recordMaster value (true/false → set the boolean,
+ * null → remove the key). The UI interlock prevents writing a boolean over an
+ * entries-form file shape; the core deliberately stays pure and does not re-check
+ * the file (same read-tolerant contract as every other edit builder).
+ */
+export function recordMasterEdits(path: JsonPath, value: boolean | null): JsoncEdit[] {
+  return [value === null ? { path, value: undefined, op: "remove" } : { path, value, op: "set" }];
+}
+
+/** Field-leaf shape guard of the write path (schema rules live in the validator; this only prunes nulls). */
+function isRecordFieldValue(value: unknown): value is RecordFieldValue {
+  return (
+    typeof value === "string" ||
+    typeof value === "boolean" ||
+    (Array.isArray(value) && value.every((entry) => typeof entry === "string"))
+  );
+}
+
+/**
  * The edits for one descriptor value. Most kinds produce the single set-or-remove
  * op at the descriptor path (null → remove); the diffing kinds never rewrite whole
  * objects: mcpServers never wipes the `mcp` key (null → no edits; true → set
  * enabled=false; false → remove the enabled override, keeping the entry's other
  * fields), permissionTools emits one set/remove per tool key present in the value,
- * and shallowObject edits per leaf ({@link shallowObjectEdits}). Pure edit builder —
- * value validation lives in {@link isValidOpencodeSettingValue} and is enforced
+ * shallowObject edits per leaf ({@link shallowObjectEdits}), recordEditor diffs
+ * per entry name ({@link recordEditorEdits}) and recordMaster is the plain
+ * boolean set/remove ({@link recordMasterEdits}). Pure edit builder — value
+ * validation lives in {@link isValidOpencodeSettingValue} and is enforced
  * by the caller (ConfigStore.setOpencodeSetting / the panel-host message parse).
  */
 export function opencodeSettingEdits(setting: OpencodeSetting, value: OpencodeSettingValue): JsoncEdit[] {
@@ -226,6 +417,16 @@ export function opencodeSettingEdits(setting: OpencodeSetting, value: OpencodeSe
     }
     case "shallowObject":
       return shallowObjectEdits(setting.path, value);
+    case "recordEditor":
+      // The UI collapses "no live entry remains" into null (空 → null 整键); the
+      // descriptor dispatch translates that into a whole-key remove, while the bare
+      // recordEditorEdits helper still null-guards raw input to no edits.
+      return value === null
+        ? [{ path: setting.path, value: undefined, op: "remove" }]
+        : recordEditorEdits(setting.path, value);
+    case "recordMaster":
+      // Kind validation guarantees true|false|null here; anything else is a tolerated no-op.
+      return value === true || value === false || value === null ? recordMasterEdits(setting.path, value) : [];
     default:
       return [
         value === null
@@ -246,7 +447,9 @@ export function opencodeSettingEdits(setting: OpencodeSetting, value: OpencodeSe
  * entries, shallowObject leaves must match their field schemas (null leaf = field
  * unset), permissionTools keys must
  * be known tools with allow/ask/deny (or null), mcpServers is ≤32 well-formed names
- * mapped to booleans. null (remove op) is always valid.
+ * mapped to booleans, recordEditor bounds entry names (charset/length/≤32) and each
+ * entry's fields per kind (required fields non-empty; stringList fields ≤8 entries),
+ * recordMaster is true|false (null remove handled above). null (remove op) is always valid.
  */
 export function isValidOpencodeSettingValue(setting: OpencodeSetting, value: unknown): boolean {
   if (value === null) {
@@ -337,10 +540,97 @@ export function isValidOpencodeSettingValue(setting: OpencodeSetting, value: unk
       }
       return true;
     }
+    case "recordEditor": {
+      if (!isRecord(value)) {
+        return false;
+      }
+      const record = setting.record;
+      const names = Object.keys(value);
+      if (names.length > (record?.maxEntries ?? RECORD_MAX_ENTRIES)) {
+        return false;
+      }
+      const pattern = record?.namePattern === undefined ? RECORD_NAME_PATTERN : new RegExp(record.namePattern);
+      const nameMaxLen = record?.nameMaxLen ?? RECORD_NAME_MAX_LENGTH;
+      const fields = record?.fields ?? [];
+      for (const name of names) {
+        if (name.length > nameMaxLen || !pattern.test(name)) {
+          return false;
+        }
+        const entry = value[name];
+        // null entry = delete marker (write path removes the name).
+        if (entry !== null && (!isRecord(entry) || !isValidRecordEntry(fields, entry))) {
+          return false;
+        }
+      }
+      return true;
+    }
+    case "recordMaster":
+      return value === true || value === false;
     case "enumChips":
       // OMO-side kind (Wave 2): no OpenCode descriptor uses it; writes are rejected.
       return false;
   }
+}
+
+/**
+ * One recordEditor entry against its field schemas: every present key must be a known
+ * field (unknown keys are rejected, mirroring shallowObject); null/absent leaves mean
+ * "field unset" and are rejected for required fields; every other leaf must pass its
+ * kind rules (text/multiline trimmed non-empty within maxLen, enum ∈ options, model
+ * id shape, boolean, stringList 1..field.maxEntries unique trimmed ≤256-char entries).
+ */
+function isValidRecordEntry(fields: readonly RecordFieldDef[], entry: Record<string, unknown>): boolean {
+  const knownKeys = new Set(fields.map((field) => field.key));
+  for (const key of Object.keys(entry)) {
+    if (!knownKeys.has(key)) {
+      return false;
+    }
+  }
+  for (const field of fields) {
+    const leaf = entry[field.key];
+    if (leaf === undefined || leaf === null) {
+      // Absent/null leaf = field unset — required fields must not be unset.
+      if (field.required === true) {
+        return false;
+      }
+      continue;
+    }
+    if (!isValidRecordFieldLeaf(field, leaf)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/** One recordEditor leaf against its field kind (bounds default per kind, see RECORD_* constants). */
+function isValidRecordFieldLeaf(field: RecordFieldDef, leaf: unknown): boolean {
+  switch (field.kind) {
+    case "text":
+      return isValidBoundedRecordText(leaf, field.maxLen ?? RECORD_TEXT_MAX_LENGTH);
+    case "multiline":
+      return isValidBoundedRecordText(leaf, field.maxLen ?? RECORD_MULTILINE_MAX_LENGTH);
+    case "boolean":
+      return typeof leaf === "boolean";
+    case "enum":
+      return typeof leaf === "string" && (field.options ?? []).includes(leaf);
+    case "model":
+      return typeof leaf === "string" && MODEL_ID_PATTERN.test(leaf);
+    case "stringList":
+      return isValidUniqueStringEntries(
+        leaf,
+        field.maxEntries ?? RECORD_STRING_LIST_MAX_ENTRIES,
+        STRING_LIST_ENTRY_MAX_LENGTH,
+      );
+  }
+}
+
+/** Trimmed non-empty string of at most maxLen chars (recordEditor text/multiline fields). */
+function isValidBoundedRecordText(leaf: unknown, maxLen: number): boolean {
+  if (typeof leaf !== "string") {
+    return false;
+  }
+  const trimmed = leaf.trim();
+  return trimmed.length > 0 && trimmed.length <= maxLen;
 }
 
 /**
