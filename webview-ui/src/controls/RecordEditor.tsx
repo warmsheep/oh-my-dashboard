@@ -29,7 +29,9 @@ import StringListEditor from "./StringListEditor";
  * Required-field gate: while any LIVE entry leaves a required field empty, no
  * onChange may fire; the change is held in a local working copy (surviving init
  * pushes, cleared with the entry on deletion) until the gap is fixed or the entry
- * deleted, and a red notice names the blocking entry. Field text drafts are local
+ * deleted, and a red notice names the blocking entry. The mcpEntries descriptor
+ * additionally gates on its cross-field rule (remote ⇒ url — see helpers).
+ * Field text drafts are local
  * state as well, so pushes never clobber in-progress typing.
  */
 export default function RecordEditor({
@@ -38,6 +40,7 @@ export default function RecordEditor({
   disabled,
   modelOptions,
   nameRules,
+  settingKey,
   onChange,
 }: {
   /** Field schemas from the descriptor (the selected entry's form rows). */
@@ -50,6 +53,8 @@ export default function RecordEditor({
   modelOptions: readonly ModelOption[];
   /** Name rules from the descriptor's record metadata (defaults: charset /. _-/, 64 chars, 32 entries). */
   nameRules?: RecordNameRules;
+  /** Descriptor key — keys the inline mcpEntries remote⇒url cross-field commit gate (core parity). */
+  settingKey?: string;
   /** Commit the full snapshot (null = empty → remove the key). */
   onChange(next: RecordEditorValue | null): void;
 }) {
@@ -108,7 +113,7 @@ export default function RecordEditor({
     editedName: string,
     deletedName: string | null,
   ): boolean => {
-    const plan = planRecordCommit(fields, value, edits, deletedName);
+    const plan = planRecordCommit(fields, value, edits, deletedName, settingKey);
     if (plan.kind === "blocked") {
       setWorking(edits);
       setBlockedError(recordBlockedCommitError(plan.gaps, editedName));

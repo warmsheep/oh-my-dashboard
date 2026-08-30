@@ -1,5 +1,6 @@
 import type {
-  McpServersValue,
+  AgentPairMapValue,
+  AgentTextMapValue,
   ModelCatalogValue,
   OpencodePermissionState,
   OpencodeSettingField,
@@ -11,14 +12,16 @@ import type {
   RecordFieldValue,
   ShallowObjectValue,
 } from "@shared/protocol";
+import { AGENT_TEXT_MAX_LENGTH } from "@shared/protocol";
 
 /**
  * Pure helpers behind the controls/ composite editors (stringList / enumChips /
- * shallowObject / modelCatalog / permissionTools / mcpServers / recordEditor /
- * recordMaster kinds). Bound mirrors of the core validators: core keeps its
- * constants private (node-side module), so the numeric values here MUST stay in
- * sync with the STRING_LIST_* constants of src/core/opencodeSettings.ts and the
- * MODEL_ALIAS_* / MODEL_CATALOG_* constants of src/core/omoSettings.ts.
+ * shallowObject / modelCatalog / permissionTools / recordEditor / recordMaster /
+ * agentPairMap / agentTextMap kinds). Bound mirrors of the core validators: core
+ * keeps its constants private (node-side module), so the numeric values here
+ * MUST stay in sync with the STRING_LIST_* constants of src/core/opencodeSettings.ts
+ * and the MODEL_ALIAS_* / MODEL_CATALOG_* constants of src/core/omoSettings.ts
+ * (AGENT_TEXT_MAX_LENGTH is protocol-shared, so it is imported — no mirror).
  */
 
 // Mirror of core STRING_LIST_MAX_ENTRIES / STRING_LIST_ENTRY_MAX_LENGTH (opencodeSettings.ts).
@@ -343,6 +346,8 @@ export function recordStringListMaxEntries(field: RecordFieldDef): number {
 export interface RecordRequiredGap {
   name: string;
   label: string;
+  /** Notice segment replacing the default 的<label>不能为空 (cross-field rules). */
+  notice?: string;
 }
 
 /** Required-field labels missing from ONE entry (empty string / null / absent leaves). */
@@ -381,10 +386,34 @@ export function recordRequiredGaps(
   return gaps;
 }
 
+/**
+ * Cross-field rule, deliberately inline (mirror of core's isValidOpencodeSettingValue
+ * recordEditor branch — design: NOT a generic framework): an mcpEntries entry of
+ * type=remote must carry a usable url. The text-field kind already bounds
+ * presence/shape for PRESENT urls; this adds the coupling "remote ⇒ url required"
+ * that per-field schemas cannot express. Live entries only (null markers are
+ * deletions); the descriptor key is checked at the call site (planRecordCommit).
+ */
+export function recordMcpRemoteUrlGaps(value: RecordEditorValue | null): RecordRequiredGap[] {
+  const gaps: RecordRequiredGap[] = [];
+  for (const [name, entry] of Object.entries(value ?? {})) {
+    if (entry === null) {
+      continue;
+    }
+    if (entry.type === "remote" && (typeof entry.url !== "string" || entry.url.trim() === "")) {
+      gaps.push({ name, label: "URL", notice: "的 remote 条目必须填写 URL" });
+    }
+  }
+  return gaps;
+}
+
 /** Chinese notice naming the entry that blocks a commit (other entries first, the edited one last). */
 export function recordBlockedCommitError(gaps: readonly RecordRequiredGap[], editedName: string): string | null {
   const first = gaps.find((gap) => gap.name !== editedName) ?? gaps[0];
-  return first === undefined ? null : `「${first.name}」的${first.label}不能为空，修改已暂存`;
+  if (first === undefined) {
+    return null;
+  }
+  return `「${first.name}」${first.notice ?? `的${first.label}不能为空`}，修改已暂存`;
 }
 
 /**
@@ -431,13 +460,15 @@ export type RecordCommitPlan =
  * with empty required fields BLOCK the commit (nothing may post while any gap
  * remains); committable drafts (no gaps + at least one set leaf — an all-empty
  * entry would write nothing) ride along and are reported in postedNames so the
- * caller can drop exactly those working copies.
+ * caller can drop exactly those working copies. `settingKey` is the descriptor
+ * key, used only for the inline mcpEntries cross-field gate below.
  */
 export function planRecordCommit(
   fields: readonly RecordFieldDef[],
   value: RecordEditorValue | null,
   edits: Record<string, RecordEntryValue>,
   deletedName: string | null,
+  settingKey?: string,
 ): RecordCommitPlan {
   const snapshot: RecordEditorValue = {};
   for (const [name, entry] of Object.entries(value ?? {})) {
@@ -448,6 +479,12 @@ export function planRecordCommit(
     snapshot[name] = deletedName === name ? null : { ...entry, ...edits[name] };
   }
   const gaps = recordRequiredGaps(fields, snapshot);
+  // Cross-field rule, deliberately inline (design: NOT a generic framework — mirror
+  // of core's isValidOpencodeSettingValue recordEditor branch): an mcpEntries entry
+  // of type=remote must carry a usable url, a coupling per-field schemas cannot express.
+  if (settingKey === "mcpEntries") {
+    gaps.push(...recordMcpRemoteUrlGaps(snapshot));
+  }
   if (gaps.length > 0) {
     return { kind: "blocked", gaps };
   }
@@ -517,10 +554,11 @@ const WIDE_KINDS: ReadonlySet<string> = new Set([
   "enumChips",
   "shallowObject",
   "permissionTools",
-  "mcpServers",
   "modelCatalog",
   "recordEditor",
   "recordMaster",
+  "agentPairMap",
+  "agentTextMap",
 ]);
 
 /** True when the descriptor's control needs the wrapping full-width set-row layout. */
@@ -552,14 +590,102 @@ export function isPermissionToolsLocked(state: OpencodePermissionState): boolean
 }
 
 // ---------------------------------------------------------------------------
-// mcpServers kind
+// agentPairMap / agentTextMap kinds (OMO 覆写矩阵 / 提示词)
 // ---------------------------------------------------------------------------
 
+/** Live entry of one agentPairMap row (the value-side shape of AgentPairMapValue). */
+export type AgentPairEntry = { model: string; reasoning: string | null };
+
+/** Fixed-row state of one agent inside an agentPairMap editor. */
+export interface AgentPairRow {
+  agent: string;
+  /** Live entry; null = the row is 未设置 (key absent OR a null deletion marker). */
+  entry: AgentPairEntry | null;
+}
+
 /**
- * Single-key snapshot map for one server toggle (same per-key semantics as
- * permissionToolEdit): true → the host sets mcp.<name>.enabled=false, false → the
- * host removes the enabled override. null is never sent (the mcp key is never wiped).
+ * Fixed rows in descriptor order (options = KNOWN_AGENTS): one row per agent,
+ * null deletion markers and absent keys both rendering as 未设置. Whole-null
+ * input (key absent in file) renders every row 未设置.
  */
-export function mcpToggleEdit(name: string, disabled: boolean): McpServersValue {
-  return { [name]: disabled };
+export function agentPairRows(agents: readonly string[], value: AgentPairMapValue | null): AgentPairRow[] {
+  return agents.map((agent) => {
+    const entry = value?.[agent];
+    return { agent, entry: entry ?? null };
+  });
+}
+
+/**
+ * Upsert one agent's live entry into the full-map snapshot. The result is NEVER
+ * whole-null: null means 无编辑 (never wipes the agents block), so a pair-map
+ * commit always posts an object — even after every row was cleared.
+ */
+export function withAgentPairEntry(
+  value: AgentPairMapValue | null,
+  agent: string,
+  entry: AgentPairEntry,
+): AgentPairMapValue {
+  return { ...(value ?? {}), [agent]: entry };
+}
+
+/**
+ * Clear one agent: a null deletion marker when the row was ever present in the
+ * snapshot (live entry or earlier marker); an absent row stays absent (clearing
+ * an already-unset row is a no-op). Never collapses to whole-null — an all-null
+ * MAP is the valid "remove every listed agent" commit.
+ */
+export function withoutAgentPairEntry(value: AgentPairMapValue | null, agent: string): AgentPairMapValue {
+  const next: AgentPairMapValue = { ...(value ?? {}) };
+  if (next[agent] !== undefined) {
+    next[agent] = null;
+  }
+  return next;
+}
+
+/**
+ * Reasoning requires a model (core's validator demands model in every entry):
+ * the reasoning select stays locked until the row carries a live entry.
+ */
+export function isAgentPairReasoningLocked(row: AgentPairRow): boolean {
+  return row.entry === null;
+}
+
+/** Fixed-row state of one agent inside an agentTextMap editor. */
+export interface AgentTextRow {
+  agent: string;
+  /** Live text; null = 未设置 (key absent OR a null deletion marker). */
+  text: string | null;
+}
+
+/** Fixed rows in descriptor order; null markers and absent keys both render 未设置. */
+export function agentTextRows(agents: readonly string[], value: AgentTextMapValue | null): AgentTextRow[] {
+  return agents.map((agent) => {
+    const text = value?.[agent];
+    return { agent, text: text ?? null };
+  });
+}
+
+/** Upsert one agent's text into the full-map snapshot (never whole-null — see withAgentPairEntry). */
+export function withAgentTextEntry(value: AgentTextMapValue | null, agent: string, text: string): AgentTextMapValue {
+  return { ...(value ?? {}), [agent]: text };
+}
+
+/** Clear one agent with a null deletion marker (never whole-null — see withoutAgentPairEntry). */
+export function withoutAgentTextEntry(value: AgentTextMapValue | null, agent: string): AgentTextMapValue {
+  const next: AgentTextMapValue = { ...(value ?? {}) };
+  if (next[agent] !== undefined) {
+    next[agent] = null;
+  }
+  return next;
+}
+
+/**
+ * Parse one agentText commit: trimmed text, empty → null (remove that agent's
+ * leaf), over AGENT_TEXT_MAX_LENGTH → invalid with the Chinese error — the
+ * exact bound core's omoSettings validator enforces (protocol-shared constant).
+ */
+export function parseAgentTextInput(
+  raw: string,
+): { kind: "commit"; value: string | null } | { kind: "invalid"; error: string } {
+  return parseBoundedStringInput(raw, AGENT_TEXT_MAX_LENGTH);
 }

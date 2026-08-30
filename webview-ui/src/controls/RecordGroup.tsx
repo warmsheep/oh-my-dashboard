@@ -64,6 +64,7 @@ export default function RecordGroup({
         disabled={disabled || entriesLocked}
         modelOptions={modelOptions}
         nameRules={entriesDescriptor.record}
+        settingKey={entriesDescriptor.key}
         onChange={onEntriesChange}
       />
     </div>

@@ -1,4 +1,6 @@
 import type {
+  AgentPairMapValue,
+  AgentTextMapValue,
   OpencodePermissionState,
   OpencodeSettingField,
   RecordAggregate,
@@ -6,19 +8,27 @@ import type {
   RecordFieldDef,
   ShallowObjectValue,
 } from "@shared/protocol";
-import { OMO_MISC_SETTINGS, OPENCODE_PERMISSION_TOOLS, OPENCODE_SETTINGS } from "@shared/protocol";
+import {
+  AGENT_TEXT_MAX_LENGTH,
+  OMO_MISC_SETTINGS,
+  OPENCODE_PERMISSION_TOOLS,
+  OPENCODE_SETTINGS,
+} from "@shared/protocol";
 import { describe, expect, it } from "vitest";
 
 import {
+  agentPairRows,
+  agentTextRows,
   effectiveShallowBoolean,
+  isAgentPairReasoningLocked,
   isPermissionShorthandLocked,
   isPermissionToolsLocked,
   isRecordEntriesLocked,
   isRecordMasterLocked,
   isWideSettingKind,
-  mcpToggleEdit,
   modelAliasError,
   moveListEntry,
+  parseAgentTextInput,
   parseNumberFieldInput,
   parseOrderedListEntry,
   parseRecordTextField,
@@ -29,10 +39,15 @@ import {
   recordBlockedCommitError,
   recordEntryNameError,
   recordFieldMaxLen,
+  recordMcpRemoteUrlGaps,
   recordRequiredGaps,
   removeListEntry,
   toggleChipValue,
+  withAgentPairEntry,
+  withAgentTextEntry,
   withCatalogEntry,
+  withoutAgentPairEntry,
+  withoutAgentTextEntry,
   withoutCatalogAlias,
   withoutRecordEntry,
   withRecordEntry,
@@ -267,10 +282,110 @@ describe("permission partial-map semantics", () => {
   });
 });
 
-describe("mcpToggleEdit", () => {
-  it("builds the single-key snapshot map (true = disable, false = re-enable)", () => {
-    expect(mcpToggleEdit("memory", true)).toEqual({ memory: true });
-    expect(mcpToggleEdit("memory", false)).toEqual({ memory: false });
+// ---------------------------------------------------------------------------
+// agentPairMap / agentTextMap kinds (OMO 覆写矩阵 / 提示词)
+// ---------------------------------------------------------------------------
+
+describe("agentPairMap row ops", () => {
+  it("builds fixed rows in descriptor order; null markers and absent keys both render 未设置", () => {
+    const value: AgentPairMapValue = {
+      oracle: { model: "kimi/kimi-k2", reasoning: "high" },
+      ghost: null,
+    };
+    expect(agentPairRows(["hephaestus", "oracle", "metis"], value)).toEqual([
+      { agent: "hephaestus", entry: null },
+      { agent: "oracle", entry: { model: "kimi/kimi-k2", reasoning: "high" } },
+      { agent: "metis", entry: null },
+    ]);
+    expect(agentPairRows(["oracle"], null)).toEqual([{ agent: "oracle", entry: null }]);
+  });
+
+  it("upserts live entries onto the full-map snapshot (markers overwritten)", () => {
+    expect(withAgentPairEntry(null, "oracle", { model: "kimi/kimi-k2", reasoning: null })).toEqual({
+      oracle: { model: "kimi/kimi-k2", reasoning: null },
+    });
+    expect(withAgentPairEntry({ ghost: null }, "ghost", { model: "opencode/glm-4.7", reasoning: "low" })).toEqual({
+      ghost: { model: "opencode/glm-4.7", reasoning: "low" },
+    });
+  });
+
+  it("clears with null deletion markers and NEVER collapses to whole-null (无编辑 red line)", () => {
+    const value: AgentPairMapValue = {
+      oracle: { model: "a/b", reasoning: null },
+      atlas: { model: "c/d", reasoning: "low" },
+    };
+    expect(withoutAgentPairEntry(value, "atlas")).toEqual({ oracle: { model: "a/b", reasoning: null }, atlas: null });
+    // Clearing the LAST live entry posts the all-null map — per-agent removals still happen.
+    expect(withoutAgentPairEntry({ oracle: { model: "a/b", reasoning: null } }, "oracle")).toEqual({ oracle: null });
+    // An absent row stays absent (clearing an already-unset row is a no-op).
+    expect(withoutAgentPairEntry(null, "oracle")).toEqual({});
+  });
+
+  it("locks reasoning while the row carries no model (core requires model in every entry)", () => {
+    expect(isAgentPairReasoningLocked({ agent: "oracle", entry: null })).toBe(true);
+    expect(isAgentPairReasoningLocked({ agent: "oracle", entry: { model: "a/b", reasoning: null } })).toBe(false);
+  });
+
+  it("pins the real descriptors' agent key set (options = KNOWN_AGENTS) and leaf keys", () => {
+    for (const key of ["agentUltrawork", "agentCompaction"]) {
+      const found = OMO_MISC_SETTINGS.find((setting) => setting.key === key);
+      expect(found?.kind).toBe("agentPairMap");
+      expect(found?.options).toEqual([
+        "hephaestus",
+        "oracle",
+        "librarian",
+        "explore",
+        "multimodal-looker",
+        "prometheus",
+        "metis",
+        "momus",
+        "atlas",
+        "sisyphus",
+        "sisyphus-junior",
+      ]);
+      expect(found?.agents?.leafKey).toBe(key === "agentUltrawork" ? "ultrawork" : "compaction");
+    }
+  });
+});
+
+describe("agentTextMap row ops", () => {
+  it("builds fixed rows; null markers and absent keys both render 未设置", () => {
+    expect(agentTextRows(["oracle", "atlas"], { oracle: "prompt text", atlas: null })).toEqual([
+      { agent: "oracle", text: "prompt text" },
+      { agent: "atlas", text: null },
+    ]);
+    expect(agentTextRows(["oracle"], null)).toEqual([{ agent: "oracle", text: null }]);
+  });
+
+  it("upserts and clears with markers, never collapsing to whole-null", () => {
+    const value: AgentTextMapValue = { oracle: "x", atlas: "y" };
+    expect(withAgentTextEntry(null, "oracle", "hello")).toEqual({ oracle: "hello" });
+    expect(withAgentTextEntry({ oracle: null }, "oracle", "hi")).toEqual({ oracle: "hi" });
+    expect(withoutAgentTextEntry(value, "atlas")).toEqual({ oracle: "x", atlas: null });
+    expect(withoutAgentTextEntry({ oracle: "x" }, "oracle")).toEqual({ oracle: null });
+    expect(withoutAgentTextEntry(null, "oracle")).toEqual({});
+  });
+
+  it("bounds entries at AGENT_TEXT_MAX_LENGTH (protocol-shared constant)", () => {
+    expect(parseAgentTextInput("  prompt text  ")).toEqual({ kind: "commit", value: "prompt text" });
+    expect(parseAgentTextInput("   ")).toEqual({ kind: "commit", value: null });
+    expect(parseAgentTextInput("x".repeat(AGENT_TEXT_MAX_LENGTH))).toEqual({
+      kind: "commit",
+      value: "x".repeat(AGENT_TEXT_MAX_LENGTH),
+    });
+    expect(parseAgentTextInput("x".repeat(AGENT_TEXT_MAX_LENGTH + 1))).toEqual({
+      kind: "invalid",
+      error: `最长 ${AGENT_TEXT_MAX_LENGTH} 个字符`,
+    });
+  });
+
+  it("pins the real descriptors' agent key set and leaf keys", () => {
+    for (const key of ["agentPrompt", "agentPromptAppend"]) {
+      const found = OMO_MISC_SETTINGS.find((setting) => setting.key === key);
+      expect(found?.kind).toBe("agentTextMap");
+      expect(found?.options).toHaveLength(11);
+      expect(found?.agents?.leafKey).toBe(key === "agentPrompt" ? "prompt" : "prompt_append");
+    }
   });
 });
 
@@ -284,6 +399,10 @@ const COMMAND_FIELDS: RecordFieldDef[] = [
 ][0];
 const FORMATTER_FIELDS: RecordFieldDef[] = [
   (OPENCODE_SETTINGS.find((setting) => setting.key === "formatterEntries")?.record?.fields ?? []) as RecordFieldDef[],
+][0];
+/** The real mcpEntries descriptor fields (type enum required + url/command/enabled). */
+const MCP_FIELDS: RecordFieldDef[] = [
+  (OPENCODE_SETTINGS.find((setting) => setting.key === "mcpEntries")?.record?.fields ?? []) as RecordFieldDef[],
 ][0];
 
 function aggregate(partial: Partial<RecordAggregate>): RecordAggregate {
@@ -405,6 +524,31 @@ describe("recordRequiredGaps (commit block)", () => {
   });
 });
 
+describe("recordMcpRemoteUrlGaps (mcpEntries cross-field gate)", () => {
+  it("flags live remote entries without a usable url; local / url-carrying entries and null markers pass", () => {
+    const value: RecordEditorValue = {
+      goodRemote: { type: "remote", url: "https://mcp.example.com" },
+      blankUrl: { type: "remote", url: "   " },
+      noUrl: { type: "remote" },
+      local: { type: "local", command: ["npx"] },
+      deleted: null,
+    };
+    expect(recordMcpRemoteUrlGaps(value)).toEqual([
+      { name: "blankUrl", label: "URL", notice: "的 remote 条目必须填写 URL" },
+      { name: "noUrl", label: "URL", notice: "的 remote 条目必须填写 URL" },
+    ]);
+    expect(recordMcpRemoteUrlGaps(null)).toEqual([]);
+  });
+
+  it("feeds the Chinese blocked-commit notice (others first, the edited one last)", () => {
+    const gaps = recordMcpRemoteUrlGaps({ edited: { type: "remote" }, other: { type: "remote", url: "" } });
+    expect(recordBlockedCommitError(gaps, "edited")).toBe("「other」的 remote 条目必须填写 URL，修改已暂存");
+    expect(recordBlockedCommitError(gaps.slice(0, 1), "edited")).toBe(
+      "「edited」的 remote 条目必须填写 URL，修改已暂存",
+    );
+  });
+});
+
 describe("planRecordCommit (full-snapshot assembly)", () => {
   it("applies held overlays onto live entries and posts the full snapshot", () => {
     const value: RecordEditorValue = { lint: { template: "a" }, fmt: {} };
@@ -465,6 +609,29 @@ describe("planRecordCommit (full-snapshot assembly)", () => {
     const plan = planRecordCommit(FORMATTER_FIELDS, { ghost: null, live: {} }, {}, null);
     expect(plan).toEqual({ kind: "commit", value: { live: {} }, postedNames: ["live"] });
   });
+
+  it("blocks mcpEntries commits while a live remote entry lacks a url (descriptor-keyed, core parity)", () => {
+    const value: RecordEditorValue = { srv: { type: "remote" }, ok: { type: "remote", url: "https://x" } };
+    expect(
+      planRecordCommit(MCP_FIELDS, value, { ok: { type: "remote", url: "https://y" } }, null, "mcpEntries"),
+    ).toEqual({ kind: "blocked", gaps: [{ name: "srv", label: "URL", notice: "的 remote 条目必须填写 URL" }] });
+    // Fixing the url (held overlay) unblocks the same commit.
+    const fixed = planRecordCommit(
+      MCP_FIELDS,
+      value,
+      { srv: { type: "remote", url: "https://z" } },
+      null,
+      "mcpEntries",
+    );
+    expect(fixed.kind).toBe("commit");
+  });
+
+  it("applies the remote⇒url gate ONLY to the mcpEntries key (other descriptors commit through)", () => {
+    const value: RecordEditorValue = { srv: { type: "remote" } };
+    // No settingKey / a different descriptor key: the cross-field rule stays out of the gate.
+    expect(planRecordCommit(MCP_FIELDS, value, {}, null).kind).toBe("commit");
+    expect(planRecordCommit(MCP_FIELDS, value, {}, null, "command").kind).toBe("commit");
+  });
 });
 
 describe("record interlocks + optimistic aggregate patch", () => {
@@ -504,10 +671,11 @@ describe("isWideSettingKind", () => {
       "enumChips",
       "shallowObject",
       "permissionTools",
-      "mcpServers",
       "modelCatalog",
       "recordEditor",
       "recordMaster",
+      "agentPairMap",
+      "agentTextMap",
     ]) {
       expect(isWideSettingKind(kind)).toBe(true);
     }
