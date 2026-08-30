@@ -89,7 +89,7 @@ export function uniqueProviderNames(models: readonly ModelOption[]): string[] {
   return names;
 }
 
-/** Next disabled-providers array after one chip toggles; the caller posts the full array ([] → null). */
+/** Next providers-array value (disabled or enabled list) after one chip toggles; the caller posts the full array ([] → null). */
 export function toggleProviderValue(current: readonly string[], provider: string, checked: boolean): string[] {
   if (!checked) {
     return current.filter((name) => name !== provider);
@@ -106,12 +106,16 @@ export type OpencodeStringParse = { kind: "commit"; value: string | null } | { k
 
 /**
  * Parse a string-field commit: trimmed text, empty → commit null (remove the key),
- * over OPENCODE_STRING_VALUE_MAX_LENGTH → invalid (the same bound core's
- * isValidOpencodeSettingValue enforces, checked here so the user gets a proper
- * message instead of the protocol backstop error).
+ * over the bound → invalid (the webview mirror of core's isValidBoundedSettingString;
+ * maxLen defaults to the shared OPENCODE_STRING_VALUE_MAX_LENGTH, descriptors with a
+ * tighter maxLen pass theirs so the friendly error can never drift from the host
+ * validator).
  */
-export function parseOpencodeStringInput(raw: string): OpencodeStringParse {
-  return parseBoundedStringInput(raw, OPENCODE_STRING_VALUE_MAX_LENGTH);
+export function parseOpencodeStringInput(
+  raw: string,
+  maxLen: number = OPENCODE_STRING_VALUE_MAX_LENGTH,
+): OpencodeStringParse {
+  return parseBoundedStringInput(raw, maxLen);
 }
 
 /**

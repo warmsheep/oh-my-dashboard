@@ -27,6 +27,7 @@ describe("groupOpencodeSettings", () => {
     const groups = groupOpencodeSettings(OPENCODE_SETTINGS);
     expect(groups.map((g) => g.label)).toEqual([
       "模型",
+      "供应商",
       "行为",
       "其他",
       "权限",
@@ -38,26 +39,59 @@ describe("groupOpencodeSettings", () => {
       "高级",
       "终端与输出",
       "命令",
+      "插件",
       "格式化",
       "LSP",
+      "技能",
+      "实验特性",
     ]);
     expect(groups[0]?.settings.map((s) => s.key)).toEqual(["model", "smallModel", "agentBuildModel", "agentPlanModel"]);
-    expect(groups[1]?.settings.map((s) => s.key)).toEqual(["defaultAgent", "share", "autoupdate", "snapshot"]);
-    expect(groups[2]?.settings.map((s) => s.key)).toEqual(["username", "disabledProviders"]);
-    expect(groups[3]?.settings.map((s) => s.key)).toEqual(["permissionShorthand", "permissionTools"]);
-    expect(groups[7]?.settings.map((s) => s.key)).toEqual([
+    expect(groups[1]?.settings.map((s) => s.key)).toEqual(["providerEntries"]);
+    expect(groups[2]?.settings.map((s) => s.key)).toEqual(["defaultAgent", "share", "autoupdate", "snapshot"]);
+    expect(groups[3]?.settings.map((s) => s.key)).toEqual(["username", "disabledProviders", "enabledProviders"]);
+    expect(groups[4]?.settings.map((s) => s.key)).toEqual(["permissionShorthand", "permissionTools"]);
+    expect(groups[5]?.settings.map((s) => s.key)).toEqual(["instructions", "referenceEntries"]);
+    expect(groups[8]?.settings.map((s) => s.key)).toEqual([
       "agentBuildDisable",
       "agentBuildTemperature",
+      "agentBuildSteps",
+      "agentBuildExtras",
       "agentPlanDisable",
       "agentPlanTemperature",
+      "agentPlanSteps",
+      "agentPlanExtras",
       "agentGeneralModel",
+      "agentGeneralSteps",
+      "agentGeneralTemperature",
+      "agentGeneralDisable",
+      "agentGeneralExtras",
       "agentExploreModel",
+      "agentExploreSteps",
+      "agentExploreTemperature",
+      "agentExploreDisable",
+      "agentExploreExtras",
     ]);
-    expect(groups[9]?.settings.map((s) => s.key)).toEqual(["logLevel", "shell", "subagentDepth", "watcherIgnore"]);
-    expect(groups[10]?.settings.map((s) => s.key)).toEqual(["toolOutput", "attachmentImage"]);
-    expect(groups[11]?.settings.map((s) => s.key)).toEqual(["command"]);
-    expect(groups[12]?.settings.map((s) => s.key)).toEqual(["formatterMaster", "formatterEntries"]);
-    expect(groups[13]?.settings.map((s) => s.key)).toEqual(["lspMaster", "lspEntries"]);
+    expect(groups[10]?.settings.map((s) => s.key)).toEqual([
+      "logLevel",
+      "shell",
+      "subagentDepth",
+      "watcherIgnore",
+      "serverConfig",
+    ]);
+    expect(groups[11]?.settings.map((s) => s.key)).toEqual(["toolOutput", "attachmentImage"]);
+    expect(groups[12]?.settings.map((s) => s.key)).toEqual(["command"]);
+    expect(groups[13]?.settings.map((s) => s.key)).toEqual(["pluginEntries"]);
+    expect(groups[14]?.settings.map((s) => s.key)).toEqual(["formatterMaster", "formatterEntries"]);
+    expect(groups[15]?.settings.map((s) => s.key)).toEqual(["lspMaster", "lspEntries"]);
+    expect(groups[16]?.settings.map((s) => s.key)).toEqual(["skillsPaths", "skillsUrls"]);
+    expect(groups[17]?.settings.map((s) => s.key)).toEqual([
+      "expBatchTool",
+      "expOpenTelemetry",
+      "expDisablePasteSummary",
+      "expContinueLoopOnDeny",
+      "expMcpTimeout",
+      "expPrimaryTools",
+    ]);
   });
 
   it("covers every OPENCODE_SETTINGS descriptor exactly once", () => {
@@ -182,6 +216,11 @@ describe("parseOpencodeStringInput", () => {
       kind: "invalid",
       error: "最长 64 个字符",
     });
+  });
+
+  it("bounds the commit with a descriptor maxLen when one is passed", () => {
+    expect(parseOpencodeStringInput("12345678", 8)).toEqual({ kind: "commit", value: "12345678" });
+    expect(parseOpencodeStringInput("123456789", 8)).toEqual({ kind: "invalid", error: "最长 8 个字符" });
   });
 });
 

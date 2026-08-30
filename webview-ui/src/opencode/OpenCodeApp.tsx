@@ -9,13 +9,14 @@ import type {
   RecordEditorValue,
   ShallowObjectValue,
 } from "@shared/protocol";
-import { OPENCODE_SETTINGS } from "@shared/protocol";
+import { isSharedShallowObjectParent, OPENCODE_SETTINGS, OPENCODE_STRING_VALUE_MAX_LENGTH } from "@shared/protocol";
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import ChipsEditor from "../controls/ChipsEditor";
 import {
   isWideSettingKind,
   parseNumberFieldInput,
+  parsePluginListEntry,
   permissionToolEdit,
   recordAggregateAfterCommit,
 } from "../controls/helpers";
@@ -50,8 +51,22 @@ const DEV_PAYLOAD: OpencodeSettingsPayload = {
     snapshot: true,
     username: "dev",
     instructions: null,
-    compaction: { auto: null, prune: null, tail_turns: null },
+    pluginEntries: ["@opencontext/amplify", "my-plugin@2.1.0"],
+    compaction: { auto: null, prune: null, tail_turns: null, preserve_recent_tokens: null, reserved: null },
     agentBuildTemperature: null,
+    agentBuildExtras: {
+      prompt: "You are the build agent.",
+      hidden: null,
+      color: "#3fb950",
+      top_p: 0.9,
+      "permission.edit": "ask",
+      "permission.bash": null,
+      "permission.webfetch": null,
+      "permission.task": null,
+      "permission.doom_loop": null,
+      "permission.external_directory": null,
+    },
+    serverConfig: { port: 4096, hostname: null, mdns: null, mdnsDomain: null, cors: null },
   },
   configPath: "~/.config/opencode/opencode.json",
   models: [
@@ -61,6 +76,7 @@ const DEV_PAYLOAD: OpencodeSettingsPayload = {
   ],
   permission: { shorthand: null, tools: {}, advancedTools: [] },
   tui: { theme: null, path: "~/.config/opencode/tui.json" },
+  pluginProtected: false,
   records: {
     command: {
       mode: "entries",
@@ -79,8 +95,33 @@ const DEV_PAYLOAD: OpencodeSettingsPayload = {
       mode: "entries",
       booleanValue: null,
       entries: {
-        memory: { type: "local", command: ["npx", "-y", "@modelcontextprotocol/server-memory"] },
-        fetch: { type: "remote", url: "https://mcp.example.com/fetch", enabled: true },
+        memory: {
+          type: "local",
+          command: ["npx", "-y", "@modelcontextprotocol/server-memory"],
+          environment: { MEMORY_FILE: "" },
+          timeout: 5000,
+        },
+        fetch: {
+          type: "remote",
+          url: "https://mcp.example.com/fetch",
+          enabled: true,
+          headers: { Accept: "application/json" },
+        },
+      },
+    },
+    provider: {
+      mode: "entries",
+      booleanValue: null,
+      entries: {
+        mygw: { name: "My Gateway", "options.baseURL": "https://gw.example.internal/v1", whitelist: ["gw/pro"] },
+      },
+    },
+    references: {
+      mode: "entries",
+      booleanValue: null,
+      entries: {
+        docs: { repository: "https://github.com/opencode/docs", branch: "main", description: "opencode docs" },
+        localrules: { path: "./docs/rules", hidden: true },
       },
     },
   },
@@ -113,7 +154,7 @@ function applyStructuredSnapshot(
   }
 }
 
-/** The records-slot key of a record descriptor (path root; command/formatter/lsp/mcp today). */
+/** The records-slot key of a record descriptor (path root; command/formatter/lsp/mcp/provider/references today). */
 function recordSlotKey(setting: OpencodeSetting): keyof OpencodeRecordStates {
   return setting.path[0] as keyof OpencodeRecordStates;
 }
@@ -212,9 +253,20 @@ export default function OpenCodeApp() {
     return () => window.clearTimeout(t);
   }, [pending]);
 
-  /** Optimistically apply one setting and post it; at most one in-flight save per key. */
+  /**
+   * Optimistically apply one setting and post it; at most one in-flight save per key.
+   * `displayValue` (optional) overrides what the optimistic payload shows while the
+   * posted `value` is in flight — used by partial-commit shallowObject rows (agent
+   * 扩展), which post a single-field edit map but should keep rendering the sibling
+   * leaves' current values until the post-write re-push.
+   */
   const applySetting = useCallback(
-    (setting: OpencodeSetting, value: OpencodeSettingValue, prev: OpencodeSettingValue) => {
+    (
+      setting: OpencodeSetting,
+      value: OpencodeSettingValue,
+      prev: OpencodeSettingValue,
+      displayValue?: OpencodeSettingValue,
+    ) => {
       if (preEditRef.current.has(setting.key)) {
         return;
       }
@@ -222,7 +274,9 @@ export default function OpenCodeApp() {
       setPending((current) => new Set(current).add(setting.key));
       setError(null);
       setPayload((current) =>
-        current === null ? current : { ...current, values: { ...current.values, [setting.key]: value } },
+        current === null
+          ? current
+          : { ...current, values: { ...current.values, [setting.key]: displayValue ?? value } },
       );
       postToHost({ type: "opencodeSetSetting", payload: { key: setting.key, value } });
     },
@@ -254,13 +308,14 @@ export default function OpenCodeApp() {
 
   /**
    * Commit a string-field draft: empty → null (remove key); over-length keeps the draft
-   * and shows the length error without posting; no-op when unchanged.
+   * and shows the length error without posting; no-op when unchanged. The bound is the
+   * descriptor maxLen when set (defaultAgent), else the shared string cap.
    */
   const commitString = useCallback(
     (setting: OpencodeSetting, raw: string, prev: OpencodeSettingValue) => {
       // The blur path is the only caller, so focus tracking ends here.
       focusedKeyRef.current = null;
-      const parsed = parseOpencodeStringInput(raw);
+      const parsed = parseOpencodeStringInput(raw, setting.maxLen ?? OPENCODE_STRING_VALUE_MAX_LENGTH);
       if (parsed.kind === "invalid") {
         // Keep the draft so the user can fix the text; post nothing.
         setError(parsed.error);
@@ -594,7 +649,7 @@ export default function OpenCodeApp() {
                 <label key={name} className="provider-chip">
                   <input
                     type="checkbox"
-                    aria-label={`禁用供应商 ${name}`}
+                    aria-label={`${setting.label} ${name}`}
                     checked={current.includes(name)}
                     disabled={isPending}
                     onChange={(e) => {
@@ -632,6 +687,26 @@ export default function OpenCodeApp() {
           />
         );
       }
+      case "pluginList": {
+        // Hand-written [名称, 选项] tuples in the file: read-only notice — the host
+        // write gate (PLUGIN_PROTECTED) would reject the whole-array commit anyway.
+        if (payload?.pluginProtected) {
+          return (
+            <span className="set-row-hint" role="note">
+              配置包含手写条目（如 [名称, 选项] 元组），请在文件中手动编辑
+            </span>
+          );
+        }
+        const current = toStringList(value);
+        return (
+          <StringListEditor
+            value={current}
+            disabled={isPending}
+            parseEntry={parsePluginListEntry}
+            onChange={(next) => applySetting(setting, next, current ?? null)}
+          />
+        );
+      }
       case "enumChips": {
         const current = toStringList(value);
         return (
@@ -645,12 +720,20 @@ export default function OpenCodeApp() {
       }
       case "shallowObject": {
         const current = toShallowObject(value);
+        // Shared-parent rows (agent 扩展) commit per-leaf: only the edited field is
+        // posted, so sibling leaves the read cannot surface (hand-written permission
+        // pattern objects) are never collateral damage; the optimistic display still
+        // merges the edit onto the full map until the post-write re-push.
+        const partial = isSharedShallowObjectParent(setting);
         return (
           <ShallowObjectFields
             fields={setting.fields ?? []}
             value={current}
             disabled={isPending}
-            onChange={(next) => applySetting(setting, next, current ?? null)}
+            partialCommit={partial}
+            onChange={(next) =>
+              applySetting(setting, next, current ?? null, partial ? { ...(current ?? {}), ...next } : undefined)
+            }
           />
         );
       }
