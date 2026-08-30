@@ -25,7 +25,7 @@ import * as vscode from "vscode";
 import { CMD, TEST_BRIDGE } from "../../../src/constants";
 import { BackupService } from "../../../src/core/backupService";
 import { ConfigStore } from "../../../src/core/configStore";
-import { parseSafe, validate } from "../../../src/core/jsoncEditor";
+import { parseSafe, setValues, validate } from "../../../src/core/jsoncEditor";
 import { PresetService } from "../../../src/core/presetService";
 import type { JsoncError, Preset } from "../../../src/core/types";
 import { OPENCODE_SETTINGS } from "../../../src/shared/protocol";
@@ -543,6 +543,12 @@ interface OpencodeInitMessage {
   values: Record<string, unknown>;
   configPath: string;
   models: unknown[];
+  /** 权限 group read aggregate (batch 2): string shorthand + per-tool actions + pattern-object tools. */
+  permission?: { shorthand?: unknown; tools?: Record<string, unknown>; advancedTools?: unknown[] };
+  /** MCP 服务器 group read aggregate (batch 2): declared servers with their disabled flags. */
+  mcp?: { name?: unknown; disabled?: unknown }[];
+  /** 终端界面 group face (batch 2): current tui.json theme + the tui.json path. */
+  tui?: { theme?: unknown; path?: unknown };
 }
 
 function opencodeInits(bridge: PanelBridge): OpencodeInitMessage[] {
@@ -1445,8 +1451,14 @@ function tests(): TestCase[] {
         await pollUntil(() => opencodeInits(bridge).length > 0, 20_000, "boot must push opencodeInit");
         const boot = opencodeInits(bridge)[0];
         // Fresh sandbox: the seeded fixture opencode.json sets none of the descriptors.
+        // Product rule (core readOpencodeSettingValues): file-targeted descriptors
+        // (tui.json) and the mcpServers kind are EXCLUDED from the scalar values map —
+        // their data rides the payload's dedicated tui/mcp fields (next test).
         const expected: Record<string, null> = {};
         for (const setting of OPENCODE_SETTINGS) {
+          if (setting.file !== undefined || setting.kind === "mcpServers") {
+            continue;
+          }
           expected[setting.key] = null;
         }
         assert.deepEqual(boot.values, expected, "every OPENCODE_SETTINGS key must be present and null");
@@ -1456,6 +1468,31 @@ function tests(): TestCase[] {
           "configPath must point into the sandbox config dir",
         );
         assert.ok(Array.isArray(boot.models) && boot.models.length > 0, "models must be a non-empty options array");
+      },
+    },
+    {
+      name: "OpenCode tab: boot opencodeInit 携带权限聚合、MCP 清单与 tui.json 路径（批量二载荷）",
+      fn: async () => {
+        assert.ok(managerBridge, "manager panel must still be open from the previous step");
+        const boot = opencodeInits(managerBridge)[0];
+        assert.ok(boot, "the boot opencodeInit must still be captured");
+        // The fixture seeds no `permission` key → all-empty aggregate; its single
+        // declared mcp server (openmemory, enabled:true) reads as NOT disabled.
+        assert.deepEqual(
+          boot.permission,
+          { shorthand: null, tools: {}, advancedTools: [] },
+          "boot permission aggregate must be empty on a permission-less fixture",
+        );
+        assert.deepEqual(
+          boot.mcp,
+          [{ name: "openmemory", disabled: false }],
+          "boot mcp list must mirror the fixture's declared server as enabled",
+        );
+        assert.deepEqual(
+          boot.tui,
+          { theme: null, path: path.join(configDir, "tui.json") },
+          "boot tui face must read theme:null and point at the sandbox tui.json",
+        );
       },
     },
     {
@@ -1524,6 +1561,264 @@ function tests(): TestCase[] {
       },
     },
     {
+      name: "opencodeSetSetting permissionTools 写 bash:ask，模式对象兄弟键字节级保留",
+      fn: async () => {
+        assert.ok(managerBridge, "manager panel must still be open from the previous step");
+        const bridge = managerBridge;
+        const opencodeJson = path.join(configDir, "opencode.json");
+        // Seed a hand-written pattern-object sibling under permission.edit through the
+        // product's own JSONC editor — the per-tool write must never touch it
+        // (advanced-rule protection, design red line).
+        const seeded = setValues(fs.readFileSync(opencodeJson, "utf8"), [
+          { path: ["permission", "edit"], value: { "*.secret": "deny" } },
+        ]);
+        fs.writeFileSync(opencodeJson, seeded);
+        const snippetOf = (text: string): string => /"edit"\s*:\s*\{[^{}]*\}/.exec(text)?.[0] ?? "";
+        const snippetBefore = snippetOf(seeded);
+        assert.ok(snippetBefore.length > 0, "the seeded pattern sibling must be present before the write");
+
+        const repliesBefore = settingSavedReplies(bridge, "opencodeSettingSaved").length;
+        const initsBefore = opencodeInits(bridge).length;
+        bridge.deliver({ type: "opencodeSetSetting", payload: { key: "permissionTools", value: { bash: "ask" } } });
+        await pollUntil(
+          () =>
+            settingSavedReplies(bridge, "opencodeSettingSaved")
+              .slice(repliesBefore)
+              .some((reply) => reply.ok && reply.key === "permissionTools"),
+          10_000,
+          "opencodeSetSetting(permissionTools) must produce an opencodeSettingSaved(ok:true) reply",
+        );
+        await pollUntil(
+          () =>
+            opencodeInits(bridge)
+              .slice(initsBefore)
+              .some((init) => init.permission?.tools?.bash === "ask"),
+          10_000,
+          "a refreshed opencodeInit carrying permission.tools.bash:ask must follow the write",
+        );
+
+        assertNoJsoncErrors(opencodeJson);
+        const after = fs.readFileSync(opencodeJson, "utf8");
+        const parsed = parseSafe<Record<string, unknown>>(after).value;
+        assert.ok(parsed !== null && !Array.isArray(parsed), "opencode.json must parse to an object");
+        const permission = parsed.permission as { bash?: unknown; edit?: unknown } | undefined;
+        assert.equal(permission?.bash, "ask", "on-disk permission.bash must be ask");
+        assert.deepEqual(permission?.edit, { "*.secret": "deny" }, "the pattern-object sibling must survive the write");
+        assert.equal(snippetOf(after), snippetBefore, "the pattern-object sibling must survive byte-identically");
+      },
+    },
+    {
+      name: "opencodeSetSetting mcpServers 开关翻转：禁用写 enabled:false、启用移除 enabled、其余字段保留",
+      fn: async () => {
+        assert.ok(managerBridge, "manager panel must still be open from the previous step");
+        const bridge = managerBridge;
+        const opencodeJson = path.join(configDir, "opencode.json");
+        const url = (server: string): string => `https://${server}.mcp.example.internal/mcp`;
+        // Seed two extra declared servers next to the fixture's openmemory entry:
+        // context7 starts ENABLED (no enabled key), websearch starts DISABLED.
+        fs.writeFileSync(
+          opencodeJson,
+          setValues(fs.readFileSync(opencodeJson, "utf8"), [
+            { path: ["mcp", "context7"], value: { type: "remote", url: url("context7") } },
+            { path: ["mcp", "websearch"], value: { type: "remote", url: url("websearch"), enabled: false } },
+          ]),
+        );
+        // Observe the seeded pre-state through the panel's own re-read: a permissionTools
+        // write with an EMPTY map produces zero edits (file stays byte-identical) but still
+        // gets its ok reply + fresh opencodeInit re-push. The watcher echo is deliberately
+        // NOT relied upon — in the e2e host the extension's fs.watch re-push is not
+        // dependable (existing tests treat it as "may add one more").
+        const bytesBeforeTrigger = fs.readFileSync(opencodeJson);
+        const repliesBeforeTrigger = settingSavedReplies(bridge, "opencodeSettingSaved").length;
+        const initsBefore = opencodeInits(bridge).length;
+        bridge.deliver({ type: "opencodeSetSetting", payload: { key: "permissionTools", value: {} } });
+        await pollUntil(
+          () =>
+            opencodeInits(bridge)
+              .slice(initsBefore)
+              .some(
+                (init) =>
+                  Array.isArray(init.mcp) &&
+                  init.mcp.some((server) => server.name === "context7" && server.disabled === false) &&
+                  init.mcp.some((server) => server.name === "websearch" && server.disabled === true),
+              ),
+          10_000,
+          "the no-op write's re-push must carry the seeded mcp list (context7 enabled, websearch disabled)",
+        );
+        await pollUntil(
+          () =>
+            settingSavedReplies(bridge, "opencodeSettingSaved")
+              .slice(repliesBeforeTrigger)
+              .some((reply) => reply.ok && reply.key === "permissionTools"),
+          10_000,
+          "the no-op permissionTools write must produce an opencodeSettingSaved(ok:true) reply",
+        );
+        assert.ok(
+          fs.readFileSync(opencodeJson).equals(bytesBeforeTrigger),
+          "the empty permissionTools trigger write must leave opencode.json byte-identical",
+        );
+
+        const repliesBefore = settingSavedReplies(bridge, "opencodeSettingSaved").length;
+        bridge.deliver({ type: "opencodeSetSetting", payload: { key: "mcpServers", value: { context7: true } } });
+        await pollUntil(
+          () =>
+            settingSavedReplies(bridge, "opencodeSettingSaved")
+              .slice(repliesBefore)
+              .some((reply) => reply.ok && reply.key === "mcpServers"),
+          10_000,
+          "the context7 disable write must produce an opencodeSettingSaved(ok:true) reply",
+        );
+        assertNoJsoncErrors(opencodeJson);
+        let parsed = parseSafe<{ mcp?: Record<string, Record<string, unknown>> }>(
+          fs.readFileSync(opencodeJson, "utf8"),
+        ).value;
+        assert.ok(parsed !== null, "opencode.json must parse to an object");
+        assert.equal(parsed.mcp?.context7?.enabled, false, "disabling context7 must set mcp.context7.enabled=false");
+        assert.equal(parsed.mcp?.context7?.url, url("context7"), "the disable write must preserve context7's url");
+        assert.equal(parsed.mcp?.context7?.type, "remote", "the disable write must preserve context7's type");
+        assert.equal(parsed.mcp?.openmemory?.enabled, true, "unrelated entries must stay untouched");
+
+        const repliesBeforeSecond = settingSavedReplies(bridge, "opencodeSettingSaved").length;
+        const initsBeforeSecond = opencodeInits(bridge).length;
+        bridge.deliver({ type: "opencodeSetSetting", payload: { key: "mcpServers", value: { websearch: false } } });
+        await pollUntil(
+          () =>
+            settingSavedReplies(bridge, "opencodeSettingSaved")
+              .slice(repliesBeforeSecond)
+              .some((reply) => reply.ok && reply.key === "mcpServers"),
+          10_000,
+          "the websearch enable write must produce an opencodeSettingSaved(ok:true) reply",
+        );
+        await pollUntil(
+          () =>
+            opencodeInits(bridge)
+              .slice(initsBeforeSecond)
+              .some(
+                (init) =>
+                  Array.isArray(init.mcp) &&
+                  init.mcp.some((server) => server.name === "context7" && server.disabled === true) &&
+                  init.mcp.some((server) => server.name === "websearch" && server.disabled === false),
+              ),
+          10_000,
+          "a refreshed opencodeInit must reflect both toggles (context7 disabled, websearch enabled)",
+        );
+
+        assertNoJsoncErrors(opencodeJson);
+        parsed = parseSafe<{ mcp?: Record<string, Record<string, unknown>> }>(
+          fs.readFileSync(opencodeJson, "utf8"),
+        ).value;
+        assert.ok(parsed !== null, "opencode.json must parse to an object");
+        assert.equal(
+          "enabled" in (parsed.mcp?.websearch ?? {}),
+          false,
+          "enabling websearch must REMOVE its enabled override key",
+        );
+        assert.equal(parsed.mcp?.websearch?.url, url("websearch"), "the enable write must preserve websearch's url");
+        assert.equal(parsed.mcp?.context7?.enabled, false, "context7 must stay disabled after the second write");
+      },
+    },
+    {
+      name: "opencodeSetSetting instructions 写入数组与 null 删除键",
+      fn: async () => {
+        assert.ok(managerBridge, "manager panel must still be open from the previous step");
+        const bridge = managerBridge;
+        const opencodeJson = path.join(configDir, "opencode.json");
+        const repliesBefore = settingSavedReplies(bridge, "opencodeSettingSaved").length;
+        const initsBefore = opencodeInits(bridge).length;
+
+        bridge.deliver({ type: "opencodeSetSetting", payload: { key: "instructions", value: ["./AGENTS.md"] } });
+        await pollUntil(
+          () =>
+            settingSavedReplies(bridge, "opencodeSettingSaved")
+              .slice(repliesBefore)
+              .some((reply) => reply.ok && reply.key === "instructions"),
+          10_000,
+          "opencodeSetSetting(instructions) must produce an opencodeSettingSaved(ok:true) reply",
+        );
+        await pollUntil(
+          () =>
+            opencodeInits(bridge)
+              .slice(initsBefore)
+              .some((init) => Array.isArray(init.values.instructions)),
+          10_000,
+          "a refreshed opencodeInit carrying the instructions array must follow the write",
+        );
+        assertNoJsoncErrors(opencodeJson);
+        let parsed = parseSafe<Record<string, unknown>>(fs.readFileSync(opencodeJson, "utf8")).value;
+        assert.ok(parsed !== null && !Array.isArray(parsed), "opencode.json must parse to an object");
+        assert.deepEqual(parsed.instructions, ["./AGENTS.md"], "on-disk instructions must be the written array");
+
+        const repliesBeforeRemoval = settingSavedReplies(bridge, "opencodeSettingSaved").length;
+        bridge.deliver({ type: "opencodeSetSetting", payload: { key: "instructions", value: null } });
+        await pollUntil(
+          () =>
+            settingSavedReplies(bridge, "opencodeSettingSaved")
+              .slice(repliesBeforeRemoval)
+              .some((reply) => reply.ok && reply.key === "instructions"),
+          10_000,
+          "the null write must produce its own opencodeSettingSaved(ok:true) reply",
+        );
+        assertNoJsoncErrors(opencodeJson);
+        parsed = parseSafe<Record<string, unknown>>(fs.readFileSync(opencodeJson, "utf8")).value;
+        assert.ok(parsed !== null && !Array.isArray(parsed), "opencode.json must parse to an object");
+        assert.equal("instructions" in parsed, false, "the null write must remove the instructions key from disk");
+      },
+    },
+    {
+      name: "opencodeSetSetting tuiTheme 写入 tui.json（opencode.json 不受影响），null 删除主题",
+      fn: async () => {
+        assert.ok(managerBridge, "manager panel must still be open from the previous step");
+        const bridge = managerBridge;
+        const opencodeJson = path.join(configDir, "opencode.json");
+        const tuiJson = path.join(configDir, "tui.json");
+        assert.equal(fs.existsSync(tuiJson), false, "the sandbox must not carry a tui.json before the first write");
+        const opencodeBytesBefore = fs.readFileSync(opencodeJson);
+        const repliesBefore = settingSavedReplies(bridge, "opencodeSettingSaved").length;
+        const initsBefore = opencodeInits(bridge).length;
+
+        bridge.deliver({ type: "opencodeSetSetting", payload: { key: "tuiTheme", value: "catppuccin" } });
+        await pollUntil(
+          () =>
+            settingSavedReplies(bridge, "opencodeSettingSaved")
+              .slice(repliesBefore)
+              .some((reply) => reply.ok && reply.key === "tuiTheme"),
+          10_000,
+          "opencodeSetSetting(tuiTheme) must produce an opencodeSettingSaved(ok:true) reply",
+        );
+        await pollUntil(
+          () =>
+            opencodeInits(bridge)
+              .slice(initsBefore)
+              .some((init) => init.tui?.theme === "catppuccin"),
+          10_000,
+          "a refreshed opencodeInit carrying tui.theme:catppuccin must follow the write",
+        );
+
+        assert.ok(fs.existsSync(tuiJson), "the write must create configDir/tui.json");
+        assertNoJsoncErrors(tuiJson);
+        let tui = JSON.parse(fs.readFileSync(tuiJson, "utf8")) as { theme?: unknown };
+        assert.equal(tui.theme, "catppuccin", "tui.json must carry theme:catppuccin");
+        assert.ok(
+          fs.readFileSync(opencodeJson).equals(opencodeBytesBefore),
+          "the tuiTheme write must not modify opencode.json",
+        );
+
+        const repliesBeforeRemoval = settingSavedReplies(bridge, "opencodeSettingSaved").length;
+        bridge.deliver({ type: "opencodeSetSetting", payload: { key: "tuiTheme", value: null } });
+        await pollUntil(
+          () =>
+            settingSavedReplies(bridge, "opencodeSettingSaved")
+              .slice(repliesBeforeRemoval)
+              .some((reply) => reply.ok && reply.key === "tuiTheme"),
+          10_000,
+          "the null write must produce its own opencodeSettingSaved(ok:true) reply",
+        );
+        assertNoJsoncErrors(tuiJson);
+        tui = JSON.parse(fs.readFileSync(tuiJson, "utf8")) as { theme?: unknown };
+        assert.equal("theme" in tui, false, "the null write must remove the theme key from tui.json");
+      },
+    },
+    {
       name: "omoSetSetting writes teamMode:true to the legacy target, configInit re-push carries omo values",
       fn: async () => {
         assert.ok(managerBridge, "manager panel must still be open from the previous step");
@@ -1560,6 +1855,104 @@ function tests(): TestCase[] {
           true,
           "legacy oh-my-opencode.json must carry top-level team_mode.enabled",
         );
+      },
+    },
+    {
+      name: "omoSetSetting omoModels 写 legacy 顶层 models 目录并回推 configInit，null 条目删别名",
+      fn: async () => {
+        assert.ok(managerBridge, "manager panel must still be open from the previous step");
+        const bridge = managerBridge;
+        const agentConfig = path.join(configDir, "oh-my-opencode.json");
+        const configInitsBefore = bridge.outbound.filter((message) => message.type === "configInit").length;
+
+        bridge.deliver({
+          type: "omoSetSetting",
+          payload: { key: "omoModels", value: { "kimi-max": { model: "kimi/kimi-k2", reasoning: "high" } } },
+        });
+        await pollUntil(
+          () => settingSavedReplies(bridge, "omoSettingSaved").some((reply) => reply.ok && reply.key === "omoModels"),
+          10_000,
+          "omoSetSetting(omoModels) must produce an omoSettingSaved(ok:true) reply",
+        );
+        await pollUntil(
+          () =>
+            bridge.outbound
+              .slice(configInitsBefore)
+              .some(
+                (message) =>
+                  message.type === "configInit" &&
+                  (
+                    (message.payload as { omo?: { omoModels?: Record<string, unknown> } } | undefined)?.omo
+                      ?.omoModels?.["kimi-max"] as { model?: unknown; reasoning?: unknown } | undefined
+                  )?.model === "kimi/kimi-k2",
+              ),
+          10_000,
+          'a refreshed configInit carrying omo.omoModels["kimi-max"] must follow the write',
+        );
+
+        // Legacy target: `models` is a SHARED-scope key — top level of the target file
+        // for both generations (the omo [opencode]-block scope is covered by unit tests).
+        assertNoJsoncErrors(agentConfig);
+        let agent = JSON.parse(fs.readFileSync(agentConfig, "utf8")) as { models?: Record<string, unknown> };
+        assert.deepEqual(
+          agent.models?.["kimi-max"],
+          { model: "kimi/kimi-k2", reasoning: "high" },
+          'legacy target must carry top-level models["kimi-max"] with model+reasoning',
+        );
+
+        const repliesBeforeRemoval = settingSavedReplies(bridge, "omoSettingSaved").length;
+        bridge.deliver({ type: "omoSetSetting", payload: { key: "omoModels", value: { "kimi-max": null } } });
+        await pollUntil(
+          () =>
+            settingSavedReplies(bridge, "omoSettingSaved")
+              .slice(repliesBeforeRemoval)
+              .some((reply) => reply.ok && reply.key === "omoModels"),
+          10_000,
+          "the null-entry write must produce its own omoSettingSaved(ok:true) reply",
+        );
+        assertNoJsoncErrors(agentConfig);
+        agent = JSON.parse(fs.readFileSync(agentConfig, "utf8")) as { models?: Record<string, unknown> };
+        assert.equal("kimi-max" in (agent.models ?? {}), false, "the null entry must remove the alias from disk");
+      },
+    },
+    {
+      name: "omoSetSetting disabledAgents 写 legacy 顶层数组，null 删除键",
+      fn: async () => {
+        assert.ok(managerBridge, "manager panel must still be open from the previous step");
+        const bridge = managerBridge;
+        const agentConfig = path.join(configDir, "oh-my-opencode.json");
+        const repliesBefore = settingSavedReplies(bridge, "omoSettingSaved").length;
+
+        bridge.deliver({ type: "omoSetSetting", payload: { key: "disabledAgents", value: ["oracle", "metis"] } });
+        await pollUntil(
+          () =>
+            settingSavedReplies(bridge, "omoSettingSaved")
+              .slice(repliesBefore)
+              .some((reply) => reply.ok && reply.key === "disabledAgents"),
+          10_000,
+          "omoSetSetting(disabledAgents) must produce an omoSettingSaved(ok:true) reply",
+        );
+        assertNoJsoncErrors(agentConfig);
+        let agent = JSON.parse(fs.readFileSync(agentConfig, "utf8")) as { disabled_agents?: unknown };
+        assert.deepEqual(
+          agent.disabled_agents,
+          ["oracle", "metis"],
+          "legacy target must carry the top-level disabled_agents array",
+        );
+
+        const repliesBeforeRemoval = settingSavedReplies(bridge, "omoSettingSaved").length;
+        bridge.deliver({ type: "omoSetSetting", payload: { key: "disabledAgents", value: null } });
+        await pollUntil(
+          () =>
+            settingSavedReplies(bridge, "omoSettingSaved")
+              .slice(repliesBeforeRemoval)
+              .some((reply) => reply.ok && reply.key === "disabledAgents"),
+          10_000,
+          "the null write must produce its own omoSettingSaved(ok:true) reply",
+        );
+        assertNoJsoncErrors(agentConfig);
+        agent = JSON.parse(fs.readFileSync(agentConfig, "utf8")) as { disabled_agents?: unknown };
+        assert.equal("disabled_agents" in agent, false, "the null write must remove the disabled_agents key from disk");
       },
     },
     {
@@ -1605,6 +1998,57 @@ function tests(): TestCase[] {
         assert.ok(
           fs.readFileSync(agentConfig).equals(agentBytesBefore),
           "a rejected omoSetSetting must not write the agent config",
+        );
+      },
+    },
+    {
+      name: "非法值兜底：未知权限工具与非法模型别名的写入收 !ok 回执且不写盘",
+      fn: async () => {
+        assert.ok(managerBridge, "manager panel must still be open from the previous step");
+        const bridge = managerBridge;
+        const opencodeJson = path.join(configDir, "opencode.json");
+        const agentConfig = path.join(configDir, "oh-my-opencode.json");
+        const opencodeBytesBefore = fs.readFileSync(opencodeJson);
+        const agentBytesBefore = fs.readFileSync(agentConfig);
+        const opencodeRepliesBefore = settingSavedReplies(bridge, "opencodeSettingSaved").length;
+        const omoRepliesBefore = settingSavedReplies(bridge, "omoSettingSaved").length;
+
+        // Known descriptors with OUT-OF-KIND values: "hack" is not one of the 15
+        // permission tools; "bad alias!" fails the model-alias charset.
+        bridge.deliver({ type: "opencodeSetSetting", payload: { key: "permissionTools", value: { hack: "allow" } } });
+        bridge.deliver({
+          type: "omoSetSetting",
+          payload: { key: "omoModels", value: { "bad alias!": { model: "x/y" } } },
+        });
+        await pollUntil(
+          () =>
+            settingSavedReplies(bridge, "opencodeSettingSaved")
+              .slice(opencodeRepliesBefore)
+              .some(
+                (reply) =>
+                  reply.ok === false && reply.key === "permissionTools" && (reply.error ?? "").includes("格式无法识别"),
+              ),
+          10_000,
+          "an unknown permission tool must produce a !ok reply echoing the key",
+        );
+        await pollUntil(
+          () =>
+            settingSavedReplies(bridge, "omoSettingSaved")
+              .slice(omoRepliesBefore)
+              .some(
+                (reply) =>
+                  reply.ok === false && reply.key === "omoModels" && (reply.error ?? "").includes("格式无法识别"),
+              ),
+          10_000,
+          "an invalid model alias must produce a !ok reply echoing the key",
+        );
+        assert.ok(
+          fs.readFileSync(opencodeJson).equals(opencodeBytesBefore),
+          "the rejected permissionTools write must not write opencode.json",
+        );
+        assert.ok(
+          fs.readFileSync(agentConfig).equals(agentBytesBefore),
+          "the rejected omoModels write must not write the agent config",
         );
       },
     },
@@ -2677,6 +3121,50 @@ function tests(): TestCase[] {
           Promise.resolve(vscode.commands.executeCommand(CMD.refreshTree)),
           10_000,
           "refreshTree should resolve",
+        );
+      },
+    },
+
+    {
+      name: "opencodeSetSetting compaction 写入：null 叶子字段不落盘（disk 只保留 {auto:false}）",
+      fn: async () => {
+        assert.ok(managerBridge, "manager panel must still be open from the previous step");
+        const bridge = managerBridge;
+        const opencodeJson = path.join(configDir, "opencode.json");
+        const repliesBefore = settingSavedReplies(bridge, "opencodeSettingSaved").length;
+        const initsBefore = opencodeInits(bridge).length;
+
+        bridge.deliver({
+          type: "opencodeSetSetting",
+          payload: { key: "compaction", value: { auto: false, tail_turns: null } },
+        });
+        // shallowObject values carrying null leaves (field = 未设置, exactly what the
+        // webview's ShallowObjectFields commits) are accepted by the validator and
+        // written per-leaf: disk carries ONLY the non-null fields — compaction === { auto: false }.
+        await pollUntil(
+          () =>
+            settingSavedReplies(bridge, "opencodeSettingSaved")
+              .slice(repliesBefore)
+              .some((reply) => reply.ok && reply.key === "compaction"),
+          10_000,
+          "opencodeSetSetting(compaction) must produce an opencodeSettingSaved(ok:true) reply",
+        );
+        await pollUntil(
+          () =>
+            opencodeInits(bridge)
+              .slice(initsBefore)
+              .some((init) => (init.values.compaction as { auto?: unknown } | null)?.auto === false),
+          10_000,
+          "a refreshed opencodeInit carrying compaction.auto:false must follow the write",
+        );
+
+        assertNoJsoncErrors(opencodeJson);
+        const parsed = parseSafe<{ compaction?: Record<string, unknown> }>(fs.readFileSync(opencodeJson, "utf8")).value;
+        assert.ok(parsed !== null, "opencode.json must parse to an object");
+        assert.deepEqual(
+          parsed.compaction,
+          { auto: false },
+          "disk compaction must carry ONLY the non-null fields — no literal null leaf",
         );
       },
     },
