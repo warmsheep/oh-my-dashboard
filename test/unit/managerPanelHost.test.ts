@@ -481,6 +481,28 @@ describe("manager panel OpenCode/OMO 设置 protocol", () => {
     expect(fs.readFileSync(path.join(root, "opencode.json"), "utf8")).toBe("{,}\n");
   });
 
+  it("a string-typed record root replies !ok with the Chinese OPENCODE_SETTING_CONFLICT message", async () => {
+    const { deps, root } = makeDeps();
+    fs.writeFileSync(path.join(root, "opencode.json"), '{ "command": "oops" }\n');
+    const panel = await bootedPanel(deps);
+    const initsBefore = messagesOfType(panel, "opencodeInit").length;
+
+    panel.receive({ type: "opencodeSetSetting", payload: { key: "command", value: { a: { template: "x" } } } });
+
+    const replies = messagesOfType(panel, "opencodeSettingSaved");
+    expect(replies.length).toBe(1);
+    expect(replies[0]).toEqual({
+      type: "opencodeSettingSaved",
+      payload: {
+        ok: false,
+        key: "command",
+        error: "配置文件中同名键的类型与写入冲突，请先修正该键或改用文件编辑",
+      },
+    });
+    expect(messagesOfType(panel, "opencodeInit").length).toBe(initsBefore);
+    expect(fs.readFileSync(path.join(root, "opencode.json"), "utf8")).toBe('{ "command": "oops" }\n');
+  });
+
   it("ready pushes an opencodeInit carrying the permission/mcp/tui aggregate fields", async () => {
     const { deps, root } = makeDeps();
     fs.writeFileSync(
@@ -684,5 +706,112 @@ describe("manager panel OpenCode/OMO 设置 protocol", () => {
     const inits = messagesOfType(panel, "opencodeInit");
     const tui = (inits[inits.length - 1] as { payload: { tui: { theme: string | null } } }).payload.tui;
     expect(tui.theme).toBe("dracula");
+  });
+});
+
+describe("manager panel OpenCode record kinds (batch-4)", () => {
+  /** Open a booted panel on the settings tab; returns it for message delivery. */
+  async function bootedPanel(deps: ManagerPanelDeps): Promise<FakePanel> {
+    await openManagerPanel(ctx, deps, { tab: "settings" });
+    const panel = createdPanels[0];
+    panel.receive({ type: "ready" });
+    return panel;
+  }
+
+  function messagesOfType(panel: FakePanel, type: string): unknown[] {
+    return panel.posted.filter((message) => (message as { type?: string }).type === type);
+  }
+
+  it("boot payload carries the records slot with the seeded modes", async () => {
+    const { deps, root } = makeDeps();
+    fs.writeFileSync(
+      path.join(root, "opencode.json"),
+      JSON.stringify({
+        command: { fix: { template: "run fix $ARGUMENTS", agent: "build" } },
+        formatter: false,
+      }),
+    );
+    const panel = await bootedPanel(deps);
+    const inits = messagesOfType(panel, "opencodeInit");
+    expect(inits.length).toBe(1);
+    const records = (
+      inits[0] as {
+        payload: {
+          records: {
+            command: unknown;
+            formatter: unknown;
+            lsp: unknown;
+          };
+        };
+      }
+    ).payload.records;
+    expect(records.command).toEqual({
+      mode: "entries",
+      booleanValue: null,
+      entries: { fix: { template: "run fix $ARGUMENTS", agent: "build" } },
+    });
+    expect(records.formatter).toEqual({ mode: "boolean", booleanValue: false, entries: {} });
+    expect(records.lsp).toEqual({ mode: "unset", booleanValue: null, entries: {} });
+  });
+
+  it("opencodeSetSetting command entry passes validation, writes through and re-pushes records", async () => {
+    const { deps, root } = makeDeps();
+    fs.writeFileSync(path.join(root, "opencode.json"), "{}\n");
+    const panel = await bootedPanel(deps);
+
+    panel.receive({
+      type: "opencodeSetSetting",
+      payload: { key: "command", value: { fix: { template: "run $ARGUMENTS", subtask: true } } },
+    });
+
+    expect(panel.posted).toContainEqual({ type: "opencodeSettingSaved", payload: { ok: true, key: "command" } });
+    const written = JSON.parse(fs.readFileSync(path.join(root, "opencode.json"), "utf8"));
+    expect(written.command).toEqual({ fix: { template: "run $ARGUMENTS", subtask: true } });
+    const inits = messagesOfType(panel, "opencodeInit");
+    const records = (inits[inits.length - 1] as { payload: { records: { command: unknown } } }).payload.records;
+    expect(records.command).toEqual({
+      mode: "entries",
+      booleanValue: null,
+      entries: { fix: { template: "run $ARGUMENTS", subtask: true } },
+    });
+  });
+
+  it("an invalid record value (missing template) hits the !ok backstop and writes nothing", async () => {
+    const { deps, root } = makeDeps();
+    fs.writeFileSync(path.join(root, "opencode.json"), "{}\n");
+    const panel = await bootedPanel(deps);
+    const bytesBefore = fs.readFileSync(path.join(root, "opencode.json"));
+
+    panel.receive({
+      type: "opencodeSetSetting",
+      payload: { key: "command", value: { fix: { description: "no template" } } },
+    });
+
+    const replies = messagesOfType(panel, "opencodeSettingSaved");
+    expect(replies.length).toBe(1);
+    expect(replies[0]).toEqual({
+      type: "opencodeSettingSaved",
+      payload: { ok: false, key: "command", error: "设置请求格式无法识别" },
+    });
+    expect(fs.readFileSync(path.join(root, "opencode.json")).equals(bytesBefore)).toBe(true);
+  });
+
+  it("formatterMaster write-through lands the boolean in opencode.json and the payload", async () => {
+    const { deps, root } = makeDeps();
+    fs.writeFileSync(path.join(root, "opencode.json"), "{}\n");
+    const panel = await bootedPanel(deps);
+
+    panel.receive({ type: "opencodeSetSetting", payload: { key: "formatterMaster", value: false } });
+
+    expect(panel.posted).toContainEqual({
+      type: "opencodeSettingSaved",
+      payload: { ok: true, key: "formatterMaster" },
+    });
+    expect(JSON.parse(fs.readFileSync(path.join(root, "opencode.json"), "utf8")).formatter).toBe(false);
+    const inits = messagesOfType(panel, "opencodeInit");
+    const formatter = (
+      inits[inits.length - 1] as { payload: { records: { formatter: { mode: string; booleanValue: unknown } } } }
+    ).payload.records.formatter;
+    expect(formatter).toEqual({ mode: "boolean", booleanValue: false, entries: {} });
   });
 });
