@@ -11,12 +11,15 @@ import { parseStringListEntry, removeListEntry } from "./helpers";
 export default function StringListEditor({
   value,
   disabled,
+  maxEntries,
   onChange,
 }: {
   /** Current entries; null = key absent (未设置). */
   value: string[] | null;
   /** Pending-write disable shared with the hosting set-row. */
   disabled: boolean;
+  /** Add-row entry cap (default 16 — core's STRING_LIST_MAX_ENTRIES; recordEditor fields pass 8). */
+  maxEntries?: number;
   /** Commit the next list (null = empty → remove the key). */
   onChange(next: string[] | null): void;
 }) {
@@ -26,7 +29,7 @@ export default function StringListEditor({
   const [error, setError] = useState<string | null>(null);
 
   const commitDraft = () => {
-    const parsed = parseStringListEntry(draft, entries);
+    const parsed = parseStringListEntry(draft, entries, maxEntries);
     if (parsed.kind === "invalid") {
       setError(parsed.error);
       return;

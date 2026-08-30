@@ -4,16 +4,21 @@ import type {
   OpencodePermissionState,
   OpencodeSettingField,
   PermissionToolsValue,
+  RecordAggregate,
+  RecordEditorValue,
+  RecordEntryValue,
+  RecordFieldDef,
+  RecordFieldValue,
   ShallowObjectValue,
 } from "@shared/protocol";
 
 /**
  * Pure helpers behind the controls/ composite editors (stringList / enumChips /
- * shallowObject / modelCatalog / permissionTools / mcpServers kinds). Bound mirrors
- * of the core validators: core keeps its constants private (node-side module), so the
- * numeric values here MUST stay in sync with the STRING_LIST_* constants of
- * src/core/opencodeSettings.ts and the MODEL_ALIAS_* / MODEL_CATALOG_* constants of
- * src/core/omoSettings.ts.
+ * shallowObject / modelCatalog / permissionTools / mcpServers / recordEditor /
+ * recordMaster kinds). Bound mirrors of the core validators: core keeps its
+ * constants private (node-side module), so the numeric values here MUST stay in
+ * sync with the STRING_LIST_* constants of src/core/opencodeSettings.ts and the
+ * MODEL_ALIAS_* / MODEL_CATALOG_* constants of src/core/omoSettings.ts.
  */
 
 // Mirror of core STRING_LIST_MAX_ENTRIES / STRING_LIST_ENTRY_MAX_LENGTH (opencodeSettings.ts).
@@ -26,6 +31,13 @@ const ORDERED_LIST_ENTRY_MAX_LENGTH = 64;
 const MODEL_CATALOG_MAX_ENTRIES = 32;
 const MODEL_ALIAS_MAX_LENGTH = 32;
 const MODEL_ALIAS_PATTERN = /^[A-Za-z0-9._-]+$/;
+// Mirror of core RECORD_NAME_* / RECORD_MAX_ENTRIES / RECORD_TEXT_* / RECORD_STRING_LIST_* (opencodeSettings.ts).
+const RECORD_NAME_PATTERN = /^[A-Za-z0-9._-]+$/;
+const RECORD_NAME_MAX_LENGTH = 64;
+const RECORD_MAX_ENTRIES = 32;
+const RECORD_TEXT_MAX_LENGTH = 256;
+const RECORD_MULTILINE_MAX_LENGTH = 8000;
+const RECORD_STRING_LIST_MAX_ENTRIES = 8;
 
 /** Permission action literals (structural mirror of PermissionToolsValue's value union). */
 export type PermissionAction = "allow" | "ask" | "deny";
@@ -65,9 +77,13 @@ function parseUniqueListEntry(
   return { kind: "commit", value: text };
 }
 
-/** stringList add-row validation (≤16 entries of ≤256 chars — core's STRING_LIST_* bounds). */
-export function parseStringListEntry(raw: string, current: readonly string[]): ListEntryParse {
-  return parseUniqueListEntry(raw, current, STRING_LIST_MAX_ENTRIES, STRING_LIST_ENTRY_MAX_LENGTH);
+/** stringList add-row validation (≤16 entries of ≤256 chars by default — recordEditor fields pass their own cap). */
+export function parseStringListEntry(
+  raw: string,
+  current: readonly string[],
+  maxEntries: number = STRING_LIST_MAX_ENTRIES,
+): ListEntryParse {
+  return parseUniqueListEntry(raw, current, maxEntries, STRING_LIST_ENTRY_MAX_LENGTH);
 }
 
 /** orderedList add-row validation (≤64 entries of ≤64 chars — core's ORDERED_LIST_* bounds). */
@@ -240,6 +256,256 @@ export function withoutCatalogAlias(catalog: ModelCatalogValue | null, alias: st
 }
 
 // ---------------------------------------------------------------------------
+// shared commit parsers
+// ---------------------------------------------------------------------------
+
+/**
+ * Shared commit parser behind the string-kind pre-checks: trim, empty → null
+ * (remove the key), over the bound → invalid (keep the draft + Chinese error).
+ */
+export function parseBoundedStringInput(
+  raw: string,
+  maxLength: number,
+): { kind: "commit"; value: string | null } | { kind: "invalid"; error: string } {
+  const text = raw.trim();
+  if (text === "") {
+    return { kind: "commit", value: null };
+  }
+  if (text.length > maxLength) {
+    return { kind: "invalid", error: `最长 ${maxLength} 个字符` };
+  }
+  return { kind: "commit", value: text };
+}
+
+// ---------------------------------------------------------------------------
+// recordEditor / recordMaster kinds
+// ---------------------------------------------------------------------------
+
+/** Name rules of one recordEditor descriptor (OpencodeSetting["record"] minus fields). */
+export interface RecordNameRules {
+  namePattern?: string;
+  nameMaxLen?: number;
+  maxEntries?: number;
+}
+
+/** Chinese error for an invalid new-entry name, or null when the name is acceptable. */
+export function recordEntryNameError(
+  raw: string,
+  existingNames: readonly string[],
+  rules: RecordNameRules,
+): string | null {
+  const text = raw.trim();
+  if (text === "") {
+    return "名称不能为空";
+  }
+  const nameMaxLen = rules.nameMaxLen ?? RECORD_NAME_MAX_LENGTH;
+  if (text.length > nameMaxLen) {
+    return `最长 ${nameMaxLen} 个字符`;
+  }
+  const pattern = rules.namePattern === undefined ? RECORD_NAME_PATTERN : new RegExp(rules.namePattern);
+  if (!pattern.test(text)) {
+    return "仅限字母、数字与 . _ -";
+  }
+  if (existingNames.includes(text)) {
+    return "名称已存在";
+  }
+  const maxEntries = rules.maxEntries ?? RECORD_MAX_ENTRIES;
+  if (existingNames.length >= maxEntries) {
+    return `最多 ${maxEntries} 条`;
+  }
+  return null;
+}
+
+/**
+ * Parse a text/multiline field commit: trimmed text, empty → null (field unset),
+ * over the kind's bound (text 256 / multiline 8000, field.maxLen overrides) →
+ * invalid — the same rules core's isValidRecordFieldLeaf enforces, pre-checked
+ * here so the user gets a proper message instead of the protocol backstop error.
+ */
+export function parseRecordTextField(
+  raw: string,
+  field: RecordFieldDef,
+): { kind: "commit"; value: string | null } | { kind: "invalid"; error: string } {
+  return parseBoundedStringInput(raw, recordFieldMaxLen(field));
+}
+
+/** Field-kind bound of a text/multiline field (field.maxLen ?? text 256 / multiline 8000). */
+export function recordFieldMaxLen(field: RecordFieldDef): number {
+  return field.maxLen ?? (field.kind === "multiline" ? RECORD_MULTILINE_MAX_LENGTH : RECORD_TEXT_MAX_LENGTH);
+}
+
+/** Entry cap of a record stringList field (field.maxEntries ?? core's 8-entry default). */
+export function recordStringListMaxEntries(field: RecordFieldDef): number {
+  return field.maxEntries ?? RECORD_STRING_LIST_MAX_ENTRIES;
+}
+
+/** One required field left empty by a live entry (drives the commit block + inline errors). */
+export interface RecordRequiredGap {
+  name: string;
+  label: string;
+}
+
+/** Required-field labels missing from ONE entry (empty string / null / absent leaves). */
+function recordEntryGaps(fields: readonly RecordFieldDef[], entry: RecordEntryValue): string[] {
+  const labels: string[] = [];
+  for (const field of fields) {
+    if (field.required !== true) {
+      continue;
+    }
+    const leaf = entry[field.key];
+    if (leaf === undefined || leaf === null || (typeof leaf === "string" && leaf.trim() === "")) {
+      labels.push(field.label);
+    }
+  }
+  return labels;
+}
+
+/**
+ * Required fields left empty by the LIVE entries of a snapshot (null markers are
+ * deletions and skipped) — the commit gate: while non-empty, NO change may call
+ * onChange; the offending entries must be fixed or deleted first.
+ */
+export function recordRequiredGaps(
+  fields: readonly RecordFieldDef[],
+  value: RecordEditorValue | null,
+): RecordRequiredGap[] {
+  const gaps: RecordRequiredGap[] = [];
+  for (const [name, entry] of Object.entries(value ?? {})) {
+    if (entry === null) {
+      continue;
+    }
+    for (const label of recordEntryGaps(fields, entry)) {
+      gaps.push({ name, label });
+    }
+  }
+  return gaps;
+}
+
+/** Chinese notice naming the entry that blocks a commit (other entries first, the edited one last). */
+export function recordBlockedCommitError(gaps: readonly RecordRequiredGap[], editedName: string): string | null {
+  const first = gaps.find((gap) => gap.name !== editedName) ?? gaps[0];
+  return first === undefined ? null : `「${first.name}」的${first.label}不能为空，修改已暂存`;
+}
+
+/**
+ * Upsert one entry into the snapshot (aggregated full-snapshot commit semantics).
+ * The mirror end of the seam: when a snapshot built this way collapses to null
+ * (see {@link withoutRecordEntry}), core's opencodeSettingEdits recordEditor
+ * dispatch turns that null into a whole-key remove.
+ */
+export function withRecordEntry(
+  value: RecordEditorValue | null,
+  name: string,
+  entry: RecordEntryValue,
+): RecordEditorValue {
+  return { ...(value ?? {}), [name]: entry };
+}
+
+/**
+ * Delete one live name: a null deletion marker; collapses to null when nothing live
+ * remains. That null is the seam contract with core's opencodeSettingEdits
+ * recordEditor dispatch (src/core/opencodeSettings.ts): 空 → null 整键 → the host
+ * removes the whole record key, so deleting the last entry truly clears it.
+ */
+export function withoutRecordEntry(value: RecordEditorValue | null, name: string): RecordEditorValue | null {
+  const next: RecordEditorValue = { ...(value ?? {}) };
+  next[name] = null;
+  return recordLiveCount(next) === 0 ? null : next;
+}
+
+/** Count of live (non-null) entries — null entries are deletion markers only. */
+function recordLiveCount(value: RecordEditorValue): number {
+  return Object.values(value).filter((entry) => entry !== null).length;
+}
+
+/** One full-snapshot commit plan: "blocked" holds everything locally, "commit" posts the snapshot. */
+export type RecordCommitPlan =
+  | { kind: "blocked"; gaps: RecordRequiredGap[] }
+  | { kind: "commit"; value: RecordEditorValue | null; postedNames: string[] };
+
+/**
+ * Assemble the next full-snapshot commit from the read form: `edits` overlays held
+ * field changes onto the live entries (names absent from the read form are
+ * never-committed draft adds), `deletedName` marks one live entry as a null
+ * deletion marker (rename = delete marker + draft add in one plan). Live entries
+ * with empty required fields BLOCK the commit (nothing may post while any gap
+ * remains); committable drafts (no gaps + at least one set leaf — an all-empty
+ * entry would write nothing) ride along and are reported in postedNames so the
+ * caller can drop exactly those working copies.
+ */
+export function planRecordCommit(
+  fields: readonly RecordFieldDef[],
+  value: RecordEditorValue | null,
+  edits: Record<string, RecordEntryValue>,
+  deletedName: string | null,
+): RecordCommitPlan {
+  const snapshot: RecordEditorValue = {};
+  for (const [name, entry] of Object.entries(value ?? {})) {
+    // The read form never carries null markers; skip defensively anyway.
+    if (entry === null) {
+      continue;
+    }
+    snapshot[name] = deletedName === name ? null : { ...entry, ...edits[name] };
+  }
+  const gaps = recordRequiredGaps(fields, snapshot);
+  if (gaps.length > 0) {
+    return { kind: "blocked", gaps };
+  }
+  const postedNames = Object.keys(snapshot);
+  for (const [name, entry] of Object.entries(edits)) {
+    if (snapshot[name] === undefined && isCommittableRecordDraft(fields, entry)) {
+      snapshot[name] = entry;
+      postedNames.push(name);
+    }
+  }
+  return { kind: "commit", value: recordLiveCount(snapshot) === 0 ? null : snapshot, postedNames };
+}
+
+/** True when a never-committed draft may enter the snapshot: no gaps and at least one set leaf. */
+function isCommittableRecordDraft(fields: readonly RecordFieldDef[], entry: RecordEntryValue): boolean {
+  if (recordEntryGaps(fields, entry).length > 0) {
+    return false;
+  }
+  return Object.values(entry).some((leaf: RecordFieldValue) => leaf !== null && leaf !== undefined);
+}
+
+/** True while the record key holds named entries — the master select stays locked (已有条目). */
+export function isRecordMasterLocked(aggregate: RecordAggregate): boolean {
+  return aggregate.mode === "entries" && Object.keys(aggregate.entries).length > 0;
+}
+
+/** True while the record key is the boolean master form — the entries editor stays locked (已设全局开关). */
+export function isRecordEntriesLocked(aggregate: RecordAggregate): boolean {
+  return aggregate.mode === "boolean";
+}
+
+/**
+ * Next aggregate after one recordEditor/recordMaster commit settles optimistically:
+ * the per-name diff of the snapshot onto the read form (null markers delete,
+ * absent names untouched), null → unset, booleans → the master form.
+ */
+export function recordAggregateAfterCommit(
+  aggregate: RecordAggregate,
+  value: RecordEditorValue | boolean | null,
+): RecordAggregate {
+  if (typeof value === "boolean") {
+    return { mode: "boolean", booleanValue: value, entries: {} };
+  }
+  if (value === null) {
+    return { mode: "unset", booleanValue: null, entries: {} };
+  }
+  const entries: Record<string, RecordEntryValue> = { ...aggregate.entries };
+  for (const [name, entry] of Object.entries(value)) {
+    if (entry === null) {
+      delete entries[name];
+    } else {
+      entries[name] = entry;
+    }
+  }
+  return { mode: "entries", booleanValue: null, entries };
+}
+
+// ---------------------------------------------------------------------------
 // shared layout helper
 // ---------------------------------------------------------------------------
 
@@ -253,6 +519,8 @@ const WIDE_KINDS: ReadonlySet<string> = new Set([
   "permissionTools",
   "mcpServers",
   "modelCatalog",
+  "recordEditor",
+  "recordMaster",
 ]);
 
 /** True when the descriptor's control needs the wrapping full-width set-row layout. */

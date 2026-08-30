@@ -1,23 +1,41 @@
-import type { OpencodePermissionState, OpencodeSettingField, ShallowObjectValue } from "@shared/protocol";
-import { OMO_MISC_SETTINGS, OPENCODE_PERMISSION_TOOLS } from "@shared/protocol";
+import type {
+  OpencodePermissionState,
+  OpencodeSettingField,
+  RecordAggregate,
+  RecordEditorValue,
+  RecordFieldDef,
+  ShallowObjectValue,
+} from "@shared/protocol";
+import { OMO_MISC_SETTINGS, OPENCODE_PERMISSION_TOOLS, OPENCODE_SETTINGS } from "@shared/protocol";
 import { describe, expect, it } from "vitest";
 
 import {
   effectiveShallowBoolean,
   isPermissionShorthandLocked,
   isPermissionToolsLocked,
+  isRecordEntriesLocked,
+  isRecordMasterLocked,
   isWideSettingKind,
   mcpToggleEdit,
   modelAliasError,
   moveListEntry,
   parseNumberFieldInput,
   parseOrderedListEntry,
+  parseRecordTextField,
   parseStringListEntry,
   permissionToolEdit,
+  planRecordCommit,
+  recordAggregateAfterCommit,
+  recordBlockedCommitError,
+  recordEntryNameError,
+  recordFieldMaxLen,
+  recordRequiredGaps,
   removeListEntry,
   toggleChipValue,
   withCatalogEntry,
   withoutCatalogAlias,
+  withoutRecordEntry,
+  withRecordEntry,
 } from "./helpers";
 
 describe("parseStringListEntry (add-row validation)", () => {
@@ -256,6 +274,227 @@ describe("mcpToggleEdit", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// recordEditor / recordMaster kinds (命令 / 格式化 / LSP)
+// ---------------------------------------------------------------------------
+
+/** The real command descriptor fields (template multiline required + friends). */
+const COMMAND_FIELDS: RecordFieldDef[] = [
+  (OPENCODE_SETTINGS.find((setting) => setting.key === "command")?.record?.fields ?? []) as RecordFieldDef[],
+][0];
+const FORMATTER_FIELDS: RecordFieldDef[] = [
+  (OPENCODE_SETTINGS.find((setting) => setting.key === "formatterEntries")?.record?.fields ?? []) as RecordFieldDef[],
+][0];
+
+function aggregate(partial: Partial<RecordAggregate>): RecordAggregate {
+  return { mode: "unset", booleanValue: null, entries: {}, ...partial };
+}
+
+describe("recordEntryNameError (add-row validation)", () => {
+  it("accepts trimmed npm-ish names and rejects empty / charset / length violations", () => {
+    expect(recordEntryNameError("  review-notes  ", [], {})).toBeNull();
+    expect(recordEntryNameError("ts-server.v2_x", [], {})).toBeNull();
+    expect(recordEntryNameError("", [], {})).toBe("名称不能为空");
+    expect(recordEntryNameError("bad name!", [], {})).toBe("仅限字母、数字与 . _ -");
+    expect(recordEntryNameError("x".repeat(65), [], {})).toBe("最长 64 个字符");
+    expect(recordEntryNameError("x".repeat(64), [], {})).toBeNull();
+  });
+
+  it("rejects duplicates against live AND draft names, and enforces the entry cap", () => {
+    expect(recordEntryNameError("review", ["review", "lint"], {})).toBe("名称已存在");
+    expect(recordEntryNameError(" review ", ["review"], {})).toBe("名称已存在");
+    const full = Array.from({ length: 32 }, (_, i) => `cmd-${i}`);
+    expect(recordEntryNameError("new", full, {})).toBe("最多 32 条");
+    expect(recordEntryNameError("new", full.slice(0, 31), {})).toBeNull();
+  });
+
+  it("honours descriptor overrides of the name rules", () => {
+    expect(recordEntryNameError("a b", [], { namePattern: "^[a-z ]+$" })).toBeNull();
+    expect(recordEntryNameError("abcdef", [], { nameMaxLen: 4 })).toBe("最长 4 个字符");
+    expect(recordEntryNameError("new", ["a"], { maxEntries: 1 })).toBe("最多 1 条");
+  });
+});
+
+describe("parseRecordTextField (text/multiline field commits)", () => {
+  it("trims into a commit and commits null for empty input (field unset)", () => {
+    expect(parseRecordTextField("  do the thing  ", { key: "t", kind: "text", label: "t" })).toEqual({
+      kind: "commit",
+      value: "do the thing",
+    });
+    expect(parseRecordTextField("   ", { key: "t", kind: "multiline", label: "t" })).toEqual({
+      kind: "commit",
+      value: null,
+    });
+  });
+
+  it("bounds text at 256 and multiline at 8000 by default, honouring field.maxLen", () => {
+    expect(parseRecordTextField("x".repeat(257), { key: "t", kind: "text", label: "t" })).toEqual({
+      kind: "invalid",
+      error: "最长 256 个字符",
+    });
+    expect(parseRecordTextField("x".repeat(256), { key: "t", kind: "text", label: "t" })).toEqual({
+      kind: "commit",
+      value: "x".repeat(256),
+    });
+    expect(parseRecordTextField("x".repeat(8001), { key: "t", kind: "multiline", label: "t" })).toEqual({
+      kind: "invalid",
+      error: "最长 8000 个字符",
+    });
+    expect(parseRecordTextField("x".repeat(11), { key: "t", kind: "text", label: "t", maxLen: 10 })).toEqual({
+      kind: "invalid",
+      error: "最长 10 个字符",
+    });
+  });
+});
+
+describe("recordFieldMaxLen (shared bound derivation of parseRecordTextField + the inline error)", () => {
+  it("bounds text at 256 and multiline at 8000 by default, honouring field.maxLen", () => {
+    expect(recordFieldMaxLen({ key: "t", kind: "text", label: "t" })).toBe(256);
+    expect(recordFieldMaxLen({ key: "m", kind: "multiline", label: "m" })).toBe(8000);
+    expect(recordFieldMaxLen({ key: "t", kind: "text", label: "t", maxLen: 10 })).toBe(10);
+    expect(recordFieldMaxLen({ key: "m", kind: "multiline", label: "m", maxLen: 100 })).toBe(100);
+  });
+});
+
+describe("record snapshot row ops", () => {
+  it("upserts entries into the full snapshot (withRecordEntry)", () => {
+    expect(withRecordEntry(null, "lint", { template: "run lint" })).toEqual({ lint: { template: "run lint" } });
+    expect(withRecordEntry({ lint: { template: "a" } }, "lint", { template: "b" })).toEqual({
+      lint: { template: "b" },
+    });
+  });
+
+  it("deletes live names with a null marker and collapses to null when nothing live remains", () => {
+    expect(withoutRecordEntry({ a: { template: "x" }, b: { template: "y" } }, "a")).toEqual({
+      a: null,
+      b: { template: "y" },
+    });
+    expect(withoutRecordEntry({ a: { template: "x" } }, "a")).toBeNull();
+    expect(withoutRecordEntry(null, "a")).toBeNull();
+  });
+});
+
+describe("recordRequiredGaps (commit block)", () => {
+  it("flags only required fields left empty by live entries (null markers skipped)", () => {
+    const value: RecordEditorValue = {
+      ok: { template: "x" },
+      broken: {},
+      deleted: null,
+      blank: { template: "   " },
+    };
+    expect(recordRequiredGaps(COMMAND_FIELDS, value)).toEqual([
+      { name: "broken", label: "模板" },
+      { name: "blank", label: "模板" },
+    ]);
+    expect(recordRequiredGaps(COMMAND_FIELDS, null)).toEqual([]);
+  });
+
+  it("reports nothing for descriptors without required fields", () => {
+    expect(recordRequiredGaps(FORMATTER_FIELDS, { empty: {} })).toEqual([]);
+  });
+
+  it("names the blocking entry in the Chinese blocked-commit notice (others first)", () => {
+    const gaps = [
+      { name: "edited", label: "模板" },
+      { name: "other", label: "模板" },
+    ];
+    expect(recordBlockedCommitError(gaps, "edited")).toBe("「other」的模板不能为空，修改已暂存");
+    expect(recordBlockedCommitError(gaps, "elsewhere")).toBe("「edited」的模板不能为空，修改已暂存");
+    expect(recordBlockedCommitError(gaps.slice(0, 1), "edited")).toBe("「edited」的模板不能为空，修改已暂存");
+    expect(recordBlockedCommitError([], "edited")).toBeNull();
+  });
+});
+
+describe("planRecordCommit (full-snapshot assembly)", () => {
+  it("applies held overlays onto live entries and posts the full snapshot", () => {
+    const value: RecordEditorValue = { lint: { template: "a" }, fmt: {} };
+    const plan = planRecordCommit(FORMATTER_FIELDS, value, { lint: { template: "a", disabled: true } }, null);
+    expect(plan).toEqual({
+      kind: "commit",
+      value: { lint: { template: "a", disabled: true }, fmt: {} },
+      postedNames: ["lint", "fmt"],
+    });
+  });
+
+  it("blocks while any live entry leaves a required field empty", () => {
+    const value: RecordEditorValue = { ok: { template: "x" }, broken: {} };
+    const plan = planRecordCommit(COMMAND_FIELDS, value, { ok: { template: "y" } }, null);
+    expect(plan).toEqual({ kind: "blocked", gaps: [{ name: "broken", label: "模板" }] });
+  });
+
+  it("marks deletions with null entries and collapses to null when nothing live remains", () => {
+    const value: RecordEditorValue = { a: { template: "x" }, b: { template: "y" } };
+    expect(planRecordCommit(COMMAND_FIELDS, value, {}, "a")).toEqual({
+      kind: "commit",
+      value: { a: null, b: { template: "y" } },
+      postedNames: ["a", "b"],
+    });
+    expect(planRecordCommit(COMMAND_FIELDS, { a: { template: "x" } }, {}, "a")).toEqual({
+      kind: "commit",
+      value: null,
+      postedNames: ["a"],
+    });
+  });
+
+  it("rename rides along as delete-marker + new entry in one snapshot", () => {
+    const value: RecordEditorValue = { old: { template: "x" } };
+    const plan = planRecordCommit(COMMAND_FIELDS, value, { new: { template: "x" } }, "old");
+    expect(plan).toEqual({
+      kind: "commit",
+      value: { old: null, new: { template: "x" } },
+      postedNames: ["old", "new"],
+    });
+  });
+
+  it("includes committable drafts (no gaps + at least one set leaf) and holds the rest", () => {
+    const value: RecordEditorValue = { keep: { template: "x" } };
+    const edits = {
+      ready: { template: "t", agent: "build" },
+      gapped: { agent: "build" },
+      hollow: {},
+    };
+    const plan = planRecordCommit(COMMAND_FIELDS, value, edits, null);
+    expect(plan.kind).toBe("commit");
+    if (plan.kind === "commit") {
+      expect(plan.value).toEqual({ keep: { template: "x" }, ready: { template: "t", agent: "build" } });
+      expect(plan.postedNames).toEqual(["keep", "ready"]);
+    }
+  });
+
+  it("skips null markers defensively present in the read form", () => {
+    const plan = planRecordCommit(FORMATTER_FIELDS, { ghost: null, live: {} }, {}, null);
+    expect(plan).toEqual({ kind: "commit", value: { live: {} }, postedNames: ["live"] });
+  });
+});
+
+describe("record interlocks + optimistic aggregate patch", () => {
+  it("locks the master while named entries exist and the entries while the boolean form is set", () => {
+    expect(isRecordMasterLocked(aggregate({ mode: "entries", entries: { prettier: {} } }))).toBe(true);
+    expect(isRecordMasterLocked(aggregate({ mode: "entries", entries: {} }))).toBe(false);
+    expect(isRecordMasterLocked(aggregate({ mode: "boolean", booleanValue: true }))).toBe(false);
+    expect(isRecordMasterLocked(aggregate({}))).toBe(false);
+    expect(isRecordEntriesLocked(aggregate({ mode: "boolean", booleanValue: false }))).toBe(true);
+    expect(isRecordEntriesLocked(aggregate({ mode: "entries", entries: { prettier: {} } }))).toBe(false);
+    expect(isRecordEntriesLocked(aggregate({}))).toBe(false);
+  });
+
+  it("derives the next entries-mode aggregate from a snapshot diff", () => {
+    const before = aggregate({ mode: "entries", entries: { a: { template: "x" }, b: {} } });
+    expect(recordAggregateAfterCommit(before, { a: null, b: { template: "y" }, c: { template: "z" } })).toEqual(
+      aggregate({ mode: "entries", entries: { b: { template: "y" }, c: { template: "z" } } }),
+    );
+  });
+
+  it("maps null to unset and booleans to the master form", () => {
+    const before = aggregate({ mode: "entries", entries: { a: {} } });
+    expect(recordAggregateAfterCommit(before, null)).toEqual(aggregate({}));
+    expect(recordAggregateAfterCommit(before, false)).toEqual(aggregate({ mode: "boolean", booleanValue: false }));
+    expect(recordAggregateAfterCommit(before, true)).toEqual(
+      aggregate({ mode: "boolean", booleanValue: true, entries: {} }),
+    );
+  });
+});
+
 describe("isWideSettingKind", () => {
   it("marks exactly the composite kinds for the full-width set-row layout", () => {
     for (const kind of [
@@ -267,6 +506,8 @@ describe("isWideSettingKind", () => {
       "permissionTools",
       "mcpServers",
       "modelCatalog",
+      "recordEditor",
+      "recordMaster",
     ]) {
       expect(isWideSettingKind(kind)).toBe(true);
     }
