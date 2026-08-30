@@ -1,17 +1,20 @@
 import { useState } from "react";
 
+import type { ListEntryParse } from "./helpers";
 import { parseStringListEntry, removeListEntry } from "./helpers";
 
 /**
  * stringList-kind editor: read-only rows with a 删除 button plus a bottom 添加 input
  * committing on Enter/blur. Invalid entries (empty / over-length / duplicate / cap)
  * keep the draft and show an inline red hint without committing. Every change
- * commits the whole list; an empty list commits null (remove the key).
+ * commits the whole list; an empty list commits null (remove the key). Kinds with
+ * their own entry rules (pluginList charset) inject them via parseEntry.
  */
 export default function StringListEditor({
   value,
   disabled,
   maxEntries,
+  parseEntry,
   onChange,
 }: {
   /** Current entries; null = key absent (未设置). */
@@ -20,6 +23,8 @@ export default function StringListEditor({
   disabled: boolean;
   /** Add-row entry cap (default 16 — core's STRING_LIST_MAX_ENTRIES; recordEditor fields pass 8). */
   maxEntries?: number;
+  /** Add-row commit validation override (pluginList passes its charset-capped mirror; defaults to the stringList rules + maxEntries). */
+  parseEntry?: (raw: string, current: readonly string[]) => ListEntryParse;
   /** Commit the next list (null = empty → remove the key). */
   onChange(next: string[] | null): void;
 }) {
@@ -27,9 +32,11 @@ export default function StringListEditor({
   // Add-row draft + inline validation error — local state, cleared on commit.
   const [draft, setDraft] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const validate =
+    parseEntry ?? ((raw: string, current: readonly string[]) => parseStringListEntry(raw, current, maxEntries));
 
   const commitDraft = () => {
-    const parsed = parseStringListEntry(draft, entries, maxEntries);
+    const parsed = validate(draft, entries);
     if (parsed.kind === "invalid") {
       setError(parsed.error);
       return;

@@ -9,6 +9,7 @@ import { useMemo, useState } from "react";
 
 import { groupModelsByProvider } from "../helpers";
 import {
+  parseNumberFieldInput,
   parseRecordTextField,
   planRecordCommit,
   recordBlockedCommitError,
@@ -18,14 +19,16 @@ import {
   type RecordNameRules,
 } from "./helpers";
 import StringListEditor from "./StringListEditor";
+import StringMapEditor from "./StringMapEditor";
 
 /**
  * recordEditor-kind editor (command / formatter / lsp entries): one row per named
  * entry (name button selects it, 删除 commits a null deletion marker for live names
  * or drops a never-committed draft locally) plus a 新增名称 row and the selected
  * entry's per-field form (text input, multiline textarea, s-switch, stringList,
- * enum / provider-grouped model selects). EVERY change commits the FULL snapshot —
- * including null deletion markers, collapsing to null when no live entry remains.
+ * stringMap KEY/VALUE rows, number input, enum / provider-grouped model selects).
+ * EVERY change commits the FULL snapshot — including null deletion markers,
+ * collapsing to null when no live entry remains.
  * Required-field gate: while any LIVE entry leaves a required field empty, no
  * onChange may fire; the change is held in a local working copy (surviving init
  * pushes, cleared with the entry on deletion) until the gap is fixed or the entry
@@ -153,6 +156,26 @@ export default function RecordEditor({
       if (!(name in current) || !(field.key in current[name])) {
         return current;
       }
+      // Pure inner copy: updaters must not mutate the state React still owns.
+      const next = { ...current, [name]: { ...current[name] } };
+      delete next[name][field.key];
+      return next;
+    });
+    setLeaf(name, field, parsed.value);
+  };
+
+  /** Blur path of a number field: invalid/noop keeps the draft, else commit the number (null = unset). */
+  const commitNumberField = (name: string, field: RecordFieldDef, raw: string) => {
+    const parsed = parseNumberFieldInput(raw, field);
+    if (parsed.kind !== "commit") {
+      // invalid keeps the draft + derived bounds error; noop (non-numeric text) stays held silently.
+      return;
+    }
+    setDrafts((current) => {
+      if (!(name in current) || !(field.key in current[name])) {
+        return current;
+      }
+      // Pure inner copy: updaters must not mutate the state React still owns.
       const next = { ...current, [name]: { ...current[name] } };
       delete next[name][field.key];
       return next;
@@ -184,23 +207,33 @@ export default function RecordEditor({
     }
   };
 
-  /** Text a text/multiline input shows: the in-progress draft ?? the entry's leaf. */
+  /** Text a text/multiline/number input shows: the in-progress draft ?? the entry's leaf. */
   const fieldText = (name: string, field: RecordFieldDef): string => {
     const draft = drafts[name]?.[field.key];
     if (draft !== undefined) {
       return draft;
     }
     const leaf = entryOf(name)[field.key];
+    if (field.kind === "number") {
+      return typeof leaf === "number" ? String(leaf) : "";
+    }
     return typeof leaf === "string" ? leaf : "";
   };
 
-  /** Derived inline error of one field: required-empty or over-length draft. */
+  /** Derived inline error of one field: required-empty, over-length draft, or number bounds. */
   const fieldError = (name: string, field: RecordFieldDef): string | null => {
     if (field.required === true && fieldText(name, field).trim() === "") {
       return `${field.label}不能为空`;
     }
     const draft = drafts[name]?.[field.key];
-    if (draft !== undefined && draft.trim().length > recordFieldMaxLen(field)) {
+    if (draft === undefined) {
+      return null;
+    }
+    if (field.kind === "number") {
+      const parsed = parseNumberFieldInput(draft, field);
+      return parsed.kind === "invalid" ? parsed.error : null;
+    }
+    if (draft.trim().length > recordFieldMaxLen(field)) {
       return `最长 ${recordFieldMaxLen(field)} 个字符`;
     }
     return null;
@@ -228,7 +261,7 @@ export default function RecordEditor({
   /** The selected entry's form: one row per RecordFieldDef, laid out per kind. */
   const renderField = (name: string, field: RecordFieldDef) => {
     const leaf = entryOf(name)[field.key] ?? null;
-    const wide = field.kind === "multiline" || field.kind === "stringList";
+    const wide = field.kind === "multiline" || field.kind === "stringList" || field.kind === "stringMap";
     return (
       <div className={wide ? "rec-field rec-field-wide" : "rec-field"} key={field.key}>
         <span className="rec-field-label" title={field.label}>
@@ -285,6 +318,33 @@ export default function RecordEditor({
             value={Array.isArray(leaf) ? leaf : null}
             disabled={disabled}
             maxEntries={recordStringListMaxEntries(field)}
+            onChange={(next) => setLeaf(name, field, next)}
+          />
+        )}
+        {field.kind === "number" && (
+          <input
+            className="ctl rec-input"
+            type="text"
+            inputMode="decimal"
+            aria-label={field.label}
+            disabled={disabled}
+            value={fieldText(name, field)}
+            onKeyDown={(e) => {
+              // Enter commits through the single blur path, so a commit can never fire twice.
+              if (e.key === "Enter") {
+                e.currentTarget.blur();
+              }
+            }}
+            onBlur={(e) => commitNumberField(name, field, e.currentTarget.value)}
+            onChange={(e) =>
+              setDrafts((current) => ({ ...current, [name]: { ...current[name], [field.key]: e.target.value } }))
+            }
+          />
+        )}
+        {field.kind === "stringMap" && (
+          <StringMapEditor
+            value={leaf !== null && typeof leaf === "object" && !Array.isArray(leaf) ? leaf : null}
+            disabled={disabled}
             onChange={(next) => setLeaf(name, field, next)}
           />
         )}

@@ -502,6 +502,21 @@ fieldset[disabled] {
   width: 90px;
 }
 
+/* Multiline leaf rows (agent 扩展 系统提示词): label on its own line, textarea below. */
+.ctl-row-multiline {
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+
+.ctl-multiline {
+  flex-basis: 100%;
+  min-height: 72px;
+  resize: vertical;
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
 /* Inline red validation hint under a composite control's rows (kept next to the draft). */
 .ctl-inline-error {
   font-size: 11px;

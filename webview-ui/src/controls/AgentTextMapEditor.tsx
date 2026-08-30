@@ -1,36 +1,51 @@
 import type { AgentTextMapValue } from "@shared/protocol";
 import { useState } from "react";
 
-import { agentTextRows, parseAgentTextInput, withAgentTextEntry, withoutAgentTextEntry } from "./helpers";
+import {
+  agentTextRows,
+  freeAgentTextRows,
+  identifierKeyError,
+  parseAgentTextInput,
+  withAgentTextEntry,
+  withoutAgentTextEntry,
+} from "./helpers";
 
 /**
- * agentTextMap-kind editor (系统提示词/提示词追加): one collapsible row per
- * descriptor agent (agent name + 已设置/未设置 badge + 展开) opening a textarea.
- * Commits fire on blur or the 完成 button (Enter inserts a newline — no special
- * casing); over-length drafts stay held with the inline ≤8000 error. Setting an
- * agent posts its text into the FULL map snapshot, clearing it posts a null
+ * agentTextMap-kind editor (系统提示词/提示词追加/分类提示词追加): one collapsible
+ * row per descriptor agent (agent name + 已设置/未设置 badge + 展开) opening a
+ * textarea. Commits fire on blur or the 完成 button (Enter inserts a newline — no
+ * special casing); over-length drafts stay held with the inline ≤8000 error. Setting
+ * an agent posts its text into the FULL map snapshot, clearing it posts a null
  * deletion marker; the snapshot NEVER collapses to whole-null (null = 无编辑,
  * never wipes the agents block). Text drafts are local state keyed by agent, so
- * configInit pushes never clobber in-progress typing.
+ * configInit pushes never clobber in-progress typing. Free-key descriptors
+ * (options absent, e.g. categories) render the live keys instead of a fixed row
+ * set and gain a 新增键名 add-row (identifier-charset pre-check).
  */
 export default function AgentTextMapEditor({
   value,
   agents,
+  freeKeys = false,
   disabled,
   onChange,
 }: {
   /** Current map; null = key absent, null entries = pending deletions (rendered 未设置). */
   value: AgentTextMapValue | null;
-  /** Fixed agent rows in descriptor order (options = KNOWN_AGENTS). */
+  /** Fixed agent rows in descriptor order (options = KNOWN_AGENTS); ignored in freeKeys mode. */
   agents: readonly string[];
+  /** Free-key mode (descriptor options absent): rows come from the live map keys plus an add-row. */
+  freeKeys?: boolean;
   /** Pending-write disable shared with the hosting set-row. */
   disabled: boolean;
   /** Commit the full map snapshot; an object is ALWAYS posted (never whole-null). */
   onChange(next: AgentTextMapValue | null): void;
 }) {
-  const rows = agentTextRows(agents, value);
+  const rows = freeKeys ? freeAgentTextRows(value) : agentTextRows(agents, value);
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
   const [drafts, setDrafts] = useState<Partial<Record<string, string>>>({});
+  const [newKey, setNewKey] = useState("");
+  const [newText, setNewText] = useState("");
+  const [addError, setAddError] = useState<string | null>(null);
 
   const toggleExpanded = (agent: string) => {
     setExpanded((current) => {
@@ -79,6 +94,30 @@ export default function AgentTextMapEditor({
     } else if (parsed.value !== null) {
       onChange(withAgentTextEntry(value, agent, parsed.value));
     }
+  };
+
+  /** 新增键名 path (free-key mode): charset-checked key + bounded text land as one entry. */
+  const addEntry = () => {
+    const keyProblem = identifierKeyError(
+      newKey,
+      rows.map((row) => row.agent),
+      "键名",
+      // Host-side agentTextMap carries no entry cap — only the identifier rules apply.
+      Number.POSITIVE_INFINITY,
+    );
+    if (keyProblem !== null) {
+      setAddError(keyProblem);
+      return;
+    }
+    const parsed = parseAgentTextInput(newText);
+    if (parsed.kind === "invalid" || parsed.value === null) {
+      setAddError(parsed.kind === "invalid" ? parsed.error : "文本不能为空");
+      return;
+    }
+    onChange(withAgentTextEntry(value, newKey.trim(), parsed.value));
+    setNewKey("");
+    setNewText("");
+    setAddError(null);
   };
 
   return (
@@ -131,6 +170,48 @@ export default function AgentTextMapEditor({
           </div>
         );
       })}
+      {freeKeys && (
+        <div className="ctl-expand">
+          <div className="ctl-row ctl-row-add">
+            <input
+              className="ctl ctl-add"
+              type="text"
+              placeholder="新键名"
+              aria-label="新增键名"
+              disabled={disabled}
+              value={newKey}
+              onChange={(e) => {
+                setNewKey(e.target.value);
+                setAddError(null);
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  addEntry();
+                }
+              }}
+            />
+            <button type="button" className="btn secondary ctl-x" disabled={disabled} onClick={addEntry}>
+              添加
+            </button>
+          </div>
+          <textarea
+            className="ctl ctl-textarea"
+            rows={3}
+            aria-label="新键名的文本"
+            disabled={disabled}
+            value={newText}
+            onChange={(e) => {
+              setNewText(e.target.value);
+              setAddError(null);
+            }}
+          />
+          {addError !== null && (
+            <span className="ctl-inline-error" role="alert">
+              {addError}
+            </span>
+          )}
+        </div>
+      )}
     </div>
   );
 }
