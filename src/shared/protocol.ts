@@ -468,12 +468,18 @@ export interface OmoMiscSetting {
     | "shallowObject"
     | "modelCatalog"
     | "agentPairMap"
-    | "agentTextMap";
+    | "agentTextMap"
+    | "numberMap";
   label: string;
   hint?: string;
   /** Chinese section label used to group rows in the OMO tab. */
   group: string;
-  /** Inclusive integer bounds of the number kind (defaults: 0..100); single source for the host validator AND the webview pre-check. */
+  /**
+   * Inclusive bounds: the number kind (integers, defaults 0..100) and, per entry,
+   * the numberMap kind (decimals allowed — schema minimums only, no integer forcing;
+   * an absent bound is unbounded). Single source for the host validator AND the
+   * webview pre-check.
+   */
   min?: number;
   max?: number;
   /**
@@ -486,17 +492,19 @@ export interface OmoMiscSetting {
   default?: boolean | number;
   /**
    * Selectable values for the enumChips (fixed multi-select) and enum (single-select) kinds;
-   * for the agentPairMap/agentTextMap kinds the field doubles as the AGENT KEY SET
-   * (KNOWN_AGENTS) — same options semantics as enumChips, applied to the value's
-   * map keys instead of array entries.
+   * for the agentPairMap/agentTextMap/numberMap kinds the field doubles as the MAP KEY SET
+   * — same options semantics as enumChips, applied to the value's map keys instead of
+   * array entries. When ABSENT on agentTextMap/numberMap, keys are free-form and must
+   * match the identifier charset the modelCatalog kind enforces on its aliases.
    */
   options?: string[];
   /** Field schemas of the shallowObject kind (Wave-1 type reused, no duplicate shape). */
   fields?: OpencodeSettingField[];
   /**
-   * agentPairMap/agentTextMap metadata: the sub-key under `agents.<name>` this
-   * descriptor owns (e.g. "ultrawork" → agents.<name>.ultrawork). The read/edit/
-   * validate paths all target [...sectionPath, "agents", name, leafKey].
+   * Nested leaf-map metadata (agents or categories target — field name kept for
+   * compat): the sub-key under `<path>.<name>` this descriptor owns (e.g.
+   * "temperature" → agents.<name>.temperature). The read/edit/validate paths all
+   * target [...sectionPath, ...path, name, leafKey].
    */
   agents?: { leafKey: string };
   /**
@@ -627,6 +635,23 @@ export const OMO_MISC_SETTINGS: readonly OmoMiscSetting[] = [
     ],
   },
   {
+    key: "autoUpdate",
+    path: ["auto_update"],
+    kind: "boolean",
+    label: "OMO 自动更新",
+    hint: "关闭后不再自动检查 oh-my-openagent 更新",
+    group: "稳定性",
+    default: true,
+  },
+  {
+    key: "modelFallback",
+    path: ["model_fallback"],
+    kind: "boolean",
+    label: "模型回退链",
+    hint: "启用内置模型回退链（与运行时回退互补）",
+    group: "稳定性",
+  },
+  {
     key: "disabledAgents",
     path: ["disabled_agents"],
     kind: "enumChips",
@@ -645,6 +670,49 @@ export const OMO_MISC_SETTINGS: readonly OmoMiscSetting[] = [
     label: "模型别名目录",
     hint: "别名可在智能体模型中直接引用（如 kimi-max）",
     group: "模型目录",
+  },
+  {
+    key: "omoDisabledProviders",
+    path: ["disabled_providers"],
+    kind: "stringList",
+    label: "停用供应商",
+    hint: "从 oh-my-openagent 模型解析中剔除的供应商（区别于 opencode.json 侧同名键）",
+    group: "模型目录",
+  },
+  {
+    key: "modelCapabilities",
+    path: ["model_capabilities"],
+    kind: "shallowObject",
+    label: "模型能力缓存",
+    hint: "models.dev 能力数据的缓存与刷新",
+    group: "模型目录",
+    // Schema source_url (uri string) deliberately unexposed: shallowObject has no
+    // plain-string FIELD kind — hand-write it in the config file.
+    fields: [
+      // Boolean defaults mirror the runtime gates (model-capabilities-status.ts):
+      // both features only stop on an explicit `=== false`, so absence = active.
+      { key: "enabled", kind: "boolean", label: "启用", default: true },
+      { key: "auto_refresh_on_start", kind: "boolean", label: "启动时刷新", default: true },
+      // Schema floor for refresh_timeout_ms is 1 (exclusiveMinimum 0); min 1000 is a
+      // deliberate UI contract (sub-second refresh timeouts are nonsensical), same
+      // pattern as babysittingTimeout below. default 5000 = runtime fallback
+      // (DEFAULT_REFRESH_TIMEOUT_MS in model-capabilities-status.ts).
+      { key: "refresh_timeout_ms", kind: "number", label: "刷新超时（毫秒）", integer: true, min: 1000, default: 5000 },
+    ],
+  },
+  {
+    key: "memory",
+    path: ["memory"],
+    kind: "shallowObject",
+    scope: "shared",
+    label: "记忆系统",
+    group: "记忆",
+    // Schema nested reflection/dream/etc. deliberately NOT exposed: shallowObject
+    // only supports flat leaves.
+    fields: [
+      { key: "enabled", kind: "boolean", label: "启用记忆", default: true },
+      { key: "tool_exposure", kind: "enum", label: "工具暴露方式", options: ["direct", "search"], default: "direct" },
+    ],
   },
   {
     key: "defaultMode",
@@ -680,6 +748,40 @@ export const OMO_MISC_SETTINGS: readonly OmoMiscSetting[] = [
     group: "实验特性",
   },
   {
+    key: "newTaskSystem",
+    path: ["new_task_system_enabled"],
+    kind: "boolean",
+    label: "新任务系统",
+    hint: "与 experimental.task_system 是两个不同开关",
+    group: "实验特性",
+  },
+  {
+    key: "preemptiveCompaction",
+    path: ["experimental", "preemptive_compaction"],
+    kind: "boolean",
+    label: "预防性压缩",
+    group: "实验特性",
+  },
+  {
+    key: "dynamicContextPruning",
+    path: ["experimental", "dynamic_context_pruning"],
+    kind: "shallowObject",
+    label: "动态上下文裁剪",
+    group: "实验特性",
+    // Schema nested turn_protection/protected_tools/strategies deliberately NOT
+    // exposed: shallowObject only supports flat leaves.
+    fields: [
+      { key: "enabled", kind: "boolean", label: "启用", default: false },
+      {
+        key: "notification",
+        kind: "enum",
+        label: "裁剪通知",
+        options: ["off", "minimal", "detailed"],
+        default: "detailed",
+      },
+    ],
+  },
+  {
     key: "backgroundConcurrency",
     path: ["background_task", "defaultConcurrency"],
     kind: "number",
@@ -689,6 +791,46 @@ export const OMO_MISC_SETTINGS: readonly OmoMiscSetting[] = [
     min: 0,
     max: 100,
     default: 5,
+  },
+  {
+    key: "defaultRunAgent",
+    path: ["default_run_agent"],
+    kind: "string",
+    maxLen: 64,
+    label: "默认 Run 智能体",
+    hint: "run 命令默认使用的智能体名",
+    group: "编排",
+  },
+  {
+    key: "babysittingTimeout",
+    path: ["babysitting", "timeout_ms"],
+    kind: "number",
+    label: "保姆超时（毫秒）",
+    hint: "不稳定智能体的监护超时",
+    group: "编排",
+    // Schema carries no bounds (only default 120000); the number-kind validator
+    // defaults to 0–100, so these ms bounds are a deliberate UI contract.
+    min: 1000,
+    max: 3600000,
+    default: 120000,
+  },
+  {
+    key: "providerConcurrency",
+    path: ["background_task", "providerConcurrency"],
+    kind: "numberMap",
+    min: 0,
+    group: "编排",
+    label: "供应商并发上限",
+    hint: "按供应商名的并发限制（0 = 不限）",
+  },
+  {
+    key: "modelConcurrency",
+    path: ["background_task", "modelConcurrency"],
+    kind: "numberMap",
+    min: 0,
+    group: "编排",
+    label: "模型并发上限",
+    hint: "按模型名的并发限制（优先于供应商限制）",
   },
   {
     key: "disabledMcps",
@@ -705,6 +847,38 @@ export const OMO_MISC_SETTINGS: readonly OmoMiscSetting[] = [
     options: ["goal", "refactor", "ulw-execute", "stop-continuation", "remove-ai-slops", "hyperplan"],
     label: "停用内置命令",
     hint: "命令名受 schema 严格枚举校验",
+    group: "MCP 与命令",
+  },
+  {
+    key: "disabledSkills",
+    path: ["disabled_skills"],
+    kind: "stringList",
+    label: "停用技能",
+    hint: "技能名列表",
+    group: "MCP 与命令",
+  },
+  {
+    key: "disabledHooks",
+    path: ["disabled_hooks"],
+    kind: "stringList",
+    label: "停用钩子",
+    hint: "如 comment-checker、auto-update-checker 等",
+    group: "MCP 与命令",
+  },
+  {
+    key: "disabledTools",
+    path: ["disabled_tools"],
+    kind: "stringList",
+    label: "停用工具",
+    hint: "插件注册的工具名",
+    group: "MCP 与命令",
+  },
+  {
+    key: "mcpEnvAllowlist",
+    path: ["mcp_env_allowlist"],
+    kind: "stringList",
+    label: "MCP 环境变量白名单",
+    hint: "允许 MCP 收到的环境变量名（仅用户层配置生效）",
     group: "MCP 与命令",
   },
   {
@@ -733,6 +907,22 @@ export const OMO_MISC_SETTINGS: readonly OmoMiscSetting[] = [
       { key: "commit_footer", kind: "boolean", label: "提交脚注", default: true },
       { key: "include_co_authored_by", kind: "boolean", label: "共同作者署名", default: true },
     ],
+  },
+  {
+    key: "ulwAutoCommit",
+    path: ["ulw_execute", "auto_commit"],
+    kind: "boolean",
+    label: "ulw-execute 自动提交",
+    group: "Git",
+    default: true,
+  },
+  {
+    key: "startWorkAutoCommit",
+    path: ["start_work", "auto_commit"],
+    kind: "boolean",
+    label: "start-work 自动提交",
+    group: "Git",
+    default: true,
   },
   {
     key: "tmuxParams",
@@ -779,6 +969,22 @@ export const OMO_MISC_SETTINGS: readonly OmoMiscSetting[] = [
         integer: true,
         default: 500,
       },
+      {
+        key: "max_messages_per_run",
+        kind: "number",
+        label: "单次运行最大消息数",
+        min: 1,
+        integer: true,
+        default: 10000,
+      },
+      {
+        key: "mailbox_poll_interval_ms",
+        kind: "number",
+        label: "邮箱轮询间隔（毫秒）",
+        min: 500,
+        integer: true,
+        default: 3000,
+      },
     ],
   },
   {
@@ -811,6 +1017,30 @@ export const OMO_MISC_SETTINGS: readonly OmoMiscSetting[] = [
     group: "覆写矩阵",
   },
   {
+    key: "agentTemperature",
+    path: ["agents"],
+    kind: "numberMap",
+    agents: { leafKey: "temperature" },
+    // Spread of the canonical constant (same pattern as disabledAgents).
+    options: [...KNOWN_AGENTS],
+    min: 0,
+    max: 2,
+    group: "覆写矩阵",
+    label: "温度覆写",
+    hint: "按智能体覆写采样温度（0–2，支持小数）",
+  },
+  {
+    key: "categoryTemperature",
+    path: ["categories"],
+    kind: "numberMap",
+    agents: { leafKey: "temperature" },
+    min: 0,
+    max: 2,
+    group: "覆写矩阵",
+    label: "分类温度",
+    hint: "按分类覆写采样温度（0–2，支持小数；分类名为自由输入）",
+  },
+  {
     key: "agentPrompt",
     path: ["agents"],
     kind: "agentTextMap",
@@ -828,6 +1058,15 @@ export const OMO_MISC_SETTINGS: readonly OmoMiscSetting[] = [
     options: [...KNOWN_AGENTS],
     label: "提示词追加",
     hint: "追加到系统提示词末尾的文本（≤8000 字符）",
+    group: "提示词",
+  },
+  {
+    key: "categoryPromptAppend",
+    path: ["categories"],
+    kind: "agentTextMap",
+    agents: { leafKey: "prompt_append" },
+    label: "分类提示词追加",
+    hint: "追加到分类系统提示词末尾的文本（≤8000 字符；分类名为自由输入）",
     group: "提示词",
   },
   {
@@ -894,9 +1133,28 @@ export const OMO_MISC_SETTINGS: readonly OmoMiscSetting[] = [
     kind: "shallowObject",
     label: "监视器",
     group: "工具链",
+    // Other schema leaves (batch_*/ring/line/pattern) stay unexposed.
     fields: [
       { key: "enabled", kind: "boolean", label: "启用", default: false },
       { key: "live_mode_enabled", kind: "boolean", label: "实时模式", default: false },
+      {
+        key: "max_monitors_per_session",
+        kind: "number",
+        label: "每会话最大监视器数",
+        min: 1,
+        max: 16,
+        integer: true,
+        default: 3,
+      },
+      {
+        key: "max_runtime_ms",
+        kind: "number",
+        label: "最大运行时长（毫秒）",
+        min: 1000,
+        integer: true,
+        default: 1800000,
+      },
+      { key: "allowed_commands", kind: "stringList", label: "允许的命令", hint: "监视器可执行的白名单命令" },
     ],
   },
   {
@@ -907,6 +1165,17 @@ export const OMO_MISC_SETTINGS: readonly OmoMiscSetting[] = [
     label: "界面语言",
     hint: "如 en/zh，≤16 字符",
     group: "工具链",
+  },
+  {
+    key: "openclawEnabled",
+    path: ["openclaw", "enabled"],
+    kind: "boolean",
+    default: false,
+    label: "OpenClaw 接入",
+    hint: "启用外部网关接入（网关明细需在配置文件中手写）",
+    group: "工具链",
+    // Schema gateways/hooks/replyListener are deep nested objects — deliberately
+    // unexposed (shallowObject only supports flat leaves); edit them in the file.
   },
   {
     key: "notificationForce",
@@ -924,6 +1193,13 @@ export type OmoMiscValues = Record<string, OmoSettingValue>;
 
 /** Max length of free-text opencode string settings (username); single source for the host validator AND the webview pre-check. */
 export const OPENCODE_STRING_VALUE_MAX_LENGTH = 64;
+
+/**
+ * Max length of a shallowObject multiline leaf (agent 系统提示词) after trimming.
+ * Single source for the host validator (isValidShallowObjectLeaf) AND the webview
+ * pre-check — same pattern as AGENT_TEXT_MAX_LENGTH (protocol-shared, no mirror).
+ */
+export const OPENCODE_MULTILINE_VALUE_MAX_LENGTH = 8000;
 
 /**
  * Max length of a tui.json theme name after trimming. Single source for core's
@@ -958,8 +1234,8 @@ export const OPENCODE_PERMISSION_TOOLS: readonly string[] = [
 /** stringList / orderedList value: an ordered list of short string entries (rule file paths, agent_order, …). */
 export type StringListValue = string[];
 
-/** shallowObject value: descriptor-field key → leaf value (null = field absent in file; string leaves come from enum fields). */
-export type ShallowObjectValue = Record<string, boolean | number | string | null>;
+/** shallowObject value: descriptor-field key → leaf value (null = field absent in file). */
+export type ShallowObjectValue = Record<string, boolean | number | string | string[] | null>;
 
 /** permissionTools value: tool name → action (null = remove that tool's key). */
 export type PermissionToolsValue = Record<string, "allow" | "ask" | "deny" | null>;
@@ -980,11 +1256,26 @@ export type AgentPairMapValue = Record<string, { model: string; reasoning: strin
  */
 export type AgentTextMapValue = Record<string, string | null>;
 
+/**
+ * numberMap value: map key → numeric leaf (flat at <path>.<key>, or nested at
+ * <path>.<name>.<leafKey> when the descriptor carries agents metadata); a null
+ * entry marks "remove that entry" (UI deletion intent only — reads never
+ * produce null).
+ */
+export type NumberMapValue = Record<string, number | null>;
+
 /** Max length of an agentTextMap entry after trimming; single source for the host validator and the webview pre-check. */
 export const AGENT_TEXT_MAX_LENGTH = 8000;
 
-/** One record field value: string (text/multiline/enum/model), boolean, string list, or null (= field unset). */
-export type RecordFieldValue = string | boolean | string[] | null;
+/**
+ * stringMap value (recordEditor environment/headers leaves): KEY → value. An empty
+ * string value is legal (env FOO=""); a null entry marks "remove that key" (UI
+ * deletion intent only — reads never produce null).
+ */
+export type StringMapValue = Record<string, string | null>;
+
+/** One record field value: string (text/multiline/enum/model), boolean, number, string list, string map, or null (= field unset). */
+export type RecordFieldValue = string | boolean | number | string[] | StringMapValue | null;
 
 /**
  * One named record entry (command/formatter/lsp): field key → value. Reads omit
@@ -995,10 +1286,16 @@ export type RecordEntryValue = Record<string, RecordFieldValue>;
 /** recordEditor write value: name → entry (null entry = delete that name; reads never produce null). */
 export type RecordEditorValue = Record<string, RecordEntryValue | null>;
 
-/** One field schema of a recordEditor descriptor (a leaf inside each named entry). */
+/**
+ * One field schema of a recordEditor descriptor (a leaf inside each named entry).
+ * The key MAY be dotted ("a.b" addresses the nested leaf entry.a.b — the core read
+ * path traverses the containers and the write path emits per-leaf edits at the
+ * nested path; the protocol entry itself stays FLAT, keyed by the dotted string,
+ * so webview drafts/gaps index it directly).
+ */
 export interface RecordFieldDef {
   key: string;
-  kind: "text" | "multiline" | "boolean" | "stringList" | "enum" | "model";
+  kind: "text" | "multiline" | "boolean" | "stringList" | "enum" | "model" | "number" | "stringMap";
   label: string;
   hint?: string;
   /** Selectable values of the enum kind (leaf values outside them are rejected). */
@@ -1009,6 +1306,11 @@ export interface RecordFieldDef {
   maxLen?: number;
   /** Entry cap of a stringList field (default 8; entry rules reuse the shared stringList bounds). */
   maxEntries?: number;
+  /** Inclusive bounds of the number kind (absent = unbounded). */
+  min?: number;
+  max?: number;
+  /** Reject non-integers when true; decimals allowed exactly when this is not set. */
+  integer?: boolean;
 }
 
 /**
@@ -1026,11 +1328,24 @@ export const OMO_REASONING_LEVELS: readonly string[] = [
   "auto",
 ];
 
-/** One field schema of a shallowObject-kind descriptor (a leaf key inside the object). */
+/**
+ * One field schema of a shallowObject-kind descriptor (a leaf inside the object).
+ * The key MAY be dotted ("a.b" addresses the nested leaf <object>.a.b — the core
+ * read path traverses the containers and the write path emits the per-leaf edit
+ * at the nested path; the protocol value stays FLAT, keyed by the dotted string,
+ * mirroring the RecordFieldDef convention, e.g. "permission.edit" →
+ * agent.<name>.permission.edit).
+ */
 export interface OpencodeSettingField {
   key: string;
-  /** boolean and number leaves are scalars; enum leaves must be one of the listed options. */
-  kind: "boolean" | "number" | "enum";
+  /**
+   * boolean/number leaves are scalars; enum leaves must be one of the listed
+   * options; string leaves are trimmed non-empty within maxLen; multiline leaves
+   * are trimmed non-empty text within maxLen (default
+   * OPENCODE_MULTILINE_VALUE_MAX_LENGTH) rendered as a textarea; stringList
+   * leaves reuse the shared stringList entry rules.
+   */
+  kind: "boolean" | "number" | "enum" | "string" | "multiline" | "stringList";
   label: string;
   hint?: string;
   /** Inclusive bounds of the number kind (absent = unbounded). */
@@ -1040,8 +1355,10 @@ export interface OpencodeSettingField {
   integer?: boolean;
   /** Selectable values of the enum kind (the leaf value must be one of them). */
   options?: string[];
-  /** Documented default shown when the file does not set the field. */
-  default?: boolean | number;
+  /** Length bound of the string/multiline kind after trimming (defaults per kind, see the kind doc). */
+  maxLen?: number;
+  /** Documented default when the file does not set the field (boolean switches render it; enum/number defaults document the runtime fallback). */
+  default?: boolean | number | string;
 }
 
 /** One opencode.json setting visualized in the OpenCode tab. */
@@ -1059,6 +1376,7 @@ export interface OpencodeSetting {
     | "providers"
     | "stringList"
     | "orderedList"
+    | "pluginList"
     | "enumChips"
     | "shallowObject"
     | "permissionTools"
@@ -1077,6 +1395,11 @@ export interface OpencodeSetting {
   max?: number;
   /** Reject non-integers when true; decimals allowed exactly when this is not set. */
   integer?: boolean;
+  /**
+   * Inclusive bound of the string kind's trimmed length (absent = the shared
+   * OPENCODE_STRING_VALUE_MAX_LENGTH; file:"tui" strings use TUI_THEME_MAX_LENGTH instead).
+   */
+  maxLen?: number;
   /** Field schemas of the shallowObject kind. */
   fields?: OpencodeSettingField[];
   /**
@@ -1092,6 +1415,56 @@ export interface OpencodeSetting {
   };
   /** Non-opencode.json target file; "tui" routes this descriptor's reads/writes to configDir/tui.json. */
   file?: "tui";
+}
+
+/**
+ * AgentConfig extras field vocabulary shared by the four agent 扩展 rows
+ * (schema $defs.AgentConfig): prompt/hidden/color/top_p plus the 6
+ * high-frequency permission tools as dotted enum leaves. description/mode/
+ * options and per-command pattern objects are deliberately unexposed —
+ * hand-edit the file for those.
+ */
+const AGENT_EXTRAS_FIELDS: readonly OpencodeSettingField[] = [
+  {
+    key: "prompt",
+    kind: "multiline",
+    // Default bound is OPENCODE_MULTILINE_VALUE_MAX_LENGTH — no maxLen needed here.
+    label: "系统提示词",
+    hint: "文件中亦可用 {file:...} 对象形式，UI 仅字符串",
+  },
+  { key: "hidden", kind: "boolean", label: "隐藏" },
+  { key: "color", kind: "string", maxLen: 32, label: "颜色", hint: "#RRGGBB 或主题色名（primary 等）" },
+  { key: "top_p", kind: "number", label: "top_p", min: 0, max: 1 },
+  { key: "permission.edit", kind: "enum", label: "编辑", options: ["allow", "ask", "deny"] },
+  { key: "permission.bash", kind: "enum", label: "命令", options: ["allow", "ask", "deny"] },
+  { key: "permission.webfetch", kind: "enum", label: "网页抓取", options: ["allow", "ask", "deny"] },
+  { key: "permission.task", kind: "enum", label: "子任务", options: ["allow", "ask", "deny"] },
+  { key: "permission.doom_loop", kind: "enum", label: "死循环防护", options: ["allow", "ask", "deny"] },
+  {
+    key: "permission.external_directory",
+    kind: "enum",
+    label: "外部目录",
+    options: ["allow", "ask", "deny"],
+  },
+];
+
+/**
+ * One agent 扩展 descriptor (build/plan/general/explore): shallowObject at
+ * agent.<name> sharing the parent with the model/temperature/steps/disable rows
+ * — per-leaf edits only, never a whole-key collapse (see
+ * {@link isSharedShallowObjectParent}).
+ */
+function agentExtrasDescriptor(key: string, agent: string): OpencodeSetting {
+  return {
+    key,
+    path: ["agent", agent],
+    kind: "shallowObject",
+    label: `${agent} 扩展`,
+    hint: "其余工具与命令级规则请手写",
+    group: "智能体",
+    // Spread of the canonical constant (same pattern as KNOWN_AGENTS options).
+    fields: [...AGENT_EXTRAS_FIELDS],
+  };
 }
 
 /**
@@ -1119,12 +1492,35 @@ export const OPENCODE_SETTINGS: readonly OpencodeSetting[] = [
     group: "模型",
   },
   {
+    key: "providerEntries",
+    path: ["provider"],
+    kind: "recordEditor",
+    label: "自定义供应商",
+    hint: "供应商明细的 models 模型块请在文件中手写，UI 不会触碰",
+    group: "供应商",
+    record: {
+      fields: [
+        { key: "name", kind: "text", label: "名称", hint: "展示名" },
+        { key: "npm", kind: "text", label: "npm 包", hint: "如 @ai-sdk/openai-compatible" },
+        { key: "options.apiKey", kind: "text", label: "API Key", hint: "支持 {env:VAR} 与 {file:路径} 替换" },
+        { key: "options.baseURL", kind: "text", label: "Base URL", hint: "自定义接入点地址" },
+        { key: "whitelist", kind: "stringList", label: "模型白名单" },
+        { key: "blacklist", kind: "stringList", label: "模型黑名单" },
+      ],
+    },
+    // Schema fields deliberately unexposed: models.<id> is a deep ModelConfig map no
+    // descriptor kind expresses (hand-edit the file — per-leaf edits keep it intact);
+    // env (string[]) is a rare hand-tuned leaf; options.timeout is an `integer | false`
+    // union the number kind cannot express (same reason mcp oauth stays out).
+    // id is derived from the entry name itself.
+  },
+  {
     key: "defaultAgent",
     path: ["default_agent"],
-    kind: "enum",
+    kind: "string",
     label: "默认智能体",
-    options: ["build", "plan"],
-    hint: "仅列内置 primary agent；自定义 primary agent 需在配置文件中手动填写",
+    maxLen: 64,
+    hint: "任意 primary 智能体名（如 build、plan 或自定义）；无效时回退 build",
     group: "行为",
   },
   {
@@ -1168,6 +1564,14 @@ export const OPENCODE_SETTINGS: readonly OpencodeSetting[] = [
     group: "其他",
   },
   {
+    key: "enabledProviders",
+    path: ["enabled_providers"],
+    kind: "providers",
+    label: "启用的供应商",
+    hint: "白名单：设置后仅这些供应商可用（与禁用列表互斥时以禁用为准）",
+    group: "其他",
+  },
+  {
     key: "agentBuildModel",
     path: ["agent", "build", "model"],
     kind: "model",
@@ -1208,6 +1612,29 @@ export const OPENCODE_SETTINGS: readonly OpencodeSetting[] = [
     group: "规则文件",
   },
   {
+    key: "referenceEntries",
+    path: ["references"],
+    kind: "recordEditor",
+    label: "参考仓库",
+    hint: "命名 git 仓库或本地目录；字符串简写与 legacy reference 键请在文件中手写",
+    group: "规则文件",
+    record: {
+      fields: [
+        { key: "repository", kind: "text", label: "Git 仓库", hint: "与 本地路径 二选一" },
+        { key: "branch", kind: "text", label: "分支" },
+        { key: "path", kind: "text", label: "本地路径", hint: "与 Git 仓库 二选一" },
+        { key: "description", kind: "text", label: "描述" },
+        { key: "hidden", kind: "boolean", label: "隐藏" },
+      ],
+    },
+    // Schema shapes deliberately unexposed: the string shorthand (name → git URL)
+    // is not representable in the recordEditor protocol (entries are objects) —
+    // such names stay invisible in the UI but survive every write (per-leaf
+    // semantics only touch names present in the posted map). The deprecated
+    // singular `reference` key is a legacy alias opencode still reads — exposing
+    // it would invite duplicate sources, so it stays hand-edit only.
+  },
+  {
     key: "mcpEntries",
     path: ["mcp"],
     kind: "recordEditor",
@@ -1219,8 +1646,14 @@ export const OPENCODE_SETTINGS: readonly OpencodeSetting[] = [
         { key: "url", kind: "text", label: "URL", hint: "remote 必填" },
         { key: "command", kind: "stringList", label: "命令", hint: "local 启动命令" },
         { key: "enabled", kind: "boolean", label: "启用" },
+        { key: "environment", kind: "stringMap", label: "环境变量", hint: "local 专用：KEY=VALUE 形式的环境变量" },
+        { key: "headers", kind: "stringMap", label: "请求头", hint: "remote 专用：随请求发送的 HTTP 头" },
+        { key: "timeout", kind: "number", label: "超时（毫秒）", hint: "默认 5000", min: 1, integer: true },
+        { key: "cwd", kind: "text", label: "工作目录", hint: "local 专用：进程工作目录" },
       ],
     },
+    // Schema oauth (McpOAuthConfig | false — a union shape no descriptor kind
+    // expresses, and a rare hand-tuned leaf) is deliberately unexposed: edit it in the file.
   },
   {
     key: "compaction",
@@ -1232,6 +1665,8 @@ export const OPENCODE_SETTINGS: readonly OpencodeSetting[] = [
       { key: "auto", kind: "boolean", label: "自动压缩", default: true },
       { key: "prune", kind: "boolean", label: "修剪旧消息", default: false },
       { key: "tail_turns", kind: "number", label: "保留尾部轮次", min: 0, max: 100, integer: true, default: 2 },
+      { key: "preserve_recent_tokens", kind: "number", label: "保留近期 Token", min: 0, integer: true },
+      { key: "reserved", kind: "number", label: "压缩缓冲 Token", min: 0, integer: true },
     ],
   },
   {
@@ -1252,6 +1687,17 @@ export const OPENCODE_SETTINGS: readonly OpencodeSetting[] = [
     group: "智能体",
   },
   {
+    key: "agentBuildSteps",
+    path: ["agent", "build", "steps"],
+    kind: "number",
+    label: "build 最大步数",
+    hint: "达到上限后强制以纯文本收尾",
+    min: 1,
+    integer: true,
+    group: "智能体",
+  },
+  agentExtrasDescriptor("agentBuildExtras", "build"),
+  {
     key: "agentPlanDisable",
     path: ["agent", "plan", "disable"],
     kind: "boolean",
@@ -1269,6 +1715,17 @@ export const OPENCODE_SETTINGS: readonly OpencodeSetting[] = [
     group: "智能体",
   },
   {
+    key: "agentPlanSteps",
+    path: ["agent", "plan", "steps"],
+    kind: "number",
+    label: "plan 最大步数",
+    hint: "达到上限后强制以纯文本收尾",
+    min: 1,
+    integer: true,
+    group: "智能体",
+  },
+  agentExtrasDescriptor("agentPlanExtras", "plan"),
+  {
     key: "agentGeneralModel",
     path: ["agent", "general", "model"],
     kind: "model",
@@ -1277,6 +1734,34 @@ export const OPENCODE_SETTINGS: readonly OpencodeSetting[] = [
     group: "智能体",
   },
   {
+    key: "agentGeneralSteps",
+    path: ["agent", "general", "steps"],
+    kind: "number",
+    label: "general 最大步数",
+    hint: "达到上限后强制以纯文本收尾",
+    min: 1,
+    integer: true,
+    group: "智能体",
+  },
+  {
+    key: "agentGeneralTemperature",
+    path: ["agent", "general", "temperature"],
+    kind: "number",
+    label: "general 温度",
+    hint: "0–2，支持小数",
+    min: 0,
+    max: 2,
+    group: "智能体",
+  },
+  {
+    key: "agentGeneralDisable",
+    path: ["agent", "general", "disable"],
+    kind: "boolean",
+    label: "禁用 general 智能体",
+    group: "智能体",
+  },
+  agentExtrasDescriptor("agentGeneralExtras", "general"),
+  {
     key: "agentExploreModel",
     path: ["agent", "explore", "model"],
     kind: "model",
@@ -1284,6 +1769,34 @@ export const OPENCODE_SETTINGS: readonly OpencodeSetting[] = [
     hint: "opencode 原生智能体覆写，与 OMO 的智能体配置是两套体系",
     group: "智能体",
   },
+  {
+    key: "agentExploreSteps",
+    path: ["agent", "explore", "steps"],
+    kind: "number",
+    label: "explore 最大步数",
+    hint: "达到上限后强制以纯文本收尾",
+    min: 1,
+    integer: true,
+    group: "智能体",
+  },
+  {
+    key: "agentExploreTemperature",
+    path: ["agent", "explore", "temperature"],
+    kind: "number",
+    label: "explore 温度",
+    hint: "0–2，支持小数",
+    min: 0,
+    max: 2,
+    group: "智能体",
+  },
+  {
+    key: "agentExploreDisable",
+    path: ["agent", "explore", "disable"],
+    kind: "boolean",
+    label: "禁用 explore 智能体",
+    group: "智能体",
+  },
+  agentExtrasDescriptor("agentExploreExtras", "explore"),
   {
     key: "tuiTheme",
     path: ["theme"],
@@ -1353,6 +1866,21 @@ export const OPENCODE_SETTINGS: readonly OpencodeSetting[] = [
     group: "高级",
   },
   {
+    key: "serverConfig",
+    path: ["server"],
+    kind: "shallowObject",
+    label: "服务器",
+    hint: "opencode serve / web 的监听设置",
+    group: "高级",
+    fields: [
+      { key: "port", kind: "number", label: "端口", min: 1, integer: true },
+      { key: "hostname", kind: "string", label: "主机名" },
+      { key: "mdns", kind: "boolean", label: "mDNS 发现" },
+      { key: "mdnsDomain", kind: "string", label: "mDNS 域名", hint: "默认 opencode.local" },
+      { key: "cors", kind: "stringList", label: "CORS 白名单" },
+    ],
+  },
+  {
     key: "command",
     path: ["command"],
     kind: "recordEditor",
@@ -1373,6 +1901,14 @@ export const OPENCODE_SETTINGS: readonly OpencodeSetting[] = [
         { key: "subtask", kind: "boolean", label: "子代理任务", hint: "作为子代理任务运行" },
       ],
     },
+  },
+  {
+    key: "pluginEntries",
+    path: ["plugin"],
+    kind: "pluginList",
+    label: "插件列表",
+    hint: "npm 包名，可带 @版本，支持本地路径（~/、file:// 前缀）；元组形式请在文件中手写",
+    group: "插件",
   },
   {
     key: "formatterMaster",
@@ -1418,7 +1954,90 @@ export const OPENCODE_SETTINGS: readonly OpencodeSetting[] = [
       ],
     },
   },
+  {
+    key: "skillsPaths",
+    path: ["skills", "paths"],
+    kind: "stringList",
+    label: "技能目录",
+    hint: "额外的技能文件夹路径",
+    group: "技能",
+  },
+  {
+    key: "skillsUrls",
+    path: ["skills", "urls"],
+    kind: "stringList",
+    label: "技能 URL",
+    hint: "从 .well-known/skills/ 拉取技能的 URL",
+    group: "技能",
+  },
+  // experimental.policies (array of policy objects) is deliberately NOT exposed:
+  // no representable descriptor kind exists for object arrays; hand-edit the file instead.
+  {
+    key: "expBatchTool",
+    path: ["experimental", "batch_tool"],
+    kind: "boolean",
+    label: "批量工具",
+    group: "实验特性",
+  },
+  {
+    key: "expOpenTelemetry",
+    path: ["experimental", "openTelemetry"],
+    kind: "boolean",
+    label: "OpenTelemetry 遥测",
+    hint: "为 AI SDK 调用启用 OTel spans",
+    group: "实验特性",
+  },
+  {
+    key: "expDisablePasteSummary",
+    path: ["experimental", "disable_paste_summary"],
+    kind: "boolean",
+    label: "关闭粘贴摘要",
+    group: "实验特性",
+  },
+  {
+    key: "expContinueLoopOnDeny",
+    path: ["experimental", "continue_loop_on_deny"],
+    kind: "boolean",
+    label: "拒绝后继续循环",
+    hint: "工具调用被拒后不中断 agent 循环",
+    group: "实验特性",
+  },
+  {
+    key: "expMcpTimeout",
+    path: ["experimental", "mcp_timeout"],
+    kind: "number",
+    label: "MCP 超时（毫秒）",
+    min: 1,
+    integer: true,
+    group: "实验特性",
+  },
+  {
+    key: "expPrimaryTools",
+    path: ["experimental", "primary_tools"],
+    kind: "stringList",
+    label: "主智能体专属工具",
+    hint: "仅 primary 智能体可用的工具名",
+    group: "实验特性",
+  },
 ];
+
+/**
+ * True when another OPENCODE_SETTINGS descriptor writes strictly INSIDE this
+ * descriptor's path (a longer path carrying it as prefix): the parent key is
+ * SHARED (the agent 扩展 rows live at agent.<name> beside the model/temperature/
+ * steps/disable rows of the same agent), so the shallowObject edit path must
+ * stay per-leaf — a null value or an all-null map may never collapse the parent
+ * and wipe sibling descriptors' leaves. Single source for the core edit builder
+ * (opencodeSettings.ts) and the webview's partial-commit derivation.
+ */
+export function isSharedShallowObjectParent(setting: OpencodeSetting): boolean {
+  return OPENCODE_SETTINGS.some(
+    (other) =>
+      other !== setting &&
+      other.path.length > setting.path.length &&
+      setting.path.every((segment, index) => other.path[index] === segment),
+  );
+}
 
 /** One OpenCode setting value; null = key absent (「未设置」→ remove edit). */
 export type OpencodeSettingValue =
@@ -1434,7 +2053,8 @@ export type OmoSettingValue =
   | ShallowObjectValue
   | ModelCatalogValue
   | AgentPairMapValue
-  | AgentTextMapValue;
+  | AgentTextMapValue
+  | NumberMapValue;
 
 /**
  * Read/write-split permission aggregate for the OpenCode tab payload: the string
@@ -1459,12 +2079,14 @@ export interface RecordAggregate {
   entries: Record<string, RecordEntryValue>;
 }
 
-/** The OpenCode tab payload's record slot: one aggregate per recordEditor path (命令/格式化/LSP/MCP). */
+/** The OpenCode tab payload's record slot: one aggregate per recordEditor path (命令/格式化/LSP/MCP/供应商/规则文件). */
 export interface OpencodeRecordStates {
   command: RecordAggregate;
   formatter: RecordAggregate;
   lsp: RecordAggregate;
   mcp: RecordAggregate;
+  provider: RecordAggregate;
+  references: RecordAggregate;
 }
 
 /** Boot/refresh payload of the OpenCode tab: current values + the config file path + model options. */
@@ -1476,6 +2098,13 @@ export interface OpencodeSettingsPayload {
   permission: OpencodePermissionState;
   /** The standalone tui.json face: current theme + file path shown in the 终端界面 group. */
   tui: { theme: string | null; path: string };
-  /** Record aggregates (read path of the 命令/格式化/LSP/MCP 服务器 groups; writes go through the record descriptors). */
+  /** Record aggregates (read path of the 命令/格式化/LSP/MCP 服务器/参考仓库 groups; writes go through the record descriptors). */
   records: OpencodeRecordStates;
+  /**
+   * True when the raw `plugin` array holds entries the UI cannot express —
+   * hand-written non-string entries ([名称, 选项] tuples) or strings failing
+   * the entry sanity (blank / over-length): the 插件 row renders read-only and
+   * the host write gate rejects whole-array replacement (PLUGIN_PROTECTED).
+   */
+  pluginProtected: boolean;
 }

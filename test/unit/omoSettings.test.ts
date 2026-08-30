@@ -285,8 +285,9 @@ describe("enumChips kind (disabledAgents)", () => {
   });
 
   it("stringList kind edits like enumChips and validates with the shared entry rules", () => {
-    // No OMO descriptor ships kind stringList yet — probe the kind with a synthetic descriptor
-    // (readOmoMiscValues only iterates the shipped table; the read branch is the enumChips line).
+    // Kind-level probe with a synthetic descriptor — the shipped stringList descriptors
+    // (disabled_skills etc., batch-1) get end-to-end coverage in their own block
+    // below; this keeps the kind coverage descriptor-independent.
     const descriptor: OmoMiscSetting = {
       key: "customList",
       path: ["some_list"],
@@ -759,7 +760,7 @@ describe("batch-5 scalar/shallow descriptors (claude_code / keyword / goal / cod
     expect(isValidOmoMiscValue(descriptor, { auto_start: "yes" })).toBe(false);
   });
 
-  it("codegraph / monitorParams (shallowObject): boolean leaves with their defaults", () => {
+  it("codegraph / monitorParams (shallowObject): leaves with their defaults", () => {
     const codegraph = setting("codegraph");
     expect(codegraph.fields?.every((field) => field.kind === "boolean" && field.default === true)).toBe(true);
     expect(isValidOmoMiscValue(codegraph, { daemon: false })).toBe(true);
@@ -769,6 +770,9 @@ describe("batch-5 scalar/shallow descriptors (claude_code / keyword / goal / cod
     expect(monitor.fields?.map((field) => [field.key, field.default])).toEqual([
       ["enabled", false],
       ["live_mode_enabled", false],
+      ["max_monitors_per_session", 3],
+      ["max_runtime_ms", 1800000],
+      ["allowed_commands", undefined],
     ]);
     expect(isValidOmoMiscValue(monitor, { enabled: true, live_mode_enabled: null })).toBe(true);
     expect(isValidOmoMiscValue(monitor, { enabled: 1 })).toBe(false);
@@ -811,5 +815,849 @@ describe("batch-5 scalar/shallow descriptors (claude_code / keyword / goal / cod
     }
     const batch5 = ["覆写矩阵", "提示词", "兼容层", "关键词", "目标循环", "工具链", "通知"];
     expect(groups.slice(-batch5.length)).toEqual(batch5);
+  });
+});
+
+describe("new-plan batch-1 scalars (稳定性 / 编排 / 实验特性 / Git)", () => {
+  it("autoUpdate / modelFallback (boolean): read present/absent/wrong-shape; edits set/remove at the plugin path", () => {
+    const values = readOmoMiscValues(JSON.stringify({ "[opencode]": { auto_update: false, model_fallback: true } }), [
+      "[opencode]",
+    ]);
+    expect(values.autoUpdate).toBe(false);
+    expect(values.modelFallback).toBe(true);
+    const bad = readOmoMiscValues(JSON.stringify({ auto_update: "yes", model_fallback: 0 }), []);
+    expect(bad.autoUpdate).toBeNull();
+    expect(bad.modelFallback).toBeNull();
+    expect(readOmoMiscValues("{}", []).autoUpdate).toBeNull();
+
+    for (const key of ["autoUpdate", "modelFallback"]) {
+      expect(isValidOmoMiscValue(setting(key), true)).toBe(true);
+      expect(isValidOmoMiscValue(setting(key), 1)).toBe(false);
+      expect(isValidOmoMiscValue(setting(key), "true")).toBe(false);
+      expect(isValidOmoMiscValue(setting(key), null)).toBe(true);
+    }
+
+    const edits = omoMiscEdits(["[opencode]"], setting("autoUpdate"), false);
+    expect(edits).toEqual([{ path: ["[opencode]", "auto_update"], value: false, op: "set" }]);
+    const text = applyEdits("{}", edits);
+    expect(getValue(text, ["[opencode]", "auto_update"])).toBe(false);
+    const removed = applyEdits(text, omoMiscEdits(["[opencode]"], setting("autoUpdate"), null));
+    expect(getValue(removed, ["[opencode]", "auto_update"])).toBeUndefined();
+  });
+
+  it("defaultRunAgent (string ≤64): validator trims and bounds; read passthrough/degrade; edits set/remove", () => {
+    const descriptor = setting("defaultRunAgent");
+    expect(descriptor.path).toEqual(["default_run_agent"]);
+    expect(descriptor.maxLen).toBe(64);
+    expect(isValidOmoMiscValue(descriptor, "general-purpose")).toBe(true);
+    expect(isValidOmoMiscValue(descriptor, "x".repeat(64))).toBe(true);
+    expect(isValidOmoMiscValue(descriptor, "x".repeat(65))).toBe(false);
+    expect(isValidOmoMiscValue(descriptor, "   ")).toBe(false);
+    expect(isValidOmoMiscValue(descriptor, 42)).toBe(false);
+    expect(isValidOmoMiscValue(descriptor, null)).toBe(true);
+
+    expect(readOmoMiscValues(JSON.stringify({ default_run_agent: "plan" }), []).defaultRunAgent).toBe("plan");
+    expect(readOmoMiscValues(JSON.stringify({ default_run_agent: 7 }), []).defaultRunAgent).toBeNull();
+
+    const text = applyEdits("{}", omoMiscEdits(["[opencode]"], setting("defaultRunAgent"), "sisyphus"));
+    expect(getValue(text, ["[opencode]", "default_run_agent"])).toBe("sisyphus");
+    const removed = applyEdits(text, omoMiscEdits(["[opencode]"], setting("defaultRunAgent"), null));
+    expect(getValue(removed, ["[opencode]", "default_run_agent"])).toBeUndefined();
+  });
+
+  it("newTaskSystem reads new_task_system_enabled, independent from experimental.task_system", () => {
+    const descriptor = setting("newTaskSystem");
+    expect(descriptor.path).toEqual(["new_task_system_enabled"]);
+    const values = readOmoMiscValues(
+      JSON.stringify({ new_task_system_enabled: false, experimental: { task_system: true } }),
+      [],
+    );
+    expect(values.newTaskSystem).toBe(false);
+    expect(values.taskSystem).toBe(true);
+    expect(readOmoMiscValues(JSON.stringify({ new_task_system_enabled: 1 }), []).newTaskSystem).toBeNull();
+    expect(isValidOmoMiscValue(descriptor, true)).toBe(true);
+    expect(isValidOmoMiscValue(descriptor, "on")).toBe(false);
+
+    const text = applyEdits("{}", omoMiscEdits(["[opencode]"], setting("newTaskSystem"), true));
+    expect(getValue(text, ["[opencode]", "new_task_system_enabled"])).toBe(true);
+    const removed = applyEdits(text, omoMiscEdits(["[opencode]"], setting("newTaskSystem"), null));
+    expect(getValue(removed, ["[opencode]", "new_task_system_enabled"])).toBeUndefined();
+  });
+
+  it("preemptiveCompaction: 2-segment experimental path; null removes the leaf and keeps the container", () => {
+    const descriptor = setting("preemptiveCompaction");
+    expect(descriptor.path).toEqual(["experimental", "preemptive_compaction"]);
+    const values = readOmoMiscValues(
+      JSON.stringify({ experimental: { preemptive_compaction: true, task_system: true } }),
+      [],
+    );
+    expect(values.preemptiveCompaction).toBe(true);
+    expect(
+      readOmoMiscValues(JSON.stringify({ experimental: { preemptive_compaction: 1 } }), []).preemptiveCompaction,
+    ).toBeNull();
+    expect(readOmoMiscValues("{}", []).preemptiveCompaction).toBeNull();
+    expect(isValidOmoMiscValue(descriptor, false)).toBe(true);
+    expect(isValidOmoMiscValue(descriptor, 0)).toBe(false);
+
+    const seeded = applyEdits("{}", omoMiscEdits(["[opencode]"], setting("preemptiveCompaction"), true));
+    expect(getValue(seeded, ["[opencode]", "experimental", "preemptive_compaction"])).toBe(true);
+    const removed = applyEdits(seeded, omoMiscEdits(["[opencode]"], setting("preemptiveCompaction"), null));
+    expect(getValue(removed, ["[opencode]", "experimental", "preemptive_compaction"])).toBeUndefined();
+    expect(getValue(removed, ["[opencode]", "experimental"])).toEqual({});
+  });
+
+  it("dynamicContextPruning (shallowObject): nested turn_protection/protected_tools/strategies are NOT surfaced", () => {
+    const descriptor = setting("dynamicContextPruning");
+    expect(descriptor.path).toEqual(["experimental", "dynamic_context_pruning"]);
+    expect(descriptor.fields?.map((field) => [field.key, field.kind, field.default])).toEqual([
+      ["enabled", "boolean", false],
+      ["notification", "enum", "detailed"],
+    ]);
+    const values = readOmoMiscValues(
+      JSON.stringify({
+        experimental: {
+          dynamic_context_pruning: {
+            enabled: true,
+            notification: "minimal",
+            turn_protection: { enabled: true, turns: 3 },
+            protected_tools: ["task"],
+            strategies: { deduplication: { enabled: true } },
+          },
+        },
+      }),
+      [],
+    );
+    expect(values.dynamicContextPruning).toEqual({ enabled: true, notification: "minimal" });
+    const degraded = readOmoMiscValues(
+      JSON.stringify({ experimental: { dynamic_context_pruning: { enabled: true, notification: "loud" } } }),
+      [],
+    );
+    expect(degraded.dynamicContextPruning).toEqual({ enabled: true, notification: null });
+    expect(
+      readOmoMiscValues(JSON.stringify({ experimental: { dynamic_context_pruning: "off" } }), []).dynamicContextPruning,
+    ).toBeNull();
+    expect(readOmoMiscValues("{}", []).dynamicContextPruning).toBeNull();
+  });
+
+  it("dynamicContextPruning validator: notification ∈ off|minimal|detailed; unknown fields rejected", () => {
+    const descriptor = setting("dynamicContextPruning");
+    expect(isValidOmoMiscValue(descriptor, { enabled: false, notification: "off" })).toBe(true);
+    expect(isValidOmoMiscValue(descriptor, { notification: null })).toBe(true);
+    expect(isValidOmoMiscValue(descriptor, { notification: "loud" })).toBe(false);
+    expect(isValidOmoMiscValue(descriptor, { enabled: 1 })).toBe(false);
+    expect(isValidOmoMiscValue(descriptor, { made_up: true })).toBe(false);
+    expect(isValidOmoMiscValue(descriptor, null)).toBe(true);
+  });
+
+  it("dynamicContextPruning edits: per-leaf writes; an all-null map removes the key; experimental siblings survive", () => {
+    const seeded = JSON.stringify({ "[opencode]": { experimental: { task_system: true } } });
+    const next = applyEdits(
+      seeded,
+      omoMiscEdits(["[opencode]"], setting("dynamicContextPruning"), { enabled: true, notification: "off" }),
+    );
+    expect(getValue(next, ["[opencode]", "experimental", "dynamic_context_pruning"])).toEqual({
+      enabled: true,
+      notification: "off",
+    });
+    expect(getValue(next, ["[opencode]", "experimental", "task_system"])).toBe(true);
+    const emptied = applyEdits(
+      next,
+      omoMiscEdits(["[opencode]"], setting("dynamicContextPruning"), { enabled: null, notification: null }),
+    );
+    expect(getValue(emptied, ["[opencode]", "experimental", "dynamic_context_pruning"])).toBeUndefined();
+    expect(getValue(emptied, ["[opencode]", "experimental", "task_system"])).toBe(true);
+  });
+
+  it("ulwAutoCommit / startWorkAutoCommit: nested containers created on set; null removes the leaf", () => {
+    for (const [key, parent] of [
+      ["ulwAutoCommit", "ulw_execute"],
+      ["startWorkAutoCommit", "start_work"],
+    ] as const) {
+      const descriptor = setting(key);
+      expect(descriptor.path).toEqual([parent, "auto_commit"]);
+      expect(descriptor.kind).toBe("boolean");
+      expect(descriptor.default).toBe(true);
+      const values = readOmoMiscValues(JSON.stringify({ [parent]: { auto_commit: false } }), []);
+      expect(values[key]).toBe(false);
+      expect(readOmoMiscValues(JSON.stringify({ [parent]: { auto_commit: "no" } }), [])[key]).toBeNull();
+      expect(readOmoMiscValues("{}", [])[key]).toBeNull();
+      expect(isValidOmoMiscValue(descriptor, false)).toBe(true);
+      expect(isValidOmoMiscValue(descriptor, 0)).toBe(false);
+
+      const seeded = applyEdits("{}", omoMiscEdits(["[opencode]"], descriptor, false));
+      expect(getValue(seeded, ["[opencode]", parent, "auto_commit"])).toBe(false);
+      const removed = applyEdits(seeded, omoMiscEdits(["[opencode]"], descriptor, null));
+      expect(getValue(removed, ["[opencode]", parent, "auto_commit"])).toBeUndefined();
+      expect(getValue(removed, ["[opencode]", parent])).toEqual({});
+    }
+  });
+});
+
+describe("new-plan batch-1 memory (shared scope — top level for BOTH targets)", () => {
+  it("read takes the TOP-LEVEL memory on the omo target and ignores the [opencode].memory decoy", () => {
+    const text = JSON.stringify({
+      "[opencode]": { memory: { enabled: false, tool_exposure: "search" } },
+      memory: { enabled: true, tool_exposure: "direct", reflection: { enabled: false } },
+    });
+    const values = readOmoMiscValues(text, ["[opencode]"]);
+    expect(values.memory).toEqual({ enabled: true, tool_exposure: "direct" });
+    const legacy = readOmoMiscValues(JSON.stringify({ memory: { enabled: false } }), []);
+    expect(legacy.memory).toEqual({ enabled: false, tool_exposure: null });
+  });
+
+  it("read degrades a non-object memory and invalid enum leaves per field; absent → null", () => {
+    expect(readOmoMiscValues(JSON.stringify({ memory: "off" }), []).memory).toBeNull();
+    expect(readOmoMiscValues("{}", []).memory).toBeNull();
+    const badEnum = readOmoMiscValues(JSON.stringify({ memory: { enabled: true, tool_exposure: "both" } }), []);
+    expect(badEnum.memory).toEqual({ enabled: true, tool_exposure: null });
+  });
+
+  it("validator: enabled boolean, tool_exposure ∈ direct|search, null leaf/whole ok, unknown fields rejected", () => {
+    const descriptor = setting("memory");
+    expect(descriptor.scope).toBe("shared");
+    expect(descriptor.fields?.map((field) => [field.key, field.default])).toEqual([
+      ["enabled", true],
+      ["tool_exposure", "direct"],
+    ]);
+    expect(isValidOmoMiscValue(descriptor, { enabled: false, tool_exposure: "search" })).toBe(true);
+    expect(isValidOmoMiscValue(descriptor, { tool_exposure: null })).toBe(true);
+    expect(isValidOmoMiscValue(descriptor, { tool_exposure: "both" })).toBe(false);
+    expect(isValidOmoMiscValue(descriptor, { enabled: 1 })).toBe(false);
+    expect(isValidOmoMiscValue(descriptor, { made_up: true })).toBe(false);
+    expect(isValidOmoMiscValue(descriptor, null)).toBe(true);
+  });
+
+  it("edits land TOP-LEVEL on the omo target (never under [opencode]); an all-null map removes the key", () => {
+    const seeded = JSON.stringify({ "[opencode]": { telemetry: true } });
+    const next = applyEdits(
+      seeded,
+      omoMiscEdits(["[opencode]"], setting("memory"), { enabled: false, tool_exposure: "search" }),
+    );
+    expect(getValue(next, ["memory"])).toEqual({ enabled: false, tool_exposure: "search" });
+    expect(getValue(next, ["[opencode]", "memory"])).toBeUndefined();
+    expect(getValue(next, ["[opencode]", "telemetry"])).toBe(true);
+    const emptied = applyEdits(
+      next,
+      omoMiscEdits(["[opencode]"], setting("memory"), { enabled: null, tool_exposure: null }),
+    );
+    expect(getValue(emptied, ["memory"])).toBeUndefined();
+  });
+});
+
+describe("new-plan batch-1 stringList descriptors (disabled_* / mcp_env_allowlist)", () => {
+  it("metadata: five stringList descriptors at their plugin paths", () => {
+    const expected = [
+      ["omoDisabledProviders", ["disabled_providers"], "模型目录"],
+      ["disabledSkills", ["disabled_skills"], "MCP 与命令"],
+      ["disabledHooks", ["disabled_hooks"], "MCP 与命令"],
+      ["disabledTools", ["disabled_tools"], "MCP 与命令"],
+      ["mcpEnvAllowlist", ["mcp_env_allowlist"], "MCP 与命令"],
+    ] as const;
+    for (const [key, path, group] of expected) {
+      const descriptor = setting(key);
+      expect(descriptor.kind).toBe("stringList");
+      expect(descriptor.path).toEqual([...path]);
+      expect(descriptor.group).toBe(group);
+    }
+  });
+
+  it("read: string arrays pass through ([] stays []); mixed/non-array values degrade to null", () => {
+    const values = readOmoMiscValues(
+      JSON.stringify({
+        disabled_providers: ["waves"],
+        disabled_skills: ["pdf", "docx"],
+        disabled_hooks: ["comment-checker"],
+        disabled_tools: [],
+        mcp_env_allowlist: ["HOME", "PATH"],
+      }),
+      [],
+    );
+    expect(values.omoDisabledProviders).toEqual(["waves"]);
+    expect(values.disabledSkills).toEqual(["pdf", "docx"]);
+    expect(values.disabledHooks).toEqual(["comment-checker"]);
+    expect(values.disabledTools).toEqual([]);
+    expect(values.mcpEnvAllowlist).toEqual(["HOME", "PATH"]);
+    expect(readOmoMiscValues(JSON.stringify({ disabled_skills: ["pdf", 5] }), []).disabledSkills).toBeNull();
+    expect(readOmoMiscValues(JSON.stringify({ mcp_env_allowlist: "HOME" }), []).mcpEnvAllowlist).toBeNull();
+  });
+
+  it("validator: shared entry rules — unique trimmed non-empty ≤256 chars, 1–16 entries, null ok", () => {
+    const descriptor = setting("disabledHooks");
+    expect(isValidOmoMiscValue(descriptor, ["comment-checker", "auto-update-checker"])).toBe(true);
+    expect(isValidOmoMiscValue(descriptor, [])).toBe(false);
+    expect(isValidOmoMiscValue(descriptor, ["a", "a"])).toBe(false);
+    expect(isValidOmoMiscValue(descriptor, ["x".repeat(256)])).toBe(true);
+    expect(isValidOmoMiscValue(descriptor, ["x".repeat(257)])).toBe(false);
+    expect(isValidOmoMiscValue(descriptor, [1])).toBe(false);
+    expect(isValidOmoMiscValue(descriptor, "comment-checker")).toBe(false);
+    expect(isValidOmoMiscValue(descriptor, null)).toBe(true);
+    expect(
+      isValidOmoMiscValue(
+        descriptor,
+        Array.from({ length: 16 }, (_, i) => `hook-${i}`),
+      ),
+    ).toBe(true);
+    expect(
+      isValidOmoMiscValue(
+        descriptor,
+        Array.from({ length: 17 }, (_, i) => `hook-${i}`),
+      ),
+    ).toBe(false);
+  });
+
+  it("edits set/remove the whole array at the section-prefixed path", () => {
+    const edits = omoMiscEdits(["[opencode]"], setting("disabledSkills"), ["pdf", "docx"]);
+    expect(edits).toEqual([{ path: ["[opencode]", "disabled_skills"], value: ["pdf", "docx"], op: "set" }]);
+    const text = applyEdits("{}", edits);
+    expect(getValue(text, ["[opencode]", "disabled_skills"])).toEqual(["pdf", "docx"]);
+    const removed = applyEdits(text, omoMiscEdits(["[opencode]"], setting("disabledSkills"), null));
+    expect(getValue(removed, ["[opencode]", "disabled_skills"])).toBeUndefined();
+    const legacy = applyEdits("{}", omoMiscEdits([], setting("mcpEnvAllowlist"), ["HOME"]));
+    expect(getValue(legacy, ["mcp_env_allowlist"])).toEqual(["HOME"]);
+  });
+});
+
+describe("new-plan batch-2a (模型能力缓存 / 保姆超时 / OpenClaw / monitor+team_mode 扩展)", () => {
+  it("modelCapabilities metadata: plugin path, flat leaves, runtime-derived boolean defaults, source_url unexposed", () => {
+    const descriptor = setting("modelCapabilities");
+    expect(descriptor.path).toEqual(["model_capabilities"]);
+    expect(descriptor.kind).toBe("shallowObject");
+    expect(descriptor.group).toBe("模型目录");
+    expect(descriptor.scope).toBeUndefined();
+    // Boolean defaults mirror the runtime gates (model-capabilities-status.ts):
+    // both features only stop on an explicit `=== false`, so absence = active.
+    expect(descriptor.fields?.map((field) => [field.key, field.kind, field.default ?? null])).toEqual([
+      ["enabled", "boolean", true],
+      ["auto_refresh_on_start", "boolean", true],
+      ["refresh_timeout_ms", "number", 5000],
+    ]);
+  });
+
+  it("modelCapabilities read: leaves surface per field, source_url/unknown keys never do; wrong shapes degrade", () => {
+    const values = readOmoMiscValues(
+      JSON.stringify({
+        "[opencode]": {
+          model_capabilities: {
+            enabled: false,
+            auto_refresh_on_start: true,
+            refresh_timeout_ms: 5000,
+            source_url: "https://models.dev/api.json",
+          },
+        },
+        model_capabilities: { enabled: true },
+      }),
+      ["[opencode]"],
+    );
+    expect(values.modelCapabilities).toEqual({
+      enabled: false,
+      auto_refresh_on_start: true,
+      refresh_timeout_ms: 5000,
+    });
+    const bad = readOmoMiscValues(
+      JSON.stringify({ model_capabilities: { enabled: "yes", refresh_timeout_ms: 250.5 } }),
+      [],
+    );
+    expect(bad.modelCapabilities).toEqual({ enabled: null, auto_refresh_on_start: null, refresh_timeout_ms: null });
+    expect(readOmoMiscValues(JSON.stringify({ model_capabilities: "off" }), []).modelCapabilities).toBeNull();
+    expect(readOmoMiscValues("{}", []).modelCapabilities).toBeNull();
+  });
+
+  it("modelCapabilities validator: boolean leaves, refresh_timeout_ms integer ≥1000, unknown field rejected", () => {
+    const descriptor = setting("modelCapabilities");
+    expect(
+      isValidOmoMiscValue(descriptor, { enabled: false, auto_refresh_on_start: null, refresh_timeout_ms: 1000 }),
+    ).toBe(true);
+    expect(isValidOmoMiscValue(descriptor, { refresh_timeout_ms: 999 })).toBe(false);
+    expect(isValidOmoMiscValue(descriptor, { refresh_timeout_ms: 5000 })).toBe(true);
+    expect(isValidOmoMiscValue(descriptor, { refresh_timeout_ms: 250.5 })).toBe(false);
+    expect(isValidOmoMiscValue(descriptor, { enabled: 1 })).toBe(false);
+    expect(isValidOmoMiscValue(descriptor, { auto_refresh_on_start: "true" })).toBe(false);
+    expect(isValidOmoMiscValue(descriptor, { source_url: "https://models.dev" })).toBe(false);
+    expect(isValidOmoMiscValue(descriptor, null)).toBe(true);
+  });
+
+  it("modelCapabilities edits: per-leaf write keeps a hand-written source_url; an all-null map removes the key", () => {
+    const seeded = JSON.stringify({
+      "[opencode]": { model_capabilities: { enabled: true, source_url: "https://models.dev/api.json" } },
+    });
+    const next = applyEdits(
+      seeded,
+      omoMiscEdits(["[opencode]"], setting("modelCapabilities"), { refresh_timeout_ms: 8000 }),
+    );
+    expect(getValue(next, ["[opencode]", "model_capabilities"])).toEqual({
+      enabled: true,
+      source_url: "https://models.dev/api.json",
+      refresh_timeout_ms: 8000,
+    });
+    const emptied = applyEdits(
+      next,
+      omoMiscEdits(["[opencode]"], setting("modelCapabilities"), {
+        enabled: null,
+        auto_refresh_on_start: null,
+        refresh_timeout_ms: null,
+      }),
+    );
+    expect(getValue(emptied, ["[opencode]", "model_capabilities"])).toBeUndefined();
+  });
+
+  it("babysittingTimeout metadata: nested plugin path, schema default 120000, explicit ms bounds", () => {
+    const descriptor = setting("babysittingTimeout");
+    expect(descriptor.path).toEqual(["babysitting", "timeout_ms"]);
+    expect(descriptor.kind).toBe("number");
+    expect(descriptor.group).toBe("编排");
+    expect(descriptor.default).toBe(120000);
+    expect(descriptor.min).toBe(1000);
+    expect(descriptor.max).toBe(3600000);
+  });
+
+  it("babysittingTimeout read: passthrough / wrong shape → null / absent → null", () => {
+    expect(readOmoMiscValues(JSON.stringify({ babysitting: { timeout_ms: 180000 } }), []).babysittingTimeout).toBe(
+      180000,
+    );
+    expect(
+      readOmoMiscValues(JSON.stringify({ babysitting: { timeout_ms: "120000" } }), []).babysittingTimeout,
+    ).toBeNull();
+    expect(readOmoMiscValues("{}", []).babysittingTimeout).toBeNull();
+  });
+
+  it("babysittingTimeout validator: integer 1000–3600000 only (bounds include the schema default)", () => {
+    const descriptor = setting("babysittingTimeout");
+    expect(isValidOmoMiscValue(descriptor, 120000)).toBe(true);
+    expect(isValidOmoMiscValue(descriptor, 1000)).toBe(true);
+    expect(isValidOmoMiscValue(descriptor, 3600000)).toBe(true);
+    expect(isValidOmoMiscValue(descriptor, 999)).toBe(false);
+    expect(isValidOmoMiscValue(descriptor, 3600001)).toBe(false);
+    expect(isValidOmoMiscValue(descriptor, 1200.5)).toBe(false);
+    expect(isValidOmoMiscValue(descriptor, "120000")).toBe(false);
+    expect(isValidOmoMiscValue(descriptor, null)).toBe(true);
+  });
+
+  it("babysittingTimeout edits: set creates the nested container; null removes the leaf and keeps it", () => {
+    const seeded = applyEdits("{}", omoMiscEdits(["[opencode]"], setting("babysittingTimeout"), 300000));
+    expect(getValue(seeded, ["[opencode]", "babysitting", "timeout_ms"])).toBe(300000);
+    const removed = applyEdits(seeded, omoMiscEdits(["[opencode]"], setting("babysittingTimeout"), null));
+    expect(getValue(removed, ["[opencode]", "babysitting", "timeout_ms"])).toBeUndefined();
+    expect(getValue(removed, ["[opencode]", "babysitting"])).toEqual({});
+  });
+
+  it("openclawEnabled metadata/read/validator: nested boolean with schema default false", () => {
+    const descriptor = setting("openclawEnabled");
+    expect(descriptor.path).toEqual(["openclaw", "enabled"]);
+    expect(descriptor.kind).toBe("boolean");
+    expect(descriptor.group).toBe("工具链");
+    expect(descriptor.default).toBe(false);
+    expect(readOmoMiscValues(JSON.stringify({ openclaw: { enabled: true } }), []).openclawEnabled).toBe(true);
+    expect(readOmoMiscValues(JSON.stringify({ openclaw: { enabled: 1 } }), []).openclawEnabled).toBeNull();
+    expect(readOmoMiscValues("{}", []).openclawEnabled).toBeNull();
+    expect(isValidOmoMiscValue(descriptor, true)).toBe(true);
+    expect(isValidOmoMiscValue(descriptor, 1)).toBe(false);
+    expect(isValidOmoMiscValue(descriptor, "true")).toBe(false);
+    expect(isValidOmoMiscValue(descriptor, null)).toBe(true);
+  });
+
+  it("openclawEnabled edits: set/remove touch only the leaf; a hand-written gateways block survives both", () => {
+    const gateways = { primary: { type: "http", method: "POST", url: "https://example.com/hook" } };
+    const seeded = JSON.stringify({ "[opencode]": { openclaw: { enabled: false, gateways } } });
+    const next = applyEdits(seeded, omoMiscEdits(["[opencode]"], setting("openclawEnabled"), true));
+    expect(getValue(next, ["[opencode]", "openclaw", "enabled"])).toBe(true);
+    expect(getValue(next, ["[opencode]", "openclaw", "gateways"])).toEqual(gateways);
+    const removed = applyEdits(next, omoMiscEdits(["[opencode]"], setting("openclawEnabled"), null));
+    expect(getValue(removed, ["[opencode]", "openclaw", "enabled"])).toBeUndefined();
+    expect(getValue(removed, ["[opencode]", "openclaw", "gateways"])).toEqual(gateways);
+  });
+
+  it("monitorParams extension: new caps validate within schema bounds; allowed_commands surfaces as a stringList leaf", () => {
+    const monitor = setting("monitorParams");
+    expect(isValidOmoMiscValue(monitor, { max_monitors_per_session: 3, max_runtime_ms: 1800000 })).toBe(true);
+    expect(isValidOmoMiscValue(monitor, { max_monitors_per_session: 1 })).toBe(true);
+    expect(isValidOmoMiscValue(monitor, { max_monitors_per_session: 0 })).toBe(false);
+    expect(isValidOmoMiscValue(monitor, { max_monitors_per_session: 16 })).toBe(true);
+    expect(isValidOmoMiscValue(monitor, { max_monitors_per_session: 17 })).toBe(false);
+    expect(isValidOmoMiscValue(monitor, { max_runtime_ms: 1000 })).toBe(true);
+    expect(isValidOmoMiscValue(monitor, { max_runtime_ms: 999 })).toBe(false);
+    expect(isValidOmoMiscValue(monitor, { max_runtime_ms: 1800.5 })).toBe(false);
+    const values = readOmoMiscValues(
+      JSON.stringify({
+        monitor: { enabled: true, max_monitors_per_session: 5, allowed_commands: ["git"], batch_max_lines: 10 },
+      }),
+      [],
+    );
+    expect(values.monitorParams).toEqual({
+      enabled: true,
+      live_mode_enabled: null,
+      max_monitors_per_session: 5,
+      max_runtime_ms: null,
+      allowed_commands: ["git"],
+    });
+  });
+
+  it("monitorParams edits: per-leaf write keeps allowed_commands and a user comment (existing per-leaf behavior intact)", () => {
+    const seeded =
+      '{\n  "monitor": {\n    // user note\n    "allowed_commands": ["git"],\n    "enabled": true,\n  },\n}\n';
+    const next = applyEdits(seeded, omoMiscEdits([], setting("monitorParams"), { max_monitors_per_session: 8 }));
+    expect(getValue(next, ["monitor"])).toEqual({
+      allowed_commands: ["git"],
+      enabled: true,
+      max_monitors_per_session: 8,
+    });
+    expect(next).toContain("// user note");
+  });
+
+  it("teamModeLimits extension: message/mailbox caps validate within schema bounds; defaults metadata", () => {
+    const limits = setting("teamModeLimits");
+    const appended = limits.fields?.filter(
+      (field) => field.key === "max_messages_per_run" || field.key === "mailbox_poll_interval_ms",
+    );
+    expect(appended?.map((field) => [field.key, field.default])).toEqual([
+      ["max_messages_per_run", 10000],
+      ["mailbox_poll_interval_ms", 3000],
+    ]);
+    expect(isValidOmoMiscValue(limits, { max_messages_per_run: 10000, mailbox_poll_interval_ms: 3000 })).toBe(true);
+    expect(isValidOmoMiscValue(limits, { max_messages_per_run: 1 })).toBe(true);
+    expect(isValidOmoMiscValue(limits, { max_messages_per_run: 0 })).toBe(false);
+    expect(isValidOmoMiscValue(limits, { mailbox_poll_interval_ms: 500 })).toBe(true);
+    expect(isValidOmoMiscValue(limits, { mailbox_poll_interval_ms: 499 })).toBe(false);
+    expect(isValidOmoMiscValue(limits, { mailbox_poll_interval_ms: 3000.5 })).toBe(false);
+    // The pre-existing four-cap subset maps keep validating (extension adds, never narrows).
+    expect(isValidOmoMiscValue(limits, { max_parallel_members: 4, max_members: 8 })).toBe(true);
+  });
+
+  it("teamModeLimits extension: new leaves surface on read; per-leaf writes keep shared-parent siblings", () => {
+    const values = readOmoMiscValues(
+      JSON.stringify({ team_mode: { enabled: true, max_members: 6, mailbox_poll_interval_ms: 2000 } }),
+      [],
+    );
+    expect(values.teamModeLimits).toEqual({
+      max_parallel_members: null,
+      max_members: 6,
+      max_wall_clock_minutes: null,
+      max_member_turns: null,
+      max_messages_per_run: null,
+      mailbox_poll_interval_ms: 2000,
+    });
+    const seeded = JSON.stringify({ team_mode: { enabled: true, max_members: 8 } });
+    const next = applyEdits(seeded, omoMiscEdits([], setting("teamModeLimits"), { max_messages_per_run: 500 }));
+    expect(getValue(next, ["team_mode"])).toEqual({ enabled: true, max_members: 8, max_messages_per_run: 500 });
+  });
+});
+
+describe("batch-2b numberMap kind (并发上限 / 温度覆写)", () => {
+  it("descriptor metadata: flat concurrency maps, nested temperature maps, bounds and agents leafKeys", () => {
+    const provider = setting("providerConcurrency");
+    expect(provider.path).toEqual(["background_task", "providerConcurrency"]);
+    expect(provider.kind).toBe("numberMap");
+    expect(provider.min).toBe(0);
+    expect(provider.max).toBeUndefined();
+    expect(provider.agents).toBeUndefined();
+    expect(provider.group).toBe("编排");
+    expect(provider.label).toBe("供应商并发上限");
+
+    const model = setting("modelConcurrency");
+    expect(model.path).toEqual(["background_task", "modelConcurrency"]);
+    expect(model.kind).toBe("numberMap");
+    expect(model.min).toBe(0);
+    expect(model.group).toBe("编排");
+
+    const agentTemp = setting("agentTemperature");
+    expect(agentTemp.path).toEqual(["agents"]);
+    expect(agentTemp.kind).toBe("numberMap");
+    expect(agentTemp.agents).toEqual({ leafKey: "temperature" });
+    expect(agentTemp.options).toEqual([...KNOWN_AGENTS]);
+    expect(agentTemp.min).toBe(0);
+    expect(agentTemp.max).toBe(2);
+    expect(agentTemp.group).toBe("覆写矩阵");
+
+    const categoryTemp = setting("categoryTemperature");
+    expect(categoryTemp.path).toEqual(["categories"]);
+    expect(categoryTemp.kind).toBe("numberMap");
+    expect(categoryTemp.agents).toEqual({ leafKey: "temperature" });
+    expect(categoryTemp.options).toBeUndefined();
+    expect(categoryTemp.min).toBe(0);
+    expect(categoryTemp.max).toBe(2);
+    expect(categoryTemp.group).toBe("覆写矩阵");
+  });
+
+  it("flat read: finite in-range numbers surface (decimals ok); non-numeric and out-of-range entries are skipped", () => {
+    const text = JSON.stringify({
+      background_task: {
+        defaultConcurrency: 5,
+        providerConcurrency: { zhipuai: 4, moonshotai: 2.5, kimi: 0, bad: "4", off: -1, nil: null, flag: true },
+      },
+    });
+    expect(readOmoMiscValues(text, []).providerConcurrency).toEqual({ zhipuai: 4, moonshotai: 2.5, kimi: 0 });
+    // The shared background_task parent still feeds the batch-1 scalar descriptor.
+    expect(readOmoMiscValues(text, []).backgroundConcurrency).toBe(5);
+  });
+
+  it("flat read degrades wrong shapes (non-object / absent) to null", () => {
+    expect(
+      readOmoMiscValues(JSON.stringify({ background_task: { providerConcurrency: "nope" } }), []).providerConcurrency,
+    ).toBeNull();
+    expect(
+      readOmoMiscValues(JSON.stringify({ background_task: { providerConcurrency: ["a"] } }), []).providerConcurrency,
+    ).toBeNull();
+    expect(readOmoMiscValues("{}", []).providerConcurrency).toBeNull();
+  });
+
+  it("nested read with options: agents.<name>.temperature surfaces only for options agents; broken entries are skipped", () => {
+    const text = JSON.stringify({
+      agents: {
+        oracle: { temperature: 0.5 },
+        atlas: { temperature: 1.75 },
+        metis: { temperature: 3 },
+        momus: { temperature: "0.5" },
+        sisyphus: { prompt: "no leaf" },
+        "made-up-agent": { temperature: 1 },
+      },
+    });
+    expect(readOmoMiscValues(text, []).agentTemperature).toEqual({ oracle: 0.5, atlas: 1.75 });
+    expect(readOmoMiscValues("{}", []).agentTemperature).toBeNull();
+    expect(readOmoMiscValues(JSON.stringify({ agents: "nope" }), []).agentTemperature).toBeNull();
+  });
+
+  it("nested free-key read: every category key surfaces; broken entries are skipped", () => {
+    const text = JSON.stringify({
+      categories: {
+        backend: { temperature: 0.7 },
+        "my-custom": { temperature: 1.75 },
+        visual: { temperature: 5 },
+        quick: { temperature: false },
+        broken: "not an object",
+      },
+    });
+    expect(readOmoMiscValues(text, []).categoryTemperature).toEqual({ backend: 0.7, "my-custom": 1.75 });
+  });
+
+  it("read prefixes the omo sectionPath for both variants (top-level decoys ignored)", () => {
+    const text = JSON.stringify({
+      "[opencode]": {
+        background_task: { providerConcurrency: { zhipuai: 3 } },
+        categories: { backend: { temperature: 0.4 } },
+      },
+      background_task: { providerConcurrency: { evil: 9 } },
+      categories: { backend: { temperature: 2 } },
+    });
+    const values = readOmoMiscValues(text, ["[opencode]"]);
+    expect(values.providerConcurrency).toEqual({ zhipuai: 3 });
+    expect(values.categoryTemperature).toEqual({ backend: 0.4 });
+  });
+
+  it("validator: free keys reuse the modelCatalog alias charset; options restrict keys; per-entry bounds accept decimals", () => {
+    const provider = setting("providerConcurrency");
+    expect(isValidOmoMiscValue(provider, { zhipuai: 4 })).toBe(true);
+    expect(isValidOmoMiscValue(provider, { zhipuai: 0 })).toBe(true);
+    expect(isValidOmoMiscValue(provider, { zhipuai: 2.5 })).toBe(true); // schema minimum 0, decimals legal
+    expect(isValidOmoMiscValue(provider, { zhipuai: 100000 })).toBe(true); // no descriptor max → unbounded above
+    expect(isValidOmoMiscValue(provider, { zhipuai: -1 })).toBe(false);
+    expect(isValidOmoMiscValue(provider, { zhipuai: Number.NaN })).toBe(false);
+    expect(isValidOmoMiscValue(provider, { zhipuai: Number.POSITIVE_INFINITY })).toBe(false);
+    expect(isValidOmoMiscValue(provider, { zhipuai: "4" })).toBe(false);
+    expect(isValidOmoMiscValue(provider, { zhipuai: null })).toBe(true);
+    expect(isValidOmoMiscValue(provider, {})).toBe(true);
+    expect(isValidOmoMiscValue(provider, null)).toBe(true);
+    expect(isValidOmoMiscValue(provider, 4)).toBe(false);
+    expect(isValidOmoMiscValue(provider, ["zhipuai"])).toBe(false);
+    // Free-key charset: the modelCatalog alias rules (identifier chars, ≤32 chars).
+    expect(isValidOmoMiscValue(provider, { "a.b-c_d": 1 })).toBe(true);
+    expect(isValidOmoMiscValue(provider, { "bad key!": 1 })).toBe(false);
+    expect(isValidOmoMiscValue(provider, { 分类: 1 })).toBe(false);
+    expect(isValidOmoMiscValue(provider, { ["x".repeat(33)]: 1 })).toBe(false);
+
+    const agentTemp = setting("agentTemperature");
+    expect(isValidOmoMiscValue(agentTemp, { oracle: 0.5, atlas: 1.75 })).toBe(true);
+    expect(isValidOmoMiscValue(agentTemp, { oracle: 2 })).toBe(true);
+    expect(isValidOmoMiscValue(agentTemp, { oracle: 2.1 })).toBe(false);
+    expect(isValidOmoMiscValue(agentTemp, { oracle: -0.1 })).toBe(false);
+    expect(isValidOmoMiscValue(agentTemp, { "made-up-agent": 1 })).toBe(false);
+  });
+
+  it("validator: entry count capped at 32 (mirror of the modelCatalog bound)", () => {
+    const provider = setting("providerConcurrency");
+    const entries = (count: number) => Object.fromEntries(Array.from({ length: count }, (_, i) => [`p-${i}`, i]));
+    expect(isValidOmoMiscValue(provider, entries(32))).toBe(true);
+    expect(isValidOmoMiscValue(provider, entries(33))).toBe(false);
+  });
+
+  it("flat edits: per-entry set/remove at <path>.<key>; null whole-value removes the key itself and keeps siblings", () => {
+    const seeded = JSON.stringify({
+      "[opencode]": {
+        background_task: { defaultConcurrency: 5, providerConcurrency: { kimi: 2, keep: 1 } },
+      },
+      background_task: { defaultConcurrency: 5, providerConcurrency: { kimi: 2, keep: 1 } },
+    });
+    const next = applyEdits(
+      seeded,
+      omoMiscEdits(["[opencode]"], setting("providerConcurrency"), { zhipuai: 4, kimi: null }),
+    );
+    expect(getValue(next, ["[opencode]", "background_task", "providerConcurrency"])).toEqual({
+      keep: 1,
+      zhipuai: 4,
+    });
+    expect(getValue(next, ["[opencode]", "background_task", "defaultConcurrency"])).toBe(5);
+    // A sibling numberMap sharing the parent object leaves it untouched too.
+    const modelNext = applyEdits(seeded, omoMiscEdits([], setting("modelConcurrency"), { "zhipuai/glm-5": 3 }));
+    expect(getValue(modelNext, ["background_task", "providerConcurrency"])).toEqual({ kimi: 2, keep: 1 });
+    expect(getValue(modelNext, ["background_task", "modelConcurrency"])).toEqual({ "zhipuai/glm-5": 3 });
+    // Flat maps MAY collapse: a null whole-value removes just the providerConcurrency leaf.
+    const removed = applyEdits(next, omoMiscEdits(["[opencode]"], setting("providerConcurrency"), null));
+    expect(getValue(removed, ["[opencode]", "background_task", "providerConcurrency"])).toBeUndefined();
+    expect(getValue(removed, ["[opencode]", "background_task", "defaultConcurrency"])).toBe(5);
+  });
+
+  it("nested edits: per-entry set/remove at <path>.<name>.<leafKey>; null whole-value produces NO edits", () => {
+    const text = applyEdits(
+      "{}",
+      omoMiscEdits(["[opencode]"], setting("agentTemperature"), { oracle: 0.5, atlas: null }),
+    );
+    expect(getValue(text, ["[opencode]", "agents", "oracle", "temperature"])).toBe(0.5);
+
+    const categoryText = applyEdits(
+      "{}",
+      omoMiscEdits([], setting("categoryTemperature"), { backend: 0.7, "my-custom": 1.75 }),
+    );
+    expect(getValue(categoryText, ["categories", "backend", "temperature"])).toBe(0.7);
+    expect(getValue(categoryText, ["categories", "my-custom", "temperature"])).toBe(1.75);
+
+    const seeded = JSON.stringify({ agents: { atlas: { temperature: 1, model: "x/y" } } });
+    const removed = applyEdits(seeded, omoMiscEdits([], setting("agentTemperature"), { atlas: null }));
+    expect(getValue(removed, ["agents", "atlas", "temperature"])).toBeUndefined();
+    expect(getValue(removed, ["agents", "atlas", "model"])).toBe("x/y");
+    // Nested leaf maps NEVER wipe: a null whole-value is 无编辑 (shared agents/categories block).
+    expect(omoMiscEdits([], setting("agentTemperature"), null)).toEqual([]);
+    expect(applyEdits(seeded, omoMiscEdits([], setting("agentTemperature"), null))).toBe(seeded);
+    expect(applyEdits(seeded, omoMiscEdits([], setting("categoryTemperature"), null))).toBe(seeded);
+  });
+
+  it("agentTemperature writes never disturb a hand-written agents.build.prompt (sibling survival)", () => {
+    const seeded =
+      '{\n  "agents": {\n    // 手写提示词\n    "build": { "prompt": "file://prompts/build.md" },\n  },\n}\n';
+    const next = applyEdits(seeded, omoMiscEdits([], setting("agentTemperature"), { build: 0.9 }));
+    expect(getValue(next, ["agents", "build"])).toEqual({ prompt: "file://prompts/build.md", temperature: 0.9 });
+    expect(next).toContain("// 手写提示词");
+    const removed = applyEdits(next, omoMiscEdits([], setting("agentTemperature"), { build: null }));
+    expect(getValue(removed, ["agents", "build"])).toEqual({ prompt: "file://prompts/build.md" });
+  });
+
+  it("edits ignore a non-record value instead of corrupting the file (callers validate first)", () => {
+    const bad = 42 as unknown as OmoSettingValue;
+    expect(omoMiscEdits([], setting("providerConcurrency"), bad)).toEqual([]);
+    expect(omoMiscEdits([], setting("agentTemperature"), bad)).toEqual([]);
+  });
+});
+
+describe("batch-2b categoryPromptAppend (free-key agentTextMap)", () => {
+  it("descriptor metadata: categories target, prompt_append leaf, free keys, ≤8000 hint bound", () => {
+    const descriptor = setting("categoryPromptAppend");
+    expect(descriptor.kind).toBe("agentTextMap");
+    expect(descriptor.path).toEqual(["categories"]);
+    expect(descriptor.agents).toEqual({ leafKey: "prompt_append" });
+    expect(descriptor.options).toBeUndefined();
+    expect(descriptor.group).toBe("提示词");
+    expect(descriptor.label).toBe("分类提示词追加");
+  });
+
+  it("read: free category keys surface at categories.<name>.prompt_append; broken values are skipped", () => {
+    const text = JSON.stringify({
+      categories: {
+        backend: { prompt_append: "注意事务。", temperature: 0.3 },
+        quick: { prompt_append: "   " },
+        deep: { prompt_append: 42 },
+        writing: { prompt_append: "x".repeat(8000) },
+        broken: "not an object",
+      },
+    });
+    expect(readOmoMiscValues(text, []).categoryPromptAppend).toEqual({
+      backend: "注意事务。",
+      writing: "x".repeat(8000),
+    });
+    expect(readOmoMiscValues("{}", []).categoryPromptAppend).toBeNull();
+    expect(readOmoMiscValues(JSON.stringify({ categories: "nope" }), []).categoryPromptAppend).toBeNull();
+  });
+
+  it("validator: free keys pass the identifier charset; trimmed non-empty ≤8000 (AGENT_TEXT_MAX_LENGTH reuse) or null", () => {
+    const descriptor = setting("categoryPromptAppend");
+    expect(isValidOmoMiscValue(descriptor, { backend: "追加", "my-custom": null })).toBe(true);
+    expect(isValidOmoMiscValue(descriptor, {})).toBe(true);
+    expect(isValidOmoMiscValue(descriptor, null)).toBe(true);
+    expect(isValidOmoMiscValue(descriptor, { "bad key!": "text" })).toBe(false);
+    expect(isValidOmoMiscValue(descriptor, { ["x".repeat(33)]: "text" })).toBe(false);
+    expect(isValidOmoMiscValue(descriptor, { backend: "   " })).toBe(false);
+    expect(isValidOmoMiscValue(descriptor, { backend: "x".repeat(8000) })).toBe(true);
+    expect(isValidOmoMiscValue(descriptor, { backend: "x".repeat(8001) })).toBe(false);
+    expect(isValidOmoMiscValue(descriptor, { backend: 42 })).toBe(false);
+    expect(isValidOmoMiscValue(descriptor, ["text"])).toBe(false);
+  });
+
+  it("edits: per-category set/remove keep siblings; whole null produces no edits", () => {
+    const seeded = JSON.stringify({
+      categories: { backend: { temperature: 0.7, prompt_append: "旧" }, quick: { prompt_append: "删" } },
+    });
+    const next = applyEdits(
+      seeded,
+      omoMiscEdits([], setting("categoryPromptAppend"), { backend: "新文本", quick: null }),
+    );
+    expect(getValue(next, ["categories", "backend"])).toEqual({ temperature: 0.7, prompt_append: "新文本" });
+    expect(getValue(next, ["categories", "quick"])).toEqual({});
+    expect(applyEdits(seeded, omoMiscEdits([], setting("categoryPromptAppend"), null))).toBe(seeded);
+  });
+});
+
+describe("batch-7 monitor.allowed_commands (shallowObject stringList leaf)", () => {
+  const unsetLeaves = {
+    enabled: null,
+    live_mode_enabled: null,
+    max_monitors_per_session: null,
+    max_runtime_ms: null,
+  };
+
+  it("descriptor: kind stringList with the whitelist label; schema leaves stay unexposed", () => {
+    const field = setting("monitorParams").fields?.find((entry) => entry.key === "allowed_commands");
+    expect(field?.kind).toBe("stringList");
+    expect(field?.label).toBe("允许的命令");
+    expect(setting("monitorParams").fields?.some((entry) => entry.key === "batch_max_lines")).toBe(false);
+  });
+
+  it("read: a valid list surfaces; wrong shapes degrade to a null leaf", () => {
+    const values = readOmoMiscValues(
+      JSON.stringify({ monitor: { allowed_commands: ["git", "rg"], enabled: true } }),
+      [],
+    );
+    expect(values.monitorParams).toEqual({ ...unsetLeaves, enabled: true, allowed_commands: ["git", "rg"] });
+    const degraded = readOmoMiscValues(JSON.stringify({ monitor: { allowed_commands: "git" } }), []);
+    expect(degraded.monitorParams).toEqual({ ...unsetLeaves, allowed_commands: null });
+    const dupes = readOmoMiscValues(JSON.stringify({ monitor: { allowed_commands: ["git", "git"] } }), []);
+    expect(dupes.monitorParams).toEqual({ ...unsetLeaves, allowed_commands: null });
+  });
+
+  it("validator: the shared stringList rules (1–16 unique trimmed non-empty ≤256)", () => {
+    const monitor = setting("monitorParams");
+    expect(isValidOmoMiscValue(monitor, { allowed_commands: ["git"] })).toBe(true);
+    expect(isValidOmoMiscValue(monitor, { allowed_commands: [] })).toBe(false);
+    expect(isValidOmoMiscValue(monitor, { allowed_commands: ["git", "git"] })).toBe(false);
+    expect(isValidOmoMiscValue(monitor, { allowed_commands: [""] })).toBe(false);
+    expect(isValidOmoMiscValue(monitor, { allowed_commands: "git" })).toBe(false);
+    expect(isValidOmoMiscValue(monitor, { allowed_commands: null })).toBe(true); // null leaf = unset
+  });
+
+  it("edits: a full-map write sets the leaf, keeps siblings and JSONC comments; a null leaf removes it", () => {
+    const seeded = '{\n  "monitor": {\n    // user note\n    "enabled": true,\n    "batch_max_lines": 10,\n  },\n}\n';
+    const next = applyEdits(
+      seeded,
+      omoMiscEdits([], setting("monitorParams"), { ...unsetLeaves, enabled: true, allowed_commands: ["git", "rg"] }),
+    );
+    expect(getValue(next, ["monitor"])).toEqual({
+      enabled: true,
+      batch_max_lines: 10,
+      allowed_commands: ["git", "rg"],
+    });
+    expect(next).toContain("// user note");
+
+    const cleared = applyEdits(
+      next,
+      omoMiscEdits([], setting("monitorParams"), { ...unsetLeaves, enabled: true, allowed_commands: null }),
+    );
+    expect(getValue(cleared, ["monitor", "allowed_commands"])).toBeUndefined();
+    expect(getValue(cleared, ["monitor", "enabled"])).toBe(true);
+    expect(getValue(cleared, ["monitor", "batch_max_lines"])).toBe(10);
   });
 });

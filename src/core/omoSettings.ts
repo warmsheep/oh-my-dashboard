@@ -9,6 +9,7 @@ import type {
   AgentPairMapValue,
   AgentTextMapValue,
   ModelCatalogValue,
+  NumberMapValue,
   OmoMiscSetting,
   OmoMiscValues,
   OmoSettingValue,
@@ -31,6 +32,44 @@ const ENUM_CHIPS_MAX_ENTRIES = 32;
 const MODEL_CATALOG_MAX_ENTRIES = 32;
 const MODEL_ALIAS_MAX_LENGTH = 32;
 const MODEL_ALIAS_PATTERN = /^[A-Za-z0-9._-]+$/;
+/** Entry cap of the numberMap kind — mirrors the modelCatalog alias cap (32). */
+const NUMBER_MAP_MAX_ENTRIES = 32;
+
+/**
+ * Read-side key iteration of the free-key map kinds: descriptors carrying options
+ * read ONLY those keys (fixed set, display order); options-absent descriptors read
+ * every present key of the block/map (free-form names, e.g. categories).
+ */
+function mapReadKeys(setting: OmoMiscSetting, value: Record<string, unknown>): string[] {
+  return setting.options ?? Object.keys(value);
+}
+
+/**
+ * Write-side key policy of the map kinds: options-present descriptors restrict keys
+ * to that set; options-absent descriptors (numberMap, agentTextMap) accept free keys
+ * in the identifier charset modelCatalog aliases use (same pattern/length constants,
+ * no duplication).
+ */
+function isAllowedMapKey(setting: OmoMiscSetting, key: string): boolean {
+  if (setting.options !== undefined) {
+    return setting.options.includes(key);
+  }
+  return key.length <= MODEL_ALIAS_MAX_LENGTH && MODEL_ALIAS_PATTERN.test(key);
+}
+
+/**
+ * True when the raw entry is a finite number within the descriptor bounds. numberMap
+ * bounds are descriptor-declared only (an absent bound is unbounded) and decimals are
+ * always legal — the integer-forcing semantics of the scalar number kind do not apply.
+ */
+function isInRangeNumber(setting: OmoMiscSetting, entry: unknown): entry is number {
+  return (
+    typeof entry === "number" &&
+    Number.isFinite(entry) &&
+    (setting.min === undefined || entry >= setting.min) &&
+    (setting.max === undefined || entry <= setting.max)
+  );
+}
 
 /**
  * Effective key path of a descriptor at the target's scope: plugin (default) keys get the
@@ -66,6 +105,8 @@ function coerceOmoValue(setting: OmoMiscSetting, value: unknown): OmoSettingValu
       return coerceAgentPairMapValue(setting, value);
     case "agentTextMap":
       return coerceAgentTextMapValue(setting, value);
+    case "numberMap":
+      return coerceNumberMapValue(setting, value);
   }
 }
 
@@ -149,7 +190,7 @@ function coerceAgentTextMapValue(setting: OmoMiscSetting, value: unknown): Agent
   }
   const leafKey = setting.agents?.leafKey ?? "";
   const map: AgentTextMapValue = {};
-  for (const agent of setting.options ?? []) {
+  for (const agent of mapReadKeys(setting, value)) {
     const agentEntry = value[agent];
     if (!isRecord(agentEntry)) {
       continue;
@@ -163,6 +204,28 @@ function coerceAgentTextMapValue(setting: OmoMiscSetting, value: unknown): Agent
       continue;
     }
     map[agent] = text;
+  }
+  return map;
+}
+
+/**
+ * The numberMap read: per-key finite in-range number, flat at <path>.<key> or nested
+ * at <path>.<name>.<leafKey> (agents metadata). Non-numeric and out-of-range entries
+ * are SKIPPED (the write path never touches keys absent from the submitted map, so
+ * broken hand-written entries survive instead of being wiped); null entries are never
+ * produced by reads — null only marks deletion intent from the UI.
+ */
+function coerceNumberMapValue(setting: OmoMiscSetting, value: unknown): NumberMapValue | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const leafKey = setting.agents?.leafKey;
+  const map: NumberMapValue = {};
+  for (const key of mapReadKeys(setting, value)) {
+    const entry = leafKey === undefined ? value[key] : isRecord(value[key]) ? value[key][leafKey] : undefined;
+    if (isInRangeNumber(setting, entry)) {
+      map[key] = entry;
+    }
   }
   return map;
 }
@@ -192,7 +255,10 @@ export function readOmoMiscValues(text: string, sectionPath: JsonPath): OmoMiscV
  * remove the whole key); agentPairMap/agentTextMap emit one set/remove per agent at
  * agents.<name>.<leafKey (null entry → remove that leafKey; a null VALUE produces no
  * edits — never removes, or risks wiping, the shared `agents` config block, the same
- * philosophy as the mcp recordEditor). Pure edit builder — value validation lives in
+ * philosophy as the mcp recordEditor); numberMap emits one set/remove per entry (flat
+ * at <path>.<key>, nested at <path>.<name>.<leafKey>; a null VALUE removes the key
+ * itself for flat maps but produces no edits for nested leaf maps — never wipe the
+ * shared agents/categories block). Pure edit builder — value validation lives in
  * {@link isValidOmoMiscValue} and is enforced by callers.
  */
 export function omoMiscEdits(sectionPath: JsonPath, setting: OmoMiscSetting, value: OmoSettingValue): JsoncEdit[] {
@@ -271,6 +337,27 @@ export function omoMiscEdits(sectionPath: JsonPath, setting: OmoMiscSetting, val
       }
       return edits;
     }
+    case "numberMap": {
+      // Nested leaf maps share the agents/categories block — a null whole-value
+      // produces no edits; flat maps own their key and may remove it outright.
+      if (value === null) {
+        return setting.agents === undefined ? [{ path: fullPath, value: undefined, op: "remove" }] : [];
+      }
+      if (!isRecord(value)) {
+        return [];
+      }
+      const leafKey = setting.agents?.leafKey;
+      const edits: JsoncEdit[] = [];
+      for (const [key, entry] of Object.entries(value)) {
+        const entryPath = leafKey === undefined ? [...fullPath, key] : [...fullPath, key, leafKey];
+        edits.push(
+          entry === null
+            ? { path: entryPath, value: undefined, op: "remove" as const }
+            : { path: entryPath, value: entry, op: "set" as const },
+        );
+      }
+      return edits;
+    }
   }
 }
 
@@ -285,7 +372,10 @@ export function omoMiscEdits(sectionPath: JsonPath, setting: OmoMiscSetting, val
  * match their field schemas (null leaf = field unset), modelCatalog bounds the alias
  * charset/count and the model/reasoning shapes, agentPairMap bounds the agent keys
  * to the descriptor options plus the model/reasoning shapes, agentTextMap bounds
- * the agent keys and the trimmed ≤8000 text shape (null entry = delete marker).
+ * the agent keys and the trimmed ≤8000 text shape (null entry = delete marker),
+ * numberMap bounds each entry to a finite number within the descriptor min/max
+ * (decimals legal) with ≤32 entries and keys under the map key policy (options
+ * membership, or the modelCatalog identifier charset when options is absent).
  * null (remove op / 恢复默认) is always valid.
  */
 export function isValidOmoMiscValue(setting: OmoMiscSetting, value: unknown): boolean {
@@ -403,9 +493,8 @@ export function isValidOmoMiscValue(setting: OmoMiscSetting, value: unknown): bo
       if (!isRecord(value)) {
         return false;
       }
-      const options = setting.options ?? [];
       for (const [agent, text] of Object.entries(value)) {
-        if (!options.includes(agent)) {
+        if (!isAllowedMapKey(setting, agent)) {
           return false;
         }
         if (text === null) {
@@ -416,6 +505,26 @@ export function isValidOmoMiscValue(setting: OmoMiscSetting, value: unknown): bo
         }
         const trimmed = text.trim();
         if (trimmed.length === 0 || trimmed.length > AGENT_TEXT_MAX_LENGTH) {
+          return false;
+        }
+      }
+      return true;
+    }
+    case "numberMap": {
+      if (!isRecord(value)) {
+        return false;
+      }
+      const keys = Object.keys(value);
+      if (keys.length > NUMBER_MAP_MAX_ENTRIES) {
+        return false;
+      }
+      for (const key of keys) {
+        if (!isAllowedMapKey(setting, key)) {
+          return false;
+        }
+        const entry = value[key];
+        // null entry = delete marker; decimals legal, bounds per descriptor only.
+        if (entry !== null && !isInRangeNumber(setting, entry)) {
           return false;
         }
       }
