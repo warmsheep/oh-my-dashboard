@@ -18,7 +18,6 @@ import { isValidOmoMiscValue, omoMiscEdits, readOmoMiscValues } from "./omoSetti
 import {
   isValidOpencodeSettingValue,
   opencodeSettingEdits,
-  readMcpServers,
   readOpencodeSettingValues,
   readPermissionState,
   readRecordStates,
@@ -426,17 +425,12 @@ export class ConfigStore {
     this.writeAtomic(target, next);
   }
 
-  /** Declared MCP servers with their disabled flags (OpenCode tab payload view, display-tolerant). */
-  mcpServers(): { name: string; disabled: boolean }[] {
-    return readMcpServers(this.readTextOrEmpty(this.resolveOpencodeConfigPath()));
-  }
-
   /** The permission aggregate (shorthand + per-tool actions + advanced tool list) for the OpenCode tab payload. */
   permissionState(): OpencodePermissionState {
     return readPermissionState(this.readTextOrEmpty(this.resolveOpencodeConfigPath()));
   }
 
-  /** Record aggregates of the 命令/格式化/LSP groups (OpenCode tab payload view, display-tolerant). */
+  /** Record aggregates of the 命令/格式化/LSP/MCP 服务器 groups (OpenCode tab payload view, display-tolerant). */
   recordStates(): OpencodeRecordStates {
     return readRecordStates(this.readTextOrEmpty(this.resolveOpencodeConfigPath()));
   }

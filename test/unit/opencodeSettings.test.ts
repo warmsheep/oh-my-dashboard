@@ -6,7 +6,6 @@ import {
   isValidOpencodeSettingValue,
   isValidShallowObjectLeaf,
   opencodeSettingEdits,
-  readMcpServers,
   readOpencodeSettingValues,
   readPermissionState,
   readRecordState,
@@ -28,7 +27,7 @@ function setting(key: string): OpencodeSetting {
 
 /** Descriptor keys whose data rides dedicated payload fields, not the scalar values map. */
 const NON_SCALAR_KEYS = [
-  "mcpServers",
+  "mcpEntries",
   "tuiTheme",
   "command",
   "formatterMaster",
@@ -86,7 +85,7 @@ describe("readOpencodeSettingValues", () => {
     });
   });
 
-  it("returns null for absent keys on empty text; mcpServers/tuiTheme keys stay out of the scalar map", () => {
+  it("returns null for absent keys on empty text; mcpEntries/tuiTheme keys stay out of the scalar map", () => {
     const values = readOpencodeSettingValues("{}");
     for (const entry of OPENCODE_SETTINGS) {
       if (NON_SCALAR_KEYS.includes(entry.key)) {
@@ -331,20 +330,6 @@ describe("isValidOpencodeSettingValue", () => {
     expect(isValidOpencodeSettingValue(tools, "deny")).toBe(false);
   });
 
-  it("mcpServers: ≤32 well-formed names mapped to booleans", () => {
-    const mcp = setting("mcpServers");
-    expect(isValidOpencodeSettingValue(mcp, { filesystem: true, github: false })).toBe(true);
-    expect(isValidOpencodeSettingValue(mcp, {})).toBe(true);
-    const names = (count: number) =>
-      Object.fromEntries(Array.from({ length: count }, (_, i) => [`server-${i}`, i % 2 === 0]));
-    expect(isValidOpencodeSettingValue(mcp, names(32))).toBe(true);
-    expect(isValidOpencodeSettingValue(mcp, names(33))).toBe(false);
-    expect(isValidOpencodeSettingValue(mcp, { "bad name!": true })).toBe(false);
-    expect(isValidOpencodeSettingValue(mcp, { ["x".repeat(65)]: true })).toBe(false);
-    expect(isValidOpencodeSettingValue(mcp, { server: "true" })).toBe(false);
-    expect(isValidOpencodeSettingValue(mcp, null)).toBe(true); // no-op snapshot, never wipes mcp
-  });
-
   it("tuiTheme: kind string + file tui validates through isValidTuiTheme", () => {
     const theme = setting("tuiTheme");
     expect(isValidOpencodeSettingValue(theme, "opencode")).toBe(true);
@@ -356,21 +341,6 @@ describe("isValidOpencodeSettingValue", () => {
 });
 
 describe("opencodeSettingEdits (new kinds)", () => {
-  it("mcpServers snapshot: disable sets mcp.<name>.enabled=false, enable removes the key, null writes nothing", () => {
-    const mcp = setting("mcpServers");
-    expect(opencodeSettingEdits(mcp, { filesystem: true, github: false })).toEqual([
-      { path: ["mcp", "filesystem", "enabled"], value: false, op: "set" },
-      { path: ["mcp", "github", "enabled"], value: undefined, op: "remove" },
-    ]);
-    expect(opencodeSettingEdits(mcp, null)).toEqual([]);
-  });
-
-  it("mcpServers edits apply through jsoncEditor and leave sibling fields untouched", () => {
-    const seeded = '{\n  "mcp": {\n    "github": { "command": "npx", "enabled": false, "args": ["-y"] },\n  },\n}\n';
-    const next = applyEdits(seeded, opencodeSettingEdits(setting("mcpServers"), { github: false }));
-    expect(getValue(next, ["mcp", "github"])).toEqual({ command: "npx", args: ["-y"] }); // enabled key removed
-  });
-
   it("permissionTools: one set/remove edit per tool key present in the value", () => {
     const tools = setting("permissionTools");
     expect(opencodeSettingEdits(tools, { bash: "deny", edit: null })).toEqual([
@@ -472,35 +442,6 @@ describe("readPermissionState", () => {
     expect(state.shorthand).toBeNull();
     expect(state.tools).toEqual({ bash: "deny", edit: "allow" });
     expect(state.advancedTools).toEqual(["webfetch"]);
-  });
-});
-
-describe("readMcpServers", () => {
-  it("lists object entries with the disabled flag and skips non-object entries", () => {
-    const servers = readMcpServers(
-      JSON.stringify({
-        mcp: {
-          github: { command: "npx" },
-          filesystem: { enabled: false },
-          disabled_default: { enabled: false, command: "x" },
-          broken: "not an object",
-          also_broken: 42,
-        },
-      }),
-    );
-    expect(servers).toEqual([
-      { name: "github", disabled: false },
-      { name: "filesystem", disabled: true },
-      { name: "disabled_default", disabled: true },
-    ]);
-  });
-
-  it("returns [] for absent / non-object mcp and caps the list at 32 entries", () => {
-    expect(readMcpServers("{}")).toEqual([]);
-    expect(readMcpServers(JSON.stringify({ mcp: "nope" }))).toEqual([]);
-    expect(readMcpServers(JSON.stringify({ mcp: [] }))).toEqual([]);
-    const many = Object.fromEntries(Array.from({ length: 40 }, (_, i) => [`server-${i}`, { enabled: false }]));
-    expect(readMcpServers(JSON.stringify({ mcp: many })).length).toBe(32);
   });
 });
 
@@ -828,7 +769,7 @@ describe("batch-4 record kinds (readRecordState / readRecordStates)", () => {
     expect(state.entries.capped).toEqual({ extensions: nine.slice(0, 8) });
   });
 
-  it("readRecordStates materializes the three payload slots from the recordEditor descriptors", () => {
+  it("readRecordStates materializes the four payload slots from the recordEditor descriptors", () => {
     const states = readRecordStates(
       JSON.stringify({ command: { fix: { template: "t" } }, formatter: false, lsp: { broken: "skip me" } }),
     );
@@ -839,6 +780,7 @@ describe("batch-4 record kinds (readRecordState / readRecordStates)", () => {
       command: { mode: "unset", booleanValue: null, entries: {} },
       formatter: { mode: "unset", booleanValue: null, entries: {} },
       lsp: { mode: "unset", booleanValue: null, entries: {} },
+      mcp: { mode: "unset", booleanValue: null, entries: {} },
     });
   });
 });
@@ -1008,6 +950,120 @@ describe("recordEditor / recordMaster validation", () => {
     for (const key of ["command", "formatterMaster", "formatterEntries", "lspMaster", "lspEntries"]) {
       expect(Object.hasOwn(values, key)).toBe(false);
     }
+  });
+});
+
+describe("batch-5 mcpEntries recordEditor (MCP 服务器)", () => {
+  const mcpFields: readonly RecordFieldDef[] = setting("mcpEntries").record?.fields ?? [];
+
+  it("descriptor replaces the batch-2 mcpServers kind with recordEditor fields type/url/command/enabled", () => {
+    const descriptor = setting("mcpEntries");
+    expect(descriptor.kind).toBe("recordEditor");
+    expect(descriptor.path).toEqual(["mcp"]);
+    expect(descriptor.record?.fields.map((field) => [field.key, field.kind])).toEqual([
+      ["type", "enum"],
+      ["url", "text"],
+      ["command", "stringList"],
+      ["enabled", "boolean"],
+    ]);
+    expect(descriptor.record?.fields.find((field) => field.key === "type")?.required).toBe(true);
+    expect(OPENCODE_SETTINGS.some((entry) => entry.key === "mcpServers")).toBe(false);
+  });
+
+  it("readRecordState on mcp: object entries surface per field, broken entries are skipped", () => {
+    const state = readRecordState(
+      JSON.stringify({
+        mcp: {
+          context7: { type: "remote", url: "https://context7.example.internal/mcp", enabled: false },
+          local: { type: "local", command: ["npx", "-y", "some-server"] },
+          broken: "not an object",
+          partial: { url: "https://x.example/mcp" },
+        },
+      }),
+      ["mcp"],
+      mcpFields,
+    );
+    expect(state.mode).toBe("entries");
+    expect(state.entries.context7).toEqual({
+      type: "remote",
+      url: "https://context7.example.internal/mcp",
+      enabled: false,
+    });
+    expect(state.entries.local).toEqual({ type: "local", command: ["npx", "-y", "some-server"] });
+    expect(state.entries.partial).toEqual({ url: "https://x.example/mcp" }); // broken enum leaf omitted, entry survives
+    expect(state.entries.broken).toBeUndefined();
+  });
+
+  it("readRecordStates materializes the mcp slot alongside command/formatter/lsp", () => {
+    const states = readRecordStates(JSON.stringify({ mcp: { context7: { type: "remote", url: "https://x/mcp" } } }));
+    expect(states.mcp).toEqual({
+      mode: "entries",
+      booleanValue: null,
+      entries: { context7: { type: "remote", url: "https://x/mcp" } },
+    });
+    expect(readRecordStates("{}").mcp).toEqual({ mode: "unset", booleanValue: null, entries: {} });
+  });
+
+  it("validator: remote entries require a non-empty url (cross-field rule), local entries tolerate a missing command", () => {
+    const descriptor = setting("mcpEntries");
+    expect(isValidOpencodeSettingValue(descriptor, { remote1: { type: "remote", url: "https://x/mcp" } })).toBe(true);
+    expect(isValidOpencodeSettingValue(descriptor, { remote2: { type: "remote" } })).toBe(false);
+    expect(isValidOpencodeSettingValue(descriptor, { remote3: { type: "remote", url: null } })).toBe(false);
+    expect(isValidOpencodeSettingValue(descriptor, { remote4: { type: "remote", url: "" } })).toBe(false);
+    expect(isValidOpencodeSettingValue(descriptor, { remote5: { type: "remote", url: "   " } })).toBe(false);
+    expect(isValidOpencodeSettingValue(descriptor, { local1: { type: "local" } })).toBe(true);
+    expect(isValidOpencodeSettingValue(descriptor, { local2: { type: "local", command: ["npx", "srv"] } })).toBe(true);
+    expect(isValidOpencodeSettingValue(descriptor, { old: null })).toBe(true);
+    expect(isValidOpencodeSettingValue(descriptor, {})).toBe(true);
+    expect(isValidOpencodeSettingValue(descriptor, null)).toBe(true);
+  });
+
+  it("validator: type is a required enum leaf and unknown fields are rejected", () => {
+    const descriptor = setting("mcpEntries");
+    expect(isValidOpencodeSettingValue(descriptor, { noType: { url: "https://x/mcp" } })).toBe(false);
+    expect(isValidOpencodeSettingValue(descriptor, { badType: { type: "hybrid", url: "https://x/mcp" } })).toBe(false);
+    expect(isValidOpencodeSettingValue(descriptor, { extra: { type: "local", made_up: 1 } })).toBe(false);
+    expect(isValidOpencodeSettingValue(descriptor, { notAnEntry: "nope" })).toBe(false);
+  });
+
+  it("edits round-trip: set a remote entry, toggle enabled, delete via a null entry — siblings untouched", () => {
+    const seeded =
+      '{\n  "mcp": {\n    // user note\n    "keep": { "type": "local", "command": ["npx", "keep"] },\n  },\n}\n';
+    const next = applyEdits(
+      seeded,
+      opencodeSettingEdits(setting("mcpEntries"), {
+        context7: { type: "remote", url: "https://context7.example.internal/mcp", enabled: false },
+      }),
+    );
+    expect(getValue(next, ["mcp", "context7"])).toEqual({
+      type: "remote",
+      url: "https://context7.example.internal/mcp",
+      enabled: false,
+    });
+    expect(getValue(next, ["mcp", "keep"])).toEqual({ type: "local", command: ["npx", "keep"] });
+    expect(next).toContain("// user note");
+
+    const toggled = applyEdits(
+      next,
+      opencodeSettingEdits(setting("mcpEntries"), {
+        context7: { type: "remote", url: "https://context7.example.internal/mcp" },
+      }),
+    );
+    expect(getValue(toggled, ["mcp", "context7"])).toEqual({
+      type: "remote",
+      url: "https://context7.example.internal/mcp",
+    });
+
+    const deleted = applyEdits(toggled, opencodeSettingEdits(setting("mcpEntries"), { context7: null }));
+    expect(getValue(deleted, ["mcp", "context7"])).toBeUndefined();
+    expect(getValue(deleted, ["mcp", "keep"])).toEqual({ type: "local", command: ["npx", "keep"] });
+  });
+
+  it("mcpEntries values never enter the scalar values map (rides payload.records.mcp)", () => {
+    const values = readOpencodeSettingValues(
+      JSON.stringify({ mcp: { context7: { type: "remote", url: "https://x/mcp" } } }),
+    );
+    expect(Object.hasOwn(values, "mcpEntries")).toBe(false);
   });
 });
 

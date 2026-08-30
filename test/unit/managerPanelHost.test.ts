@@ -465,6 +465,18 @@ describe("manager panel OpenCode/OMO 设置 protocol", () => {
     expect(fs.readFileSync(path.join(root, "oh-my-opencode.json")).equals(bytesBefore)).toBe(true);
   });
 
+  it("a stale pre-batch-5 key (mcpServers, renamed to mcpEntries) gets a !ok reply echoing the key", async () => {
+    const { deps, root } = makeDeps();
+    const panel = await bootedPanel(deps);
+    const opencodeExisted = fs.existsSync(path.join(root, "opencode.json"));
+    panel.receive({ type: "opencodeSetSetting", payload: { key: "mcpServers", value: { x: true } } });
+    expect(panel.posted).toContainEqual({
+      type: "opencodeSettingSaved",
+      payload: { ok: false, key: "mcpServers", error: "设置请求格式无法识别" },
+    });
+    expect(fs.existsSync(path.join(root, "opencode.json"))).toBe(opencodeExisted);
+  });
+
   it("a write failure (broken opencode.json) replies !ok with the friendly error, no re-push", async () => {
     const { deps, root } = makeDeps();
     fs.writeFileSync(path.join(root, "opencode.json"), "{,}\n");
@@ -503,13 +515,16 @@ describe("manager panel OpenCode/OMO 设置 protocol", () => {
     expect(fs.readFileSync(path.join(root, "opencode.json"), "utf8")).toBe('{ "command": "oops" }\n');
   });
 
-  it("ready pushes an opencodeInit carrying the permission/mcp/tui aggregate fields", async () => {
+  it("ready pushes an opencodeInit carrying the permission/records.mcp/tui aggregate fields", async () => {
     const { deps, root } = makeDeps();
     fs.writeFileSync(
       path.join(root, "opencode.json"),
       JSON.stringify({
         permission: { bash: "deny", webfetch: { "https://*": "allow" } },
-        mcp: { github: { enabled: false }, filesystem: { command: "npx" } },
+        mcp: {
+          github: { type: "local", command: ["npx"], enabled: false },
+          filesystem: { type: "local", command: ["npx"] },
+        },
       }),
     );
     fs.writeFileSync(path.join(root, "tui.json"), JSON.stringify({ theme: "catppuccin" }));
@@ -519,16 +534,20 @@ describe("manager panel OpenCode/OMO 设置 protocol", () => {
       inits[0] as {
         payload: {
           permission: { shorthand: unknown; tools: unknown; advancedTools: unknown };
-          mcp: unknown;
+          records: { mcp: unknown };
           tui: { theme: unknown; path: string };
         };
       }
     ).payload;
     expect(payload.permission).toEqual({ shorthand: null, tools: { bash: "deny" }, advancedTools: ["webfetch"] });
-    expect(payload.mcp).toEqual([
-      { name: "github", disabled: true },
-      { name: "filesystem", disabled: false },
-    ]);
+    expect(payload.records.mcp).toEqual({
+      mode: "entries",
+      booleanValue: null,
+      entries: {
+        github: { type: "local", command: ["npx"], enabled: false },
+        filesystem: { type: "local", command: ["npx"] },
+      },
+    });
     expect(payload.tui).toEqual({ theme: "catppuccin", path: path.join(root, "tui.json") });
   });
 
@@ -542,7 +561,10 @@ describe("manager panel OpenCode/OMO 设置 protocol", () => {
       payload: { key: "compaction", value: { auto: false, tail_turns: 5 } },
     });
     panel.receive({ type: "opencodeSetSetting", payload: { key: "permissionTools", value: { bash: "ask" } } });
-    panel.receive({ type: "opencodeSetSetting", payload: { key: "mcpServers", value: { github: true } } });
+    panel.receive({
+      type: "opencodeSetSetting",
+      payload: { key: "mcpEntries", value: { github: { type: "local", command: ["npx"], enabled: false } } },
+    });
     panel.receive({ type: "opencodeSetSetting", payload: { key: "agentBuildTemperature", value: 0.7 } });
 
     const replies = messagesOfType(panel, "opencodeSettingSaved");
@@ -550,7 +572,7 @@ describe("manager panel OpenCode/OMO 设置 protocol", () => {
       "instructions",
       "compaction",
       "permissionTools",
-      "mcpServers",
+      "mcpEntries",
       "agentBuildTemperature",
     ]);
     for (const reply of replies) {
@@ -560,13 +582,17 @@ describe("manager panel OpenCode/OMO 设置 protocol", () => {
     expect(written.instructions).toEqual([".cursor/rules"]);
     expect(written.compaction).toEqual({ auto: false, tail_turns: 5 });
     expect(written.permission).toEqual({ bash: "ask" });
-    expect(written.mcp.github).toEqual({ enabled: false });
+    expect(written.mcp.github).toEqual({ type: "local", command: ["npx"], enabled: false });
     expect(written.agent).toEqual({ build: { temperature: 0.7 } });
     // The last re-pushed payload reflects the fresh aggregate state.
     const inits = messagesOfType(panel, "opencodeInit");
-    const last = (inits[inits.length - 1] as { payload: { permission: unknown; mcp: unknown } }).payload;
+    const last = (inits[inits.length - 1] as { payload: { permission: unknown; records: { mcp: unknown } } }).payload;
     expect(last.permission).toEqual({ shorthand: null, tools: { bash: "ask" }, advancedTools: [] });
-    expect(last.mcp).toEqual([{ name: "github", disabled: true }]);
+    expect(last.records.mcp).toEqual({
+      mode: "entries",
+      booleanValue: null,
+      entries: { github: { type: "local", command: ["npx"], enabled: false } },
+    });
   });
 
   it("invalid new-kind values get the !ok backstop with the key echo and write nothing", async () => {
@@ -580,7 +606,10 @@ describe("manager panel OpenCode/OMO 设置 protocol", () => {
     });
     panel.receive({ type: "opencodeSetSetting", payload: { key: "compaction", value: { tail_turns: 101 } } });
     panel.receive({ type: "opencodeSetSetting", payload: { key: "permissionTools", value: { made_up: "ask" } } });
-    panel.receive({ type: "opencodeSetSetting", payload: { key: "mcpServers", value: { "bad name!": true } } });
+    panel.receive({
+      type: "opencodeSetSetting",
+      payload: { key: "mcpEntries", value: { broken: { type: "remote" } } },
+    });
     panel.receive({ type: "opencodeSetSetting", payload: { key: "agentBuildTemperature", value: 2.5 } });
 
     const replies = messagesOfType(panel, "opencodeSettingSaved");
@@ -813,5 +842,69 @@ describe("manager panel OpenCode record kinds (batch-4)", () => {
       inits[inits.length - 1] as { payload: { records: { formatter: { mode: string; booleanValue: unknown } } } }
     ).payload.records.formatter;
     expect(formatter).toEqual({ mode: "boolean", booleanValue: false, entries: {} });
+  });
+
+  it("boot payload carries records.mcp and no legacy mcp slot (batch-5 migration)", async () => {
+    const { deps, root } = makeDeps();
+    fs.writeFileSync(
+      path.join(root, "opencode.json"),
+      JSON.stringify({
+        mcp: { context7: { type: "remote", url: "https://context7.example.internal/mcp", enabled: false } },
+      }),
+    );
+    const panel = await bootedPanel(deps);
+    const inits = messagesOfType(panel, "opencodeInit");
+    const payload = (inits[0] as { payload: Record<string, unknown> }).payload;
+    expect(Object.hasOwn(payload, "mcp")).toBe(false);
+    const records = (inits[0] as { payload: { records: { mcp: { mode: string; entries: Record<string, unknown> } } } })
+      .payload.records;
+    expect(records.mcp).toEqual({
+      mode: "entries",
+      booleanValue: null,
+      entries: { context7: { type: "remote", url: "https://context7.example.internal/mcp", enabled: false } },
+    });
+  });
+
+  it("mcpEntries write passes the cross-field gate, writes through and re-pushes records.mcp", async () => {
+    const { deps, root } = makeDeps();
+    fs.writeFileSync(path.join(root, "opencode.json"), "{}\n");
+    const panel = await bootedPanel(deps);
+
+    panel.receive({
+      type: "opencodeSetSetting",
+      payload: {
+        key: "mcpEntries",
+        value: { context7: { type: "remote", url: "https://context7.example.internal/mcp" } },
+      },
+    });
+
+    expect(panel.posted).toContainEqual({ type: "opencodeSettingSaved", payload: { ok: true, key: "mcpEntries" } });
+    expect(JSON.parse(fs.readFileSync(path.join(root, "opencode.json"), "utf8")).mcp).toEqual({
+      context7: { type: "remote", url: "https://context7.example.internal/mcp" },
+    });
+    const inits = messagesOfType(panel, "opencodeInit");
+    const records = (inits[inits.length - 1] as { payload: { records: { mcp: unknown } } }).payload.records;
+    expect(records.mcp).toEqual({
+      mode: "entries",
+      booleanValue: null,
+      entries: { context7: { type: "remote", url: "https://context7.example.internal/mcp" } },
+    });
+  });
+
+  it("a stale mcpServers message (removed kind) hits the generic unknown-key backstop with !ok", async () => {
+    const { deps, root } = makeDeps();
+    fs.writeFileSync(path.join(root, "opencode.json"), "{}\n");
+    const panel = await bootedPanel(deps);
+    const bytesBefore = fs.readFileSync(path.join(root, "opencode.json"));
+
+    panel.receive({ type: "opencodeSetSetting", payload: { key: "mcpServers", value: { github: true } } });
+
+    const replies = messagesOfType(panel, "opencodeSettingSaved");
+    expect(replies.length).toBe(1);
+    expect(replies[0]).toEqual({
+      type: "opencodeSettingSaved",
+      payload: { ok: false, key: "mcpServers", error: "设置请求格式无法识别" },
+    });
+    expect(fs.readFileSync(path.join(root, "opencode.json")).equals(bytesBefore)).toBe(true);
   });
 });

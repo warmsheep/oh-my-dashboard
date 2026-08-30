@@ -29,11 +29,7 @@ const STRING_LIST_ENTRY_MAX_LENGTH = 256;
 /** Bounds of the orderedList kind (design: 1–64 entries, each trimmed non-empty ≤64 chars, dupes rejected). */
 const ORDERED_LIST_MAX_ENTRIES = 64;
 const ORDERED_LIST_ENTRY_MAX_LENGTH = 64;
-/** Bounds of the mcpServers kind: server names share the provider-id charset, capped at 32 entries. */
-const MCP_NAME_PATTERN = /^[A-Za-z0-9._-]+$/;
-const MCP_NAME_MAX_LENGTH = 64;
-const MCP_SERVERS_MAX_ENTRIES = 32;
-/** Default recordEditor name rules (command names, formatter/lsp ids): npm-ish identifier charset. */
+/** Default recordEditor name rules (command names, formatter/lsp/mcp ids): npm-ish identifier charset. */
 const RECORD_NAME_PATTERN = /^[A-Za-z0-9._-]+$/;
 const RECORD_NAME_MAX_LENGTH = 64;
 const RECORD_MAX_ENTRIES = 32;
@@ -55,19 +51,14 @@ function isPermissionAction(value: unknown): value is "allow" | "ask" | "deny" {
 /**
  * Read every OPENCODE_SETTINGS value from an opencode.json[c] text (display-tolerant:
  * absent and wrong-shaped values read as null so the UI never lies about types).
- * Descriptors with a `file` target or a dedicated payload field (mcpServers /
- * recordEditor / recordMaster kinds) are NOT part of this scalar map — their data
- * rides the payload's dedicated tui/mcp/records fields instead.
+ * Descriptors with a `file` target or a dedicated payload field (recordEditor /
+ * recordMaster kinds — command/formatter/lsp/mcp) are NOT part of this scalar map —
+ * their data rides the payload's dedicated tui/records fields instead.
  */
 export function readOpencodeSettingValues(text: string): Record<string, OpencodeSettingValue> {
   const values: Record<string, OpencodeSettingValue> = {};
   for (const setting of OPENCODE_SETTINGS) {
-    if (
-      setting.file !== undefined ||
-      setting.kind === "mcpServers" ||
-      setting.kind === "recordEditor" ||
-      setting.kind === "recordMaster"
-    ) {
+    if (setting.file !== undefined || setting.kind === "recordEditor" || setting.kind === "recordMaster") {
       continue;
     }
     values[setting.key] = coerceReadValue(setting, getValue<unknown>(text, setting.path));
@@ -110,7 +101,6 @@ function coerceReadValue(setting: OpencodeSetting, value: unknown): OpencodeSett
       return tools;
     }
     case "enumChips":
-    case "mcpServers":
     case "recordEditor":
     case "recordMaster":
       // OMO-side kind / dedicated-payload kinds: no OpenCode descriptor reaches here.
@@ -147,30 +137,7 @@ export function readPermissionState(text: string): OpencodePermissionState {
 }
 
 /**
- * Declared MCP servers from an opencode.json[c] text: object entries only (others
- * cannot carry an `enabled` flag), disabled = `entry.enabled === false`, capped at
- * 32 entries in stable key order.
- */
-export function readMcpServers(text: string): { name: string; disabled: boolean }[] {
-  const value = getValue<unknown>(text, ["mcp"]);
-  if (!isRecord(value)) {
-    return [];
-  }
-  const servers: { name: string; disabled: boolean }[] = [];
-  for (const [name, entry] of Object.entries(value)) {
-    if (servers.length >= MCP_SERVERS_MAX_ENTRIES) {
-      break;
-    }
-    if (!isRecord(entry)) {
-      continue;
-    }
-    servers.push({ name, disabled: entry.enabled === false });
-  }
-  return servers;
-}
-
-/**
- * The record aggregate of one recordEditor path (command/formatter/lsp): a boolean
+ * The record aggregate of one recordEditor path (command/formatter/lsp/mcp): a boolean
  * value reads as the master form, an object as the named-entry form (non-object
  * entries SKIPPED; per-entry leaves failing their field kind — wrong-typed OR
  * validator-incompatible (empty/over-long text, non-unique/over-cap stringList) — are
@@ -199,8 +166,8 @@ export function readRecordState(text: string, path: JsonPath, fields: readonly R
 }
 
 /**
- * All three record aggregates of the OpenCode tab payload, keyed by the recordEditor
- * descriptors' path root (command/formatter/lsp). Paths without a matching descriptor
+ * All four record aggregates of the OpenCode tab payload, keyed by the recordEditor
+ * descriptors' path root (command/formatter/lsp/mcp). Paths without a matching descriptor
  * stay unset, so the payload slot is always fully materialized.
  */
 export function readRecordStates(text: string): OpencodeRecordStates {
@@ -208,6 +175,7 @@ export function readRecordStates(text: string): OpencodeRecordStates {
     command: unsetRecordAggregate(),
     formatter: unsetRecordAggregate(),
     lsp: unsetRecordAggregate(),
+    mcp: unsetRecordAggregate(),
   };
   for (const setting of OPENCODE_SETTINGS) {
     if (setting.kind !== "recordEditor") {
@@ -218,7 +186,7 @@ export function readRecordStates(text: string): OpencodeRecordStates {
       byPath[key] = readRecordState(text, setting.path, setting.record?.fields ?? []);
     }
   }
-  return { command: byPath.command, formatter: byPath.formatter, lsp: byPath.lsp };
+  return { command: byPath.command, formatter: byPath.formatter, lsp: byPath.lsp, mcp: byPath.mcp };
 }
 
 /** Fresh unset aggregate (shared default of the read paths). */
@@ -371,9 +339,7 @@ function isRecordFieldValue(value: unknown): value is RecordFieldValue {
 /**
  * The edits for one descriptor value. Most kinds produce the single set-or-remove
  * op at the descriptor path (null → remove); the diffing kinds never rewrite whole
- * objects: mcpServers never wipes the `mcp` key (null → no edits; true → set
- * enabled=false; false → remove the enabled override, keeping the entry's other
- * fields), permissionTools emits one set/remove per tool key present in the value,
+ * objects: permissionTools emits one set/remove per tool key present in the value,
  * shallowObject edits per leaf ({@link shallowObjectEdits}), recordEditor diffs
  * per entry name ({@link recordEditorEdits}) and recordMaster is the plain
  * boolean set/remove ({@link recordMasterEdits}). Pure edit builder — value
@@ -382,20 +348,6 @@ function isRecordFieldValue(value: unknown): value is RecordFieldValue {
  */
 export function opencodeSettingEdits(setting: OpencodeSetting, value: OpencodeSettingValue): JsoncEdit[] {
   switch (setting.kind) {
-    case "mcpServers": {
-      if (value === null || !isRecord(value)) {
-        return [];
-      }
-      const edits: JsoncEdit[] = [];
-      for (const [name, disabled] of Object.entries(value)) {
-        edits.push(
-          disabled === true
-            ? { path: ["mcp", name, "enabled"], value: false, op: "set" as const }
-            : { path: ["mcp", name, "enabled"], value: undefined, op: "remove" as const },
-        );
-      }
-      return edits;
-    }
     case "permissionTools": {
       // Accepted residue: removing the last tool key can leave an empty `permission: {}`
       // container behind. Cleaning it up would require reading the file's current content
@@ -446,9 +398,9 @@ export function opencodeSettingEdits(setting: OpencodeSetting, value: OpencodeSe
  * trimmed non-empty ≤256-char entries, orderedList is 1–64 unique trimmed non-empty ≤64-char
  * entries, shallowObject leaves must match their field schemas (null leaf = field
  * unset), permissionTools keys must
- * be known tools with allow/ask/deny (or null), mcpServers is ≤32 well-formed names
- * mapped to booleans, recordEditor bounds entry names (charset/length/≤32) and each
- * entry's fields per kind (required fields non-empty; stringList fields ≤8 entries),
+ * be known tools with allow/ask/deny (or null), recordEditor bounds entry names
+ * (charset/length/≤32) and each entry's fields per kind (required fields non-empty;
+ * stringList fields ≤8 entries; mcpEntries additionally couples type=remote ⇒ url),
  * recordMaster is true|false (null remove handled above). null (remove op) is always valid.
  */
 export function isValidOpencodeSettingValue(setting: OpencodeSetting, value: unknown): boolean {
@@ -525,21 +477,6 @@ export function isValidOpencodeSettingValue(setting: OpencodeSetting, value: unk
       }
       return true;
     }
-    case "mcpServers": {
-      if (!isRecord(value)) {
-        return false;
-      }
-      const names = Object.keys(value);
-      if (names.length > MCP_SERVERS_MAX_ENTRIES) {
-        return false;
-      }
-      for (const name of names) {
-        if (name.length > MCP_NAME_MAX_LENGTH || !MCP_NAME_PATTERN.test(name) || typeof value[name] !== "boolean") {
-          return false;
-        }
-      }
-      return true;
-    }
     case "recordEditor": {
       if (!isRecord(value)) {
         return false;
@@ -560,6 +497,15 @@ export function isValidOpencodeSettingValue(setting: OpencodeSetting, value: unk
         // null entry = delete marker (write path removes the name).
         if (entry !== null && (!isRecord(entry) || !isValidRecordEntry(fields, entry))) {
           return false;
+        }
+        // Cross-field rule, deliberately inline (design: NOT a generic framework):
+        // an mcpEntries entry of type=remote must carry a usable url — the text-field
+        // kind already bounds presence/shape for PRESENT urls, this adds the coupling
+        // "remote ⇒ url required" that per-field schemas cannot express.
+        if (setting.key === "mcpEntries" && entry !== null) {
+          if (entry.type === "remote" && (typeof entry.url !== "string" || entry.url.trim().length === 0)) {
+            return false;
+          }
         }
       }
       return true;

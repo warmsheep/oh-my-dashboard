@@ -1110,7 +1110,9 @@ describe("ConfigStore.setOpencodeSetting / opencodeSettingValues", () => {
     expect(() => store.setOpencodeSetting("instructions", ["a.md", "a.md"])).toThrow("OPENCODE_SETTING_INVALID");
     expect(() => store.setOpencodeSetting("compaction", { tail_turns: 101 })).toThrow("OPENCODE_SETTING_INVALID");
     expect(() => store.setOpencodeSetting("permissionTools", { made_up: "ask" })).toThrow("OPENCODE_SETTING_INVALID");
-    expect(() => store.setOpencodeSetting("mcpServers", { "bad name!": true })).toThrow("OPENCODE_SETTING_INVALID");
+    expect(() => store.setOpencodeSetting("mcpEntries", { broken: { type: "remote" } })).toThrow(
+      "OPENCODE_SETTING_INVALID",
+    );
     expect(() => store.setOpencodeSetting("agentBuildTemperature", 2.5)).toThrow("OPENCODE_SETTING_INVALID");
   });
 
@@ -1131,31 +1133,29 @@ describe("ConfigStore.setOpencodeSetting / opencodeSettingValues", () => {
     expect(store.permissionState().advancedTools).toEqual(["bash"]);
   });
 
-  it("mcpServers snapshot write: disable sets enabled=false, enable removes the key, siblings survive", () => {
+  it("mcpEntries entry write: per-name diff leaves unrelated entries untouched (batch-5 migration)", () => {
     const dir = sandbox();
     const target = path.join(dir, "opencode.json");
     writeFileSync(
       target,
-      '{\n  "mcp": {\n    "filesystem": { "command": "npx", "args": ["-y"] },\n    "github": { "enabled": false, "command": "gh" },\n  },\n}\n',
+      '{\n  "mcp": {\n    "filesystem": { "type": "local", "command": ["npx"] },\n    "github": { "type": "local", "command": ["gh"] },\n  },\n}\n',
     );
     const store = new ConfigStore({ configDirOverride: dir, homeDir: sandbox() });
 
-    store.setOpencodeSetting("mcpServers", { filesystem: true });
+    // Full-entry snapshot semantics (same as every recordEditor): writing a name
+    // replaces that entry; names absent from the map stay untouched.
+    store.setOpencodeSetting("mcpEntries", { filesystem: { type: "local", command: ["npx"], enabled: false } });
 
     expect(getValue(readFileSync(target, "utf8"), ["mcp", "filesystem"])).toEqual({
-      command: "npx",
-      args: ["-y"],
+      type: "local",
+      command: ["npx"],
       enabled: false,
     });
-    expect(getValue(readFileSync(target, "utf8"), ["mcp", "github"])).toEqual({ enabled: false, command: "gh" });
-
-    store.setOpencodeSetting("mcpServers", { github: false });
-
-    expect(getValue(readFileSync(target, "utf8"), ["mcp", "github"])).toEqual({ command: "gh" });
-    expect(store.mcpServers()).toEqual([
-      { name: "filesystem", disabled: true },
-      { name: "github", disabled: false },
-    ]);
+    expect(getValue(readFileSync(target, "utf8"), ["mcp", "github"])).toEqual({ type: "local", command: ["gh"] });
+    expect(store.recordStates().mcp.entries).toEqual({
+      filesystem: { type: "local", command: ["npx"], enabled: false },
+      github: { type: "local", command: ["gh"] },
+    });
   });
 
   it("instructions round-trip: set writes the array, null removes the key", () => {
@@ -1212,14 +1212,18 @@ describe("ConfigStore.setOpencodeSetting / opencodeSettingValues", () => {
       tools: { bash: "deny" },
       advancedTools: ["webfetch"],
     });
-    expect(store.mcpServers()).toEqual([{ name: "github", disabled: true }]);
+    expect(store.recordStates().mcp).toEqual({
+      mode: "entries",
+      booleanValue: null,
+      entries: { github: { enabled: false } },
+    });
   });
 
-  it("permissionState/mcpServers read empty aggregates for a missing config", () => {
+  it("permissionState/recordStates read empty aggregates for a missing config", () => {
     const dir = sandbox();
     const store = new ConfigStore({ configDirOverride: dir, homeDir: sandbox() });
     expect(store.permissionState()).toEqual({ shorthand: null, tools: {}, advancedTools: [] });
-    expect(store.mcpServers()).toEqual([]);
+    expect(store.recordStates().mcp).toEqual({ mode: "unset", booleanValue: null, entries: {} });
   });
 
   it("round-trips logLevel (enum) and watcherIgnore (stringList) including the null remove", () => {
@@ -1741,6 +1745,137 @@ describe("ConfigStore.setOmoMiscSetting / omoMiscValues", () => {
 
     expect(getValue(readFileSync(file, "utf8"), ["[opencode]", "agent_order"])).toBeUndefined();
     expect(store.omoMiscValues().agentOrder).toBeNull();
+  });
+});
+
+describe("ConfigStore batch-5 (agentPairMap / agentTextMap / claudeCode / mcpEntries)", () => {
+  it("agentUltrawork round-trips on the omo target: writes [opencode].agents.<name>.ultrawork, siblings byte-stable", () => {
+    const dir = sandbox();
+    const home = sandbox();
+    mkdirSync(path.join(home, ".omo"), { recursive: true });
+    writeFileSync(
+      path.join(home, ".omo", "omo.jsonc"),
+      '{\n  "[opencode]": {\n    "agents": { "oracle": { "model": "zhipuai/glm-5", "reasoning": "high" } },\n  },\n}\n',
+    );
+    const store = new ConfigStore({ configDirOverride: dir, homeDir: home });
+    const before = readFileSync(path.join(home, ".omo", "omo.jsonc"), "utf8");
+
+    store.setOmoMiscSetting("agentUltrawork", { oracle: { model: "kimi/k2", reasoning: "max" } });
+
+    const text = readFileSync(path.join(home, ".omo", "omo.jsonc"), "utf8");
+    expect(validate(text)).toEqual([]);
+    expect(getValue(text, ["[opencode]", "agents", "oracle", "ultrawork"])).toEqual({
+      model: "kimi/k2",
+      reasoning: "max",
+    });
+    // 模型配置's sibling keys must survive untouched.
+    expect(getValue(text, ["[opencode]", "agents", "oracle", "model"])).toBe("zhipuai/glm-5");
+    expect(getValue(text, ["[opencode]", "agents", "oracle", "reasoning"])).toBe("high");
+    expect(store.omoMiscValues().agentUltrawork).toEqual({ oracle: { model: "kimi/k2", reasoning: "max" } });
+
+    store.setOmoMiscSetting("agentUltrawork", { oracle: null });
+
+    const after = readFileSync(path.join(home, ".omo", "omo.jsonc"), "utf8");
+    expect(getValue(after, ["[opencode]", "agents", "oracle", "ultrawork"])).toBeUndefined();
+    expect(getValue(after, ["[opencode]", "agents", "oracle"])).toEqual({
+      model: "zhipuai/glm-5",
+      reasoning: "high",
+    });
+    // A whole-null value is a no-op write: the agents block stays exactly as written.
+    store.setOmoMiscSetting("agentUltrawork", null);
+    expect(readFileSync(path.join(home, ".omo", "omo.jsonc"), "utf8")).toBe(after);
+    expect(before).toContain('"model": "zhipuai/glm-5"');
+  });
+
+  it("agentCompaction round-trips on the legacy target (top-level agents path)", () => {
+    const dir = sandbox();
+    writeFileSync(path.join(dir, "oh-my-opencode.json"), '{ "agents": {} }\n');
+    const store = new ConfigStore({ configDirOverride: dir, homeDir: sandbox() });
+
+    store.setOmoMiscSetting("agentCompaction", { atlas: { model: "moonshotai/kimi-k2", reasoning: null } });
+
+    const file = path.join(dir, "oh-my-opencode.json");
+    expect(getValue(readFileSync(file, "utf8"), ["agents", "atlas", "compaction"])).toEqual({
+      model: "moonshotai/kimi-k2",
+    });
+    expect(store.omoMiscValues().agentCompaction).toEqual({ atlas: { model: "moonshotai/kimi-k2", reasoning: null } });
+  });
+
+  it("agentPromptAppend round-trips on the omo target and validates the ≤8000 bound", () => {
+    const dir = sandbox();
+    const home = sandbox();
+    mkdirSync(path.join(home, ".omo"), { recursive: true });
+    writeFileSync(path.join(home, ".omo", "omo.jsonc"), '{ "[opencode]": {} }\n');
+    const store = new ConfigStore({ configDirOverride: dir, homeDir: home });
+
+    store.setOmoMiscSetting("agentPromptAppend", { oracle: "输出前先自检。" });
+
+    const file = path.join(home, ".omo", "omo.jsonc");
+    expect(getValue(readFileSync(file, "utf8"), ["[opencode]", "agents", "oracle", "prompt_append"])).toBe(
+      "输出前先自检。",
+    );
+    expect(store.omoMiscValues().agentPromptAppend).toEqual({ oracle: "输出前先自检。" });
+    expect(() => store.setOmoMiscSetting("agentPromptAppend", { oracle: "x".repeat(8001) })).toThrow(
+      "OMO_SETTING_INVALID",
+    );
+  });
+
+  it("claudeCode round-trips per-leaf and keeps unrelated claude_code keys", () => {
+    const dir = sandbox();
+    writeFileSync(path.join(dir, "oh-my-opencode.json"), '{ "claude_code": { "hooks": true, "custom": 1 } }\n');
+    const store = new ConfigStore({ configDirOverride: dir, homeDir: sandbox() });
+
+    store.setOmoMiscSetting("claudeCode", { mcp: false, hooks: null });
+
+    const file = path.join(dir, "oh-my-opencode.json");
+    expect(getValue(readFileSync(file, "utf8"), ["claude_code"])).toEqual({ custom: 1, mcp: false });
+    expect(store.omoMiscValues().claudeCode).toMatchObject({ mcp: false, hooks: null });
+  });
+
+  it("mcpEntries round-trip: remote with url writes, remote without url rejected, local command list, enabled toggle", () => {
+    const dir = sandbox();
+    writeFileSync(path.join(dir, "opencode.json"), '{ "mcp": { "keep": { "type": "local", "command": ["keep"] } } }\n');
+    const store = new ConfigStore({ configDirOverride: dir, homeDir: sandbox() });
+
+    store.setOpencodeSetting("mcpEntries", {
+      context7: { type: "remote", url: "https://context7.example.internal/mcp" },
+    });
+
+    const file = path.join(dir, "opencode.json");
+    expect(getValue(readFileSync(file, "utf8"), ["mcp", "context7"])).toEqual({
+      type: "remote",
+      url: "https://context7.example.internal/mcp",
+    });
+    expect(store.recordStates().mcp).toEqual({
+      mode: "entries",
+      booleanValue: null,
+      entries: {
+        context7: { type: "remote", url: "https://context7.example.internal/mcp" },
+        keep: { type: "local", command: ["keep"] },
+      },
+    });
+
+    expect(() => store.setOpencodeSetting("mcpEntries", { broken: { type: "remote" } })).toThrow(
+      "OPENCODE_SETTING_INVALID",
+    );
+
+    store.setOpencodeSetting("mcpEntries", {
+      context7: { type: "remote", url: "https://context7.example.internal/mcp", enabled: false },
+      local1: { type: "local", command: ["npx", "-y", "some-server"] },
+    });
+    expect(getValue(readFileSync(file, "utf8"), ["mcp", "context7"])).toEqual({
+      type: "remote",
+      url: "https://context7.example.internal/mcp",
+      enabled: false,
+    });
+    expect(getValue(readFileSync(file, "utf8"), ["mcp", "local1"])).toEqual({
+      type: "local",
+      command: ["npx", "-y", "some-server"],
+    });
+    expect(getValue(readFileSync(file, "utf8"), ["mcp", "keep"])).toEqual({ type: "local", command: ["keep"] });
+
+    store.setOpencodeSetting("mcpEntries", { context7: null });
+    expect(getValue(readFileSync(file, "utf8"), ["mcp", "context7"])).toBeUndefined();
   });
 });
 
