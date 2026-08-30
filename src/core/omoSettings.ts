@@ -1,55 +1,230 @@
-import { OMO_MISC_SETTINGS } from "../shared/protocol";
-import type { OmoMiscSetting, OmoMiscValues } from "../shared/protocol";
+import { MODEL_ID_PATTERN } from "../constants";
+import { OMO_MISC_SETTINGS, OMO_REASONING_LEVELS } from "../shared/protocol";
+import type { ModelCatalogValue, OmoMiscSetting, OmoMiscValues, OmoSettingValue } from "../shared/protocol";
 import { getValue } from "./jsoncEditor";
 import type { JsoncEdit } from "./jsoncEditor";
+import {
+  extractShallowObjectValue,
+  isRecord,
+  isValidShallowObjectLeaf,
+  isValidStringListValue,
+  shallowObjectEdits,
+} from "./opencodeSettings";
 import type { JsonPath } from "./types";
+
+/** Bounds of the enumChips kind: unique option entries, capped at 32 (design: 勾选集快照). */
+const ENUM_CHIPS_MAX_ENTRIES = 32;
+/** Bounds of the modelCatalog kind: ≤32 aliases, each ≤32 chars of identifier charset (provider-id-like). */
+const MODEL_CATALOG_MAX_ENTRIES = 32;
+const MODEL_ALIAS_MAX_LENGTH = 32;
+const MODEL_ALIAS_PATTERN = /^[A-Za-z0-9._-]+$/;
+
+/**
+ * Effective key path of a descriptor at the target's scope: plugin (default) keys get the
+ * sectionPath prefix (omo `[opencode]` block / legacy top level), shared keys live at the
+ * TOP LEVEL of the target file for BOTH targets — never under `[opencode]`.
+ */
+function effectivePath(sectionPath: JsonPath, setting: OmoMiscSetting): JsonPath {
+  return setting.scope === "shared" ? setting.path : [...sectionPath, ...setting.path];
+}
+
+/** One raw value → its protocol shape for the descriptor's kind; absent and wrong shapes read as null. */
+function coerceOmoValue(setting: OmoMiscSetting, value: unknown): OmoSettingValue {
+  if (value === undefined) {
+    return null;
+  }
+  switch (setting.kind) {
+    case "boolean":
+      return typeof value === "boolean" ? value : null;
+    case "number":
+      return typeof value === "number" && Number.isFinite(value) ? value : null;
+    case "stringList":
+    case "enumChips":
+      return Array.isArray(value) && value.every((entry) => typeof entry === "string") ? value : null;
+    case "shallowObject":
+      return extractShallowObjectValue(setting.fields ?? [], value);
+    case "modelCatalog":
+      return coerceModelCatalogValue(value);
+  }
+}
+
+/**
+ * The modelCatalog read: entries with a non-object value, a missing/invalid model, or an
+ * unknown reasoning level are SKIPPED (the write path never touches aliases absent from
+ * the submitted map, so broken hand-written entries survive instead of being wiped); null
+ * entries are never produced by reads — null only marks deletion intent from the UI.
+ */
+function coerceModelCatalogValue(value: unknown): ModelCatalogValue | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const catalog: ModelCatalogValue = {};
+  for (const [alias, entry] of Object.entries(value)) {
+    if (!isRecord(entry)) {
+      continue;
+    }
+    const model = entry.model;
+    if (typeof model !== "string" || !MODEL_ID_PATTERN.test(model)) {
+      continue;
+    }
+    const reasoning = entry.reasoning;
+    if (reasoning !== undefined && reasoning !== null) {
+      if (typeof reasoning !== "string" || !OMO_REASONING_LEVELS.includes(reasoning)) {
+        continue;
+      }
+      catalog[alias] = { model, reasoning };
+    } else {
+      catalog[alias] = { model, reasoning: null };
+    }
+  }
+  return catalog;
+}
 
 /**
  * Read every OMO_MISC_SETTINGS value from an agent-config text at the target's scope:
- * omo targets read ONLY at [...sectionPath, ...path] (the `[opencode]` block), legacy
- * targets (sectionPath = []) read at the top-level path — the same key names, two
- * generations of the oh-my-openagent runtime. Absent/wrong-shaped values read as null.
+ * omo targets read plugin-scope keys ONLY at [...sectionPath, ...path] (the `[opencode]`
+ * block) while shared-scope keys read at the top level, and legacy targets
+ * (sectionPath = []) read everything top-level — the same key names, two generations of
+ * the oh-my-openagent runtime. Absent/wrong-shaped values read as null.
  */
 export function readOmoMiscValues(text: string, sectionPath: JsonPath): OmoMiscValues {
   const values: OmoMiscValues = {};
   for (const setting of OMO_MISC_SETTINGS) {
-    const value = getValue<unknown>(text, [...sectionPath, ...setting.path]);
-    if (setting.kind === "boolean") {
-      values[setting.key] = typeof value === "boolean" ? value : null;
-    } else {
-      values[setting.key] = typeof value === "number" && Number.isFinite(value) ? value : null;
-    }
+    values[setting.key] = coerceOmoValue(setting, getValue<unknown>(text, effectivePath(sectionPath, setting)));
   }
   return values;
 }
 
 /**
- * The single set-or-remove edit for one descriptor value at the target's scope (omo
- * targets get the sectionPath prefix, legacy targets write top-level). Pure edit
- * builder — validation lives in {@link isValidOmoMiscValue} and is enforced by callers.
+ * The edits for one descriptor value at the target's scope (scope-aware: shared keys are
+ * never prefixed with the sectionPath). Kinds: scalar and list kinds produce the single
+ * set-or-remove op (null → remove); shallowObject edits per leaf via the shared
+ * {@link shallowObjectEdits} (null leaf → remove that field; null value or an all-null
+ * map → remove the key); modelCatalog emits one set/remove per alias (null entry →
+ * remove that alias; reasoning null → only `model` is written; value null →
+ * remove the whole key). Pure edit builder — value validation lives in
+ * {@link isValidOmoMiscValue} and is enforced by callers.
  */
-export function omoMiscEdits(
-  sectionPath: JsonPath,
-  setting: OmoMiscSetting,
-  value: boolean | number | null,
-): JsoncEdit[] {
-  const fullPath = [...sectionPath, ...setting.path];
-  return [value === null ? { path: fullPath, value: undefined, op: "remove" } : { path: fullPath, value, op: "set" }];
+export function omoMiscEdits(sectionPath: JsonPath, setting: OmoMiscSetting, value: OmoSettingValue): JsoncEdit[] {
+  const fullPath = effectivePath(sectionPath, setting);
+  switch (setting.kind) {
+    case "boolean":
+    case "number":
+    case "stringList":
+    case "enumChips":
+      return [
+        value === null ? { path: fullPath, value: undefined, op: "remove" } : { path: fullPath, value, op: "set" },
+      ];
+    case "shallowObject":
+      return shallowObjectEdits(fullPath, value);
+    case "modelCatalog": {
+      if (value === null) {
+        return [{ path: fullPath, value: undefined, op: "remove" }];
+      }
+      if (!isRecord(value)) {
+        return [];
+      }
+      const edits: JsoncEdit[] = [];
+      for (const [alias, entry] of Object.entries(value)) {
+        edits.push(
+          entry === null
+            ? { path: [...fullPath, alias], value: undefined, op: "remove" as const }
+            : {
+                path: [...fullPath, alias],
+                value:
+                  entry.reasoning === null
+                    ? { model: entry.model }
+                    : { model: entry.model, reasoning: entry.reasoning },
+                op: "set" as const,
+              },
+        );
+      }
+      return edits;
+    }
+  }
 }
 
 /**
- * Host-side value validator: boolean kind accepts booleans, number kind accepts
- * integers within the descriptor bounds (min ?? 0, max ?? 100). null (remove op /
- * 恢复默认) is always valid.
+ * Host-side value validator (guards the protocol write path): boolean kind accepts
+ * booleans, number kind accepts integers within the descriptor bounds (min ?? 0,
+ * max ?? 100), enumChips entries must be unique members of the descriptor options
+ * (≤32), stringList follows the shared entry rules, shallowObject leaves must match
+ * their field schemas (null leaf = field unset), modelCatalog bounds the alias
+ * charset/count and the model/reasoning shapes (null entry = delete marker). null
+ * (remove op / 恢复默认) is always valid.
  */
 export function isValidOmoMiscValue(setting: OmoMiscSetting, value: unknown): boolean {
   if (value === null) {
     return true;
   }
-  if (setting.kind === "boolean") {
-    return typeof value === "boolean";
+  switch (setting.kind) {
+    case "boolean":
+      return typeof value === "boolean";
+    case "number": {
+      const min = setting.min ?? 0;
+      const max = setting.max ?? 100;
+      return typeof value === "number" && Number.isInteger(value) && value >= min && value <= max;
+    }
+    case "enumChips": {
+      if (!Array.isArray(value) || value.length > ENUM_CHIPS_MAX_ENTRIES) {
+        return false;
+      }
+      const options = setting.options ?? [];
+      const seen = new Set<string>();
+      for (const entry of value) {
+        if (typeof entry !== "string" || !options.includes(entry) || seen.has(entry)) {
+          return false;
+        }
+        seen.add(entry);
+      }
+      return true;
+    }
+    case "stringList":
+      return isValidStringListValue(value);
+    case "shallowObject": {
+      if (!isRecord(value)) {
+        return false;
+      }
+      const fields = new Map((setting.fields ?? []).map((field) => [field.key, field]));
+      for (const [key, leaf] of Object.entries(value)) {
+        const field = fields.get(key);
+        // null leaf = "field unset" (dropped on write); every other leaf must match its schema.
+        if (field === undefined || (leaf !== null && !isValidShallowObjectLeaf(field, leaf))) {
+          return false;
+        }
+      }
+      return true;
+    }
+    case "modelCatalog": {
+      if (!isRecord(value)) {
+        return false;
+      }
+      const aliases = Object.keys(value);
+      if (aliases.length > MODEL_CATALOG_MAX_ENTRIES) {
+        return false;
+      }
+      for (const alias of aliases) {
+        if (alias.length > MODEL_ALIAS_MAX_LENGTH || !MODEL_ALIAS_PATTERN.test(alias)) {
+          return false;
+        }
+        const entry = value[alias];
+        if (entry === null) {
+          continue;
+        }
+        if (!isRecord(entry) || typeof entry.model !== "string" || !MODEL_ID_PATTERN.test(entry.model)) {
+          return false;
+        }
+        const reasoning = entry.reasoning;
+        // Absent reasoning key counts as the null form ({ model } object literals).
+        if (
+          reasoning !== undefined &&
+          reasoning !== null &&
+          (typeof reasoning !== "string" || !OMO_REASONING_LEVELS.includes(reasoning))
+        ) {
+          return false;
+        }
+      }
+      return true;
+    }
   }
-  const min = setting.min ?? 0;
-  const max = setting.max ?? 100;
-  return typeof value === "number" && Number.isInteger(value) && value >= min && value <= max;
 }

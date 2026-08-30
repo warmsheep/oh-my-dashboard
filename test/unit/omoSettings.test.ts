@@ -2,8 +2,8 @@ import { describe, expect, it } from "vitest";
 
 import { applyEdits, getValue } from "../../src/core/jsoncEditor";
 import { isValidOmoMiscValue, omoMiscEdits, readOmoMiscValues } from "../../src/core/omoSettings";
-import { OMO_MISC_SETTINGS } from "../../src/shared/protocol";
-import type { OmoMiscSetting } from "../../src/shared/protocol";
+import { KNOWN_AGENTS, OMO_MISC_SETTINGS, OMO_REASONING_LEVELS } from "../../src/shared/protocol";
+import type { ModelCatalogValue, OmoMiscSetting, OmoSettingValue } from "../../src/shared/protocol";
 
 /** Descriptor lookup by key; throws on typos so a bad test key fails loudly. */
 function setting(key: string): OmoMiscSetting {
@@ -105,5 +105,276 @@ describe("isValidOmoMiscValue", () => {
     expect(isValidOmoMiscValue(custom, 20)).toBe(true);
     expect(isValidOmoMiscValue(custom, 5)).toBe(false);
     expect(isValidOmoMiscValue(custom, 21)).toBe(false);
+  });
+});
+
+describe("scope: shared keys live at the TOP LEVEL for BOTH targets", () => {
+  it("read takes the top-level models on the omo target and ignores the [opencode].models decoy", () => {
+    const text = JSON.stringify({
+      "[opencode]": {
+        models: { decoy: { model: "evil/decoy" } },
+        disabled_agents: ["oracle"],
+      },
+      models: { "kimi-max": { model: "moonshotai/kimi-k2" } },
+    });
+    const values = readOmoMiscValues(text, ["[opencode]"]);
+    expect(values.omoModels).toEqual({ "kimi-max": { model: "moonshotai/kimi-k2", reasoning: null } });
+    // Plugin-scope Wave-2 keys still read under [opencode] in the same file.
+    expect(values.disabledAgents).toEqual(["oracle"]);
+  });
+
+  it("plugin-scope Wave-2 booleans read under [opencode] and ignore the top-level decoy", () => {
+    const text = JSON.stringify({
+      "[opencode]": { experimental: { disable_omo_env: true } },
+      experimental: { disable_omo_env: false },
+    });
+    expect(readOmoMiscValues(text, ["[opencode]"]).disableOmoEnv).toBe(true);
+  });
+
+  it("shared-scope keys read top-level on the legacy target too (no sectionPath either way)", () => {
+    const values = readOmoMiscValues(JSON.stringify({ models: { "glm-flash": { model: "zhipuai/glm-flash" } } }), []);
+    expect(values.omoModels).toEqual({ "glm-flash": { model: "zhipuai/glm-flash", reasoning: null } });
+  });
+
+  it("writes land top-level for shared scope on the omo target and never create [opencode].models", () => {
+    const seeded = JSON.stringify({ "[opencode]": { telemetry: false }, models: { keep: { model: "a/b" } } });
+    const text = applyEdits(
+      seeded,
+      omoMiscEdits(["[opencode]"], setting("omoModels"), {
+        "kimi-max": { model: "moonshotai/kimi-k2", reasoning: "high" },
+      }),
+    );
+    expect(getValue(text, ["models", "kimi-max"])).toEqual({ model: "moonshotai/kimi-k2", reasoning: "high" });
+    expect(getValue(text, ["models", "keep"])).toEqual({ model: "a/b" });
+    expect(getValue(text, ["[opencode]", "telemetry"])).toBe(false);
+    expect(getValue(text, ["[opencode]", "models"])).toBeUndefined();
+  });
+});
+
+describe("modelCatalog kind", () => {
+  it("read skips broken entries and never produces null entries (null only marks UI deletion intent)", () => {
+    const text = JSON.stringify({
+      models: {
+        good: { model: "a/b", reasoning: "high" },
+        noReasoning: { model: "c/d" },
+        notObject: "junk",
+        nullish: null,
+        noModel: { reasoning: "low" },
+        badModel: { model: "not-a-model-id" },
+        badReasoning: { model: "a/b", reasoning: "ultra" },
+      },
+    });
+    expect(readOmoMiscValues(text, []).omoModels).toEqual({
+      good: { model: "a/b", reasoning: "high" },
+      noReasoning: { model: "c/d", reasoning: null },
+    });
+  });
+
+  it("read degrades a non-object models key (or an absent one) to null", () => {
+    expect(readOmoMiscValues(JSON.stringify({ models: ["a/b"] }), []).omoModels).toBeNull();
+    expect(readOmoMiscValues(JSON.stringify({ models: "junk" }), []).omoModels).toBeNull();
+    expect(readOmoMiscValues("{}", []).omoModels).toBeNull();
+  });
+
+  it("edits set {model} / {model, reasoning} per alias, remove an alias via a null entry, and remove the whole key via null", () => {
+    const seeded = JSON.stringify({ models: { old: { model: "x/y", extra: 1 }, gone: { model: "a/b" } } });
+    const value: ModelCatalogValue = {
+      "kimi-max": { model: "moonshotai/kimi-k2", reasoning: "high" },
+      "glm-flash": { model: "zhipuai/glm-flash", reasoning: null },
+      gone: null,
+    };
+    const text = applyEdits(seeded, omoMiscEdits([], setting("omoModels"), value));
+    expect(getValue(text, ["models", "kimi-max"])).toEqual({ model: "moonshotai/kimi-k2", reasoning: "high" });
+    expect(getValue(text, ["models", "glm-flash"])).toEqual({ model: "zhipuai/glm-flash" });
+    expect(getValue(text, ["models", "gone"])).toBeUndefined();
+    // Unmentioned aliases (including hand-written extra keys) stay untouched.
+    expect(getValue(text, ["models", "old"])).toEqual({ model: "x/y", extra: 1 });
+    const wiped = applyEdits(text, omoMiscEdits([], setting("omoModels"), null));
+    expect(getValue(wiped, ["models"])).toBeUndefined();
+  });
+
+  it("validator: alias charset/length, ≤32 aliases, model pattern, reasoning enum, null delete markers", () => {
+    const descriptor = setting("omoModels");
+    expect(isValidOmoMiscValue(descriptor, { "kimi-max": { model: "moonshotai/kimi-k2", reasoning: "off" } })).toBe(
+      true,
+    );
+    expect(isValidOmoMiscValue(descriptor, { alias: null })).toBe(true);
+    expect(isValidOmoMiscValue(descriptor, { alias: { model: "a/b", reasoning: null } })).toBe(true);
+    // Absent reasoning key is accepted as the null form ({ model } object literals).
+    expect(isValidOmoMiscValue(descriptor, { alias: { model: "a/b" } })).toBe(true);
+    expect(isValidOmoMiscValue(descriptor, { "bad alias!": { model: "a/b", reasoning: null } })).toBe(false);
+    expect(isValidOmoMiscValue(descriptor, { ["x".repeat(33)]: { model: "a/b", reasoning: null } })).toBe(false);
+    expect(isValidOmoMiscValue(descriptor, { a: { model: "missing-slash", reasoning: null } })).toBe(false);
+    expect(isValidOmoMiscValue(descriptor, { a: { model: "a/b", reasoning: "ultra" } })).toBe(false);
+    expect(isValidOmoMiscValue(descriptor, { a: "not-an-entry" })).toBe(false);
+    expect(isValidOmoMiscValue(descriptor, ["a/b"])).toBe(false);
+    expect(isValidOmoMiscValue(descriptor, null)).toBe(true);
+    const entry = (id: number): [string, { model: string; reasoning: string | null }] => [
+      `alias-${id}`,
+      { model: "a/b", reasoning: null },
+    ];
+    expect(isValidOmoMiscValue(descriptor, Object.fromEntries(Array.from({ length: 32 }, (_, i) => entry(i))))).toBe(
+      true,
+    );
+    expect(isValidOmoMiscValue(descriptor, Object.fromEntries(Array.from({ length: 33 }, (_, i) => entry(i))))).toBe(
+      false,
+    );
+  });
+
+  it("reasoning levels come from the protocol constant OMO_REASONING_LEVELS", () => {
+    expect(OMO_REASONING_LEVELS).toEqual(["off", "minimal", "low", "medium", "high", "xhigh", "max", "auto"]);
+    const descriptor = setting("omoModels");
+    for (const level of OMO_REASONING_LEVELS) {
+      expect(isValidOmoMiscValue(descriptor, { a: { model: "a/b", reasoning: level } })).toBe(true);
+    }
+  });
+});
+
+describe("enumChips kind (disabledAgents)", () => {
+  it("descriptor options reuse the KNOWN_AGENTS protocol constant", () => {
+    expect(setting("disabledAgents").options).toEqual([...KNOWN_AGENTS]);
+  });
+
+  it("reads the string array at the plugin path; non-string arrays degrade to null; [] stays []", () => {
+    const text = JSON.stringify({ "[opencode]": { disabled_agents: ["oracle", "momus"] } });
+    expect(readOmoMiscValues(text, ["[opencode]"]).disabledAgents).toEqual(["oracle", "momus"]);
+    expect(readOmoMiscValues(JSON.stringify({ disabled_agents: ["oracle", 5] }), []).disabledAgents).toBeNull();
+    expect(readOmoMiscValues(JSON.stringify({ disabled_agents: "oracle" }), []).disabledAgents).toBeNull();
+    expect(readOmoMiscValues(JSON.stringify({ disabled_agents: [] }), []).disabledAgents).toEqual([]);
+  });
+
+  it("validator: unique entries ∈ descriptor options, ≤32 entries, null ok", () => {
+    const descriptor = setting("disabledAgents");
+    expect(isValidOmoMiscValue(descriptor, [])).toBe(true);
+    expect(isValidOmoMiscValue(descriptor, ["oracle", "momus"])).toBe(true);
+    expect(isValidOmoMiscValue(descriptor, ["oracle", "oracle"])).toBe(false);
+    expect(isValidOmoMiscValue(descriptor, ["oracle", "made-up-agent"])).toBe(false);
+    expect(isValidOmoMiscValue(descriptor, [1])).toBe(false);
+    expect(isValidOmoMiscValue(descriptor, "oracle")).toBe(false);
+    expect(isValidOmoMiscValue(descriptor, null)).toBe(true);
+    // The ≤32 cap is unreachable via KNOWN_AGENTS (11 unique names) — probe it with a wide custom descriptor.
+    const wide: OmoMiscSetting = {
+      ...descriptor,
+      options: Array.from({ length: 33 }, (_, i) => `agent-${i}`),
+    };
+    expect(
+      isValidOmoMiscValue(
+        wide,
+        Array.from({ length: 32 }, (_, i) => `agent-${i}`),
+      ),
+    ).toBe(true);
+    expect(
+      isValidOmoMiscValue(
+        wide,
+        Array.from({ length: 33 }, (_, i) => `agent-${i}`),
+      ),
+    ).toBe(false);
+  });
+
+  it("edits set/remove the whole array at the effective path", () => {
+    const seeded = JSON.stringify({ "[opencode]": { disabled_agents: ["oracle"] } });
+    const updated = applyEdits(seeded, omoMiscEdits(["[opencode]"], setting("disabledAgents"), ["momus", "atlas"]));
+    expect(getValue(updated, ["[opencode]", "disabled_agents"])).toEqual(["momus", "atlas"]);
+    const removed = applyEdits(updated, omoMiscEdits(["[opencode]"], setting("disabledAgents"), null));
+    expect(getValue(removed, ["[opencode]", "disabled_agents"])).toBeUndefined();
+  });
+
+  it("an options-less enumChips descriptor rejects every entry (options ?? [] fallback)", () => {
+    const bare: OmoMiscSetting = { ...setting("disabledAgents"), options: undefined };
+    expect(isValidOmoMiscValue(bare, ["oracle"])).toBe(false);
+  });
+
+  it("stringList kind edits like enumChips and validates with the shared entry rules", () => {
+    // No OMO descriptor ships kind stringList yet — probe the kind with a synthetic descriptor
+    // (readOmoMiscValues only iterates the shipped table; the read branch is the enumChips line).
+    const descriptor: OmoMiscSetting = {
+      key: "customList",
+      path: ["some_list"],
+      kind: "stringList",
+      label: "列表",
+      group: "g",
+    };
+    expect(applyEdits("{}", omoMiscEdits([], descriptor, ["a"]))).toContain('"some_list"');
+    expect(omoMiscEdits([], descriptor, null)).toEqual([{ path: ["some_list"], value: undefined, op: "remove" }]);
+    expect(isValidOmoMiscValue(descriptor, ["a", "b"])).toBe(true);
+    expect(isValidOmoMiscValue(descriptor, [])).toBe(false); // shared rules: 1–16 entries
+    expect(isValidOmoMiscValue(descriptor, ["a", "a"])).toBe(false);
+    expect(isValidOmoMiscValue(descriptor, null)).toBe(true);
+  });
+});
+
+describe("shallowObject kind (runtimeFallbackParams / defaultMode)", () => {
+  it("reads per-field; invalid leaves degrade to null per field; unknown file keys are not surfaced", () => {
+    const text = JSON.stringify({
+      runtime_fallback: {
+        max_fallback_attempts: 5,
+        cooldown_seconds: 10.5,
+        timeout_seconds: 0,
+        notify_on_fallback: true,
+        surprise: "hi",
+      },
+    });
+    expect(readOmoMiscValues(text, []).runtimeFallbackParams).toEqual({
+      max_fallback_attempts: 5,
+      cooldown_seconds: null, // decimal on an integer field
+      timeout_seconds: null, // below min 1
+      notify_on_fallback: true,
+      restore_primary_after_cooldown: null,
+    });
+    expect(readOmoMiscValues(JSON.stringify({ runtime_fallback: "nope" }), []).runtimeFallbackParams).toBeNull();
+    expect(readOmoMiscValues("{}", []).defaultMode).toBeNull();
+  });
+
+  it("validator: per-field bounds, integer flag, null leaf = unset, unknown field key rejected", () => {
+    const descriptor = setting("runtimeFallbackParams");
+    expect(isValidOmoMiscValue(descriptor, { max_fallback_attempts: 20 })).toBe(true);
+    expect(isValidOmoMiscValue(descriptor, { max_fallback_attempts: 1 })).toBe(true);
+    expect(isValidOmoMiscValue(descriptor, { max_fallback_attempts: 0 })).toBe(false);
+    expect(isValidOmoMiscValue(descriptor, { max_fallback_attempts: 21 })).toBe(false);
+    expect(isValidOmoMiscValue(descriptor, { cooldown_seconds: 3600 })).toBe(true);
+    expect(isValidOmoMiscValue(descriptor, { cooldown_seconds: 3601 })).toBe(false);
+    expect(isValidOmoMiscValue(descriptor, { timeout_seconds: 600 })).toBe(true);
+    expect(isValidOmoMiscValue(descriptor, { timeout_seconds: 601 })).toBe(false);
+    expect(isValidOmoMiscValue(descriptor, { cooldown_seconds: 1.5 })).toBe(false);
+    expect(isValidOmoMiscValue(descriptor, { notify_on_fallback: "yes" })).toBe(false);
+    expect(isValidOmoMiscValue(descriptor, { made_up: 1 })).toBe(false);
+    expect(isValidOmoMiscValue(descriptor, { timeout_seconds: null })).toBe(true);
+    expect(isValidOmoMiscValue(descriptor, null)).toBe(true);
+    expect(isValidOmoMiscValue(descriptor, 5)).toBe(false);
+    // defaultMode: boolean fields only.
+    expect(isValidOmoMiscValue(setting("defaultMode"), { ultrawork: true, goal: false })).toBe(true);
+    expect(isValidOmoMiscValue(setting("defaultMode"), { ultrawork: 1 })).toBe(false);
+  });
+
+  it("edits: per-leaf writes keep sibling keys and comments; an all-null map removes the key", () => {
+    const seeded = '{\n  "runtime_fallback": {\n    // user note\n    "enabled": true,\n  },\n}\n';
+    const partial = applyEdits(
+      seeded,
+      omoMiscEdits([], setting("runtimeFallbackParams"), { cooldown_seconds: 90, max_fallback_attempts: null }),
+    );
+    // `enabled` is written by the batch-1 runtimeFallback descriptor sharing the parent
+    // object — a per-leaf write must NOT wipe it, and the comment must survive.
+    expect(getValue(partial, ["runtime_fallback"])).toEqual({ enabled: true, cooldown_seconds: 90 });
+    expect(partial).toContain("// user note");
+    const emptied = applyEdits(
+      partial,
+      omoMiscEdits([], setting("runtimeFallbackParams"), { cooldown_seconds: null, max_fallback_attempts: null }),
+    );
+    expect(getValue(emptied, ["runtime_fallback"])).toBeUndefined();
+    const wholeNull = applyEdits(seeded, omoMiscEdits([], setting("runtimeFallbackParams"), null));
+    expect(getValue(wholeNull, ["runtime_fallback"])).toBeUndefined();
+  });
+
+  it("edits: per-leaf paths respect the effective scope routing", () => {
+    expect(omoMiscEdits(["[opencode]"], setting("defaultMode"), { ultrawork: true, goal: null })).toEqual([
+      { path: ["[opencode]", "default_mode", "ultrawork"], value: true, op: "set" },
+      { path: ["[opencode]", "default_mode", "goal"], value: undefined, op: "remove" },
+    ]);
+  });
+
+  it("edits ignore a non-record value instead of corrupting the file (callers validate first)", () => {
+    const bad = 42 as unknown as OmoSettingValue;
+    expect(omoMiscEdits([], setting("runtimeFallbackParams"), bad)).toEqual([]);
+    expect(omoMiscEdits([], setting("omoModels"), bad)).toEqual([]);
   });
 });
