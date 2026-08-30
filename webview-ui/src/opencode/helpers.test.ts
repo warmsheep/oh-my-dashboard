@@ -7,6 +7,7 @@ import {
   groupOpencodeSettings,
   parseOpencodeStringInput,
   parseTuiThemeInput,
+  recordMasterPairs,
   toggleProviderValue,
   tristateFromSelectValue,
   tristateToSelectValue,
@@ -36,6 +37,9 @@ describe("groupOpencodeSettings", () => {
       "终端界面",
       "高级",
       "终端与输出",
+      "命令",
+      "格式化",
+      "LSP",
     ]);
     expect(groups[0]?.settings.map((s) => s.key)).toEqual(["model", "smallModel", "agentBuildModel", "agentPlanModel"]);
     expect(groups[1]?.settings.map((s) => s.key)).toEqual(["defaultAgent", "share", "autoupdate", "snapshot"]);
@@ -51,6 +55,9 @@ describe("groupOpencodeSettings", () => {
     ]);
     expect(groups[9]?.settings.map((s) => s.key)).toEqual(["logLevel", "shell", "subagentDepth", "watcherIgnore"]);
     expect(groups[10]?.settings.map((s) => s.key)).toEqual(["toolOutput", "attachmentImage"]);
+    expect(groups[11]?.settings.map((s) => s.key)).toEqual(["command"]);
+    expect(groups[12]?.settings.map((s) => s.key)).toEqual(["formatterMaster", "formatterEntries"]);
+    expect(groups[13]?.settings.map((s) => s.key)).toEqual(["lspMaster", "lspEntries"]);
   });
 
   it("covers every OPENCODE_SETTINGS descriptor exactly once", () => {
@@ -78,6 +85,25 @@ describe("groupOpencodeSettings", () => {
 
   it("returns no groups for no settings", () => {
     expect(groupOpencodeSettings([])).toEqual([]);
+  });
+});
+
+describe("recordMasterPairs", () => {
+  it("pairs each recordMaster with the recordEditor of the same path root", () => {
+    const pairs = recordMasterPairs(OPENCODE_SETTINGS);
+    expect(pairs.size).toBe(2);
+    expect(pairs.get("formatterMaster")?.key).toBe("formatterEntries");
+    expect(pairs.get("lspMaster")?.key).toBe("lspEntries");
+  });
+
+  it("never pairs the masterless command editor (renders standalone)", () => {
+    const pairs = recordMasterPairs(OPENCODE_SETTINGS);
+    expect([...pairs.values()].map((setting) => setting.key)).not.toContain("command");
+  });
+
+  it("skips a master whose path root has no recordEditor (defensive)", () => {
+    const pairs = recordMasterPairs([setting("orphanMaster", "recordMaster", { path: ["nowhere"], group: "实验" })]);
+    expect(pairs.size).toBe(0);
   });
 });
 

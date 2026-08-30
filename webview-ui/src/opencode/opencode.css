@@ -44,3 +44,95 @@
   opacity: 0.55;
   cursor: not-allowed;
 }
+
+/* ---------- recordEditor / recordMaster (命令 / 格式化 / LSP) ---------- */
+
+/* Master row and entries editor get a little air between them. */
+.ctl-record-group {
+  gap: 6px;
+}
+
+/* One named entry row: the name button grows left, 删除 sits right. */
+.rec-row .rec-name {
+  flex: 1;
+  min-width: 0;
+  padding: 2px 6px;
+  font: inherit;
+  font-size: 11px;
+  text-align: left;
+  color: var(--fg);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 2px;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition:
+    background 0.12s ease,
+    border-color 0.12s ease;
+}
+
+.rec-row .rec-name:hover:not(:disabled) {
+  background: var(--hover);
+}
+
+.rec-row.selected .rec-name {
+  background: var(--hover);
+  border-color: var(--focus);
+}
+
+/* The selected entry's per-field form panel. */
+.rec-form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 4px;
+  padding: 8px;
+  background: var(--inp-bg);
+  border: 1px solid var(--hairline);
+  border-radius: 2px;
+}
+
+/* Label left, control right; wide fields (textarea / string list) stack instead. */
+.rec-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 26px;
+}
+
+.rec-field-wide {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 2px;
+}
+
+.rec-field-label {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  flex: none;
+  width: 96px;
+  font-size: 12px;
+  overflow: hidden;
+}
+
+.rec-field-label .set-row-hint {
+  white-space: normal;
+}
+
+.rec-input {
+  flex: 1;
+  min-width: 0;
+}
+
+/* Multiline templates: monospace, freely resizable, ~6 rows tall. */
+.rec-multiline {
+  width: 100%;
+  min-height: 110px;
+  resize: vertical;
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.5;
+}

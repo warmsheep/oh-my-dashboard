@@ -1,20 +1,31 @@
 import type {
   ExtToWebview,
   OpencodePermissionState,
+  OpencodeRecordStates,
   OpencodeSetting,
   OpencodeSettingsPayload,
   OpencodeSettingValue,
+  RecordAggregate,
+  RecordEditorValue,
   ShallowObjectValue,
 } from "@shared/protocol";
 import { OPENCODE_SETTINGS } from "@shared/protocol";
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import ChipsEditor from "../controls/ChipsEditor";
-import { isWideSettingKind, mcpToggleEdit, parseNumberFieldInput, permissionToolEdit } from "../controls/helpers";
+import {
+  isWideSettingKind,
+  mcpToggleEdit,
+  parseNumberFieldInput,
+  permissionToolEdit,
+  recordAggregateAfterCommit,
+} from "../controls/helpers";
 import type { PermissionAction } from "../controls/helpers";
 import McpToggleList from "../controls/McpToggleList";
 import OrderedListEditor from "../controls/OrderedListEditor";
 import PermissionEditor from "../controls/PermissionEditor";
+import RecordEditor from "../controls/RecordEditor";
+import RecordGroup from "../controls/RecordGroup";
 import ShallowObjectFields from "../controls/ShallowObjectFields";
 import StringListEditor from "../controls/StringListEditor";
 import { groupModelsByProvider } from "../helpers";
@@ -25,6 +36,7 @@ import {
   groupOpencodeSettings,
   parseOpencodeStringInput,
   parseTuiThemeInput,
+  recordMasterPairs,
   toggleProviderValue,
   TRISTATE_OPTIONS,
   tristateFromSelectValue,
@@ -52,16 +64,35 @@ const DEV_PAYLOAD: OpencodeSettingsPayload = {
   permission: { shorthand: null, tools: {}, advancedTools: [] },
   mcp: [],
   tui: { theme: null, path: "~/.config/opencode/tui.json" },
+  records: {
+    command: {
+      mode: "entries",
+      booleanValue: null,
+      entries: {
+        review: { template: "Review the current diff: $ARGUMENTS", model: "opencode/glm-4.7" },
+      },
+    },
+    formatter: { mode: "unset", booleanValue: null, entries: {} },
+    lsp: {
+      mode: "entries",
+      booleanValue: null,
+      entries: { typescript: { extensions: ["ts", "tsx"] } },
+    },
+  },
 };
 
 /**
- * Pre-edit snapshot of a dedicated payload slot (permission / mcp / tui) — the revert
- * source on a !ok reply for keys whose display state does NOT live in payload.values.
+ * Pre-edit snapshot of a dedicated payload slot (permission / mcp / tui / records) —
+ * the revert source on a !ok reply for keys whose display state does NOT live in
+ * payload.values. The records variant snapshots only the ONE affected aggregate:
+ * reverting a failed formatterEntries write must not clobber an in-flight optimistic
+ * lspEntries update in the sibling slots.
  */
 type StructuredSnapshot =
   | { slot: "permission"; state: OpencodePermissionState }
   | { slot: "mcp"; servers: { name: string; disabled: boolean }[] }
-  | { slot: "tui"; theme: string | null };
+  | { slot: "tui"; theme: string | null }
+  | { slot: "records"; key: keyof OpencodeRecordStates; aggregate: RecordAggregate };
 
 /** Restore one structured snapshot into the payload (revert path of the structured edits). */
 function applyStructuredSnapshot(
@@ -75,7 +106,14 @@ function applyStructuredSnapshot(
       return { ...payload, mcp: snapshot.servers };
     case "tui":
       return { ...payload, tui: { ...payload.tui, theme: snapshot.theme } };
+    case "records":
+      return { ...payload, records: { ...payload.records, [snapshot.key]: snapshot.aggregate } };
   }
+}
+
+/** The records-slot key of a record descriptor (path root; command/formatter/lsp today). */
+function recordSlotKey(setting: OpencodeSetting): keyof OpencodeRecordStates {
+  return setting.path[0] as keyof OpencodeRecordStates;
 }
 
 /**
@@ -345,11 +383,46 @@ export default function OpenCodeApp() {
     );
   };
 
+  /** Commit the FULL entries snapshot of one record path (null deletes / empties the key). */
+  const commitRecordEntries = (entriesSetting: OpencodeSetting, next: RecordEditorValue | null) => {
+    if (payload === null) {
+      return;
+    }
+    const slotKey = recordSlotKey(entriesSetting);
+    applyStructured(
+      entriesSetting.key,
+      next,
+      { slot: "records", key: slotKey, aggregate: payload.records[slotKey] },
+      (p) => ({ ...p, records: { ...p.records, [slotKey]: recordAggregateAfterCommit(p.records[slotKey], next) } }),
+    );
+  };
+
+  /** Commit one record path's master boolean (null = 未设置 → removes the key). */
+  const commitRecordMaster = (masterSetting: OpencodeSetting, next: boolean | null) => {
+    if (payload === null) {
+      return;
+    }
+    const slotKey = recordSlotKey(masterSetting);
+    applyStructured(
+      masterSetting.key,
+      next,
+      { slot: "records", key: slotKey, aggregate: payload.records[slotKey] },
+      (p) => ({ ...p, records: { ...p.records, [slotKey]: recordAggregateAfterCommit(p.records[slotKey], next) } }),
+    );
+  };
+
   const toggleCollapsed = useCallback((key: string) => {
     setCollapsed((c) => ({ ...c, [key]: !(c[key] ?? false) }));
   }, []);
 
   const settingGroups = useMemo(() => groupOpencodeSettings(OPENCODE_SETTINGS), []);
+  // recordMaster → its paired recordEditor descriptor (formatter/lsp); the pair's
+  // entries row renders inside the RecordGroup, so it is hidden from the row list.
+  const recordPairs = useMemo(() => recordMasterPairs(OPENCODE_SETTINGS), []);
+  const pairedEntriesKeys = useMemo(
+    () => new Set([...recordPairs.values()].map((setting) => setting.key)),
+    [recordPairs],
+  );
   const modelsByProvider = useMemo(() => groupModelsByProvider(payload?.models ?? []), [payload?.models]);
   const modelIds = useMemo(() => new Set((payload?.models ?? []).map((m) => m.id)), [payload?.models]);
   const providerNames = useMemo(() => uniqueProviderNames(payload?.models ?? []), [payload?.models]);
@@ -614,6 +687,41 @@ export default function OpenCodeApp() {
             onToggle={commitMcpToggle}
           />
         );
+      case "recordEditor": {
+        // Masterless record path (command): a standalone entries editor fed from the
+        // records slot; the paired paths (formatter/lsp) render inside RecordGroup.
+        const slotKey = recordSlotKey(setting);
+        const aggregate = payload?.records[slotKey] ?? { mode: "unset" as const, booleanValue: null, entries: {} };
+        return (
+          <RecordEditor
+            fields={setting.record?.fields ?? []}
+            value={aggregate.entries}
+            disabled={isPending}
+            modelOptions={payload?.models ?? []}
+            nameRules={setting.record}
+            onChange={(next) => commitRecordEntries(setting, next)}
+          />
+        );
+      }
+      case "recordMaster": {
+        const entriesSetting = recordPairs.get(setting.key);
+        if (entriesSetting === undefined) {
+          return null;
+        }
+        const slotKey = recordSlotKey(setting);
+        const aggregate = payload?.records[slotKey] ?? { mode: "unset" as const, booleanValue: null, entries: {} };
+        return (
+          <RecordGroup
+            aggregate={aggregate}
+            masterDescriptor={setting}
+            entriesDescriptor={entriesSetting}
+            modelOptions={payload?.models ?? []}
+            disabled={isPending}
+            onMasterChange={(next) => commitRecordMaster(setting, next)}
+            onEntriesChange={(next) => commitRecordEntries(entriesSetting, next)}
+          />
+        );
+      }
     }
   };
 
@@ -646,7 +754,11 @@ export default function OpenCodeApp() {
             const isCollapsed = collapsed[key] ?? false;
             // The permissionShorthand descriptor has no row of its own: its 简写 select
             // lives inside PermissionEditor (the permissionTools row right below it).
-            const rendered = group.settings.filter((setting) => setting.key !== "permissionShorthand");
+            // Paired recordEditor rows (formatterEntries/lspEntries) likewise render
+            // inside their master's RecordGroup.
+            const rendered = group.settings.filter(
+              (setting) => setting.key !== "permissionShorthand" && !pairedEntriesKeys.has(setting.key),
+            );
             return (
               <section className="block" key={group.label}>
                 <button

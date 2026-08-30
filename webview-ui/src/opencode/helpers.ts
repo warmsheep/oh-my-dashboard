@@ -1,6 +1,8 @@
 import type { ModelOption, OpencodeSetting, OpencodeSettingValue } from "@shared/protocol";
 import { OPENCODE_STRING_VALUE_MAX_LENGTH, TUI_THEME_MAX_LENGTH } from "@shared/protocol";
 
+import { parseBoundedStringInput } from "../controls/helpers";
+
 /** Tristate values a select can commit (null = 未设置, the key gets removed). */
 export type TristateValue = boolean | "notify" | null;
 
@@ -121,14 +123,27 @@ export function parseTuiThemeInput(raw: string): OpencodeStringParse {
   return parseBoundedStringInput(raw, TUI_THEME_MAX_LENGTH);
 }
 
-/** Shared commit parser behind the string-field pre-checks: trim, empty → null, over the bound → invalid. */
-function parseBoundedStringInput(raw: string, maxLength: number): OpencodeStringParse {
-  const text = raw.trim();
-  if (text === "") {
-    return { kind: "commit", value: null };
+/**
+ * Pair each recordMaster descriptor with the recordEditor descriptor sharing its
+ * path root (formatter/lsp). The pair's entries row is rendered INSIDE the
+ * RecordGroup of the master row, so the entries descriptor itself is hidden from
+ * the group's row list; command has no master and renders standalone.
+ */
+export function recordMasterPairs(settings: readonly OpencodeSetting[]): Map<string, OpencodeSetting> {
+  const editorsByPathRoot = new Map<string, OpencodeSetting>();
+  for (const setting of settings) {
+    if (setting.kind === "recordEditor") {
+      editorsByPathRoot.set(setting.path[0], setting);
+    }
   }
-  if (text.length > maxLength) {
-    return { kind: "invalid", error: `最长 ${maxLength} 个字符` };
+  const pairs = new Map<string, OpencodeSetting>();
+  for (const setting of settings) {
+    if (setting.kind === "recordMaster") {
+      const entries = editorsByPathRoot.get(setting.path[0]);
+      if (entries !== undefined) {
+        pairs.set(setting.key, entries);
+      }
+    }
   }
-  return { kind: "commit", value: text };
+  return pairs;
 }
