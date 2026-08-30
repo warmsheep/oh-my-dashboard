@@ -2,10 +2,14 @@ import * as defaultFs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
+import { OMO_MISC_SETTINGS, OPENCODE_SETTINGS } from "../shared/protocol";
+import type { OmoMiscValues, OpencodeSettingValue } from "../shared/protocol";
 import { agentAssignmentEdits } from "./agentAssignment";
 import { writeFileAtomic } from "./atomicFile";
 import { ensureLocalModelsFile, mergeModelOptions } from "./builtinModels";
 import { applyEdits, getValue, JsoncSyntaxError, parseSafe } from "./jsoncEditor";
+import { isValidOmoMiscValue, omoMiscEdits, readOmoMiscValues } from "./omoSettings";
+import { isValidOpencodeSettingValue, opencodeSettingEdits, readOpencodeSettingValues } from "./opencodeSettings";
 import { declaredPluginSpecifiers, listDeclaredPlugins } from "./pluginResolver";
 import { readdirSafe, readDirTree, skillDirCandidates, skillNamesFromTree, TREE_EXCLUDES } from "./skillScanner";
 import type {
@@ -355,6 +359,63 @@ export class ConfigStore {
     }
     const edits = agentAssignmentEdits(target.sectionPath, target.reasoningKey, section, name, model, variant);
     const next = applyEdits(raw.length > 0 ? raw : "{}", edits);
+    defaultFs.mkdirSync(path.dirname(target.path), { recursive: true });
+    this.writeAtomic(target.path, next);
+  }
+
+  /**
+   * Read the OpenCode tab's settings from the machine's opencode.json[c] (display path:
+   * readTextOrEmpty-tolerant, missing file reads as all-null values).
+   */
+  opencodeSettingValues(): Record<string, OpencodeSettingValue> {
+    return readOpencodeSettingValues(this.readTextOrEmpty(this.resolveOpencodeConfigPath()));
+  }
+
+  /**
+   * Write (or remove, value=null) one OPENCODE_SETTINGS entry into opencode.json[c]. Same
+   * contract as setAgentModel: descriptor key + value validated first (OPENCODE_SETTING_INVALID),
+   * readTextForEdit, JSONC syntax abort, atomic write; creates the file when missing.
+   */
+  setOpencodeSetting(key: string, value: OpencodeSettingValue): void {
+    const setting = OPENCODE_SETTINGS.find((entry) => entry.key === key);
+    if (setting === undefined || !isValidOpencodeSettingValue(setting, value)) {
+      throw new Error("OPENCODE_SETTING_INVALID");
+    }
+    const target = this.resolveOpencodeConfigPath();
+    const raw = this.readTextForEdit(target);
+    const parse = parseSafe<unknown>(raw);
+    if (parse.errors.length > 0) {
+      throw new JsoncSyntaxError(parse.errors);
+    }
+    const next = applyEdits(raw.length > 0 ? raw : "{}", opencodeSettingEdits(setting, value));
+    defaultFs.mkdirSync(path.dirname(target), { recursive: true });
+    this.writeAtomic(target, next);
+  }
+
+  /** Read the OMO tab's misc feature values from the resolved agent-config target (display-tolerant). */
+  omoMiscValues(): OmoMiscValues {
+    const target = this.resolveAgentConfig();
+    return readOmoMiscValues(this.readTextOrEmpty(target.path), target.sectionPath);
+  }
+
+  /**
+   * Write (or remove, value=null) one OMO_MISC_SETTINGS entry into the resolved agent
+   * config at its scope (omo targets inside the `[opencode]` block, legacy at top level).
+   * Same contract as setAgentModel: key + value validated first (OMO_SETTING_INVALID),
+   * readTextForEdit, JSONC syntax abort, atomic write; creates the file when missing.
+   */
+  setOmoMiscSetting(key: string, value: boolean | number | null): void {
+    const setting = OMO_MISC_SETTINGS.find((entry) => entry.key === key);
+    if (setting === undefined || !isValidOmoMiscValue(setting, value)) {
+      throw new Error("OMO_SETTING_INVALID");
+    }
+    const target = this.resolveAgentConfig();
+    const raw = this.readTextForEdit(target.path);
+    const parse = parseSafe<unknown>(raw);
+    if (parse.errors.length > 0) {
+      throw new JsoncSyntaxError(parse.errors);
+    }
+    const next = applyEdits(raw.length > 0 ? raw : "{}", omoMiscEdits(target.sectionPath, setting, value));
     defaultFs.mkdirSync(path.dirname(target.path), { recursive: true });
     this.writeAtomic(target.path, next);
   }

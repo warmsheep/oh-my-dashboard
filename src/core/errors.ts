@@ -23,6 +23,8 @@ export const FRIENDLY_ERRORS: Record<string, string> = {
   BACKUP_CREATE_TOO_LARGE: "备份内容过大（超过 256MB、2 万条目或 16 层目录上限），已中止备份",
   BACKUP_RESTORE_TOO_LARGE: "备份内容过大（超过 256MB 或 2 万条目上限），已中止恢复",
   CONFIG_UNREADABLE: "配置文件存在但无法读取（权限或被占用），已中止以防覆盖",
+  OPENCODE_SETTING_INVALID: "OpenCode 设置项的键或值不合法",
+  OMO_SETTING_INVALID: "OMO 功能设置的键或值不合法",
   MIMO_COOKIE_INVALID: "MiMo Cookie 格式无法识别，请粘贴完整的 Cookie 字符串",
   FREE_PORT_UNAVAILABLE: "无法获取可用的随机端口，请稍后重试",
   TMUX_NOT_FOUND: "未检测到 tmux，请先安装后重试（Debian/Ubuntu: apt install tmux，macOS: brew install tmux）",

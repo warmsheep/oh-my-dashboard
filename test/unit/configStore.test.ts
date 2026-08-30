@@ -1022,6 +1022,160 @@ describe("ConfigStore.setAgentModel", () => {
   );
 });
 
+describe("ConfigStore.setOpencodeSetting / opencodeSettingValues", () => {
+  it("round-trips a value into opencode.json preserving comments, trailing commas and $schema", () => {
+    const dir = sandbox();
+    writeFileSync(
+      path.join(dir, "opencode.json"),
+      '// header\n{\n  "$schema": "https://opencode.ai/config.json",\n  "model": "old/old",\n  "provider": {\n    "zhipuai": { "models": { "glm-5": {} }, },\n  },\n}\n',
+    );
+    const store = new ConfigStore({ configDirOverride: dir, homeDir: sandbox() });
+
+    store.setOpencodeSetting("model", "zhipuai/glm-5");
+
+    const text = readFileSync(path.join(dir, "opencode.json"), "utf8");
+    expect(validate(text)).toEqual([]);
+    expect(text).toContain("// header");
+    expect(text).toContain('"https://opencode.ai/config.json"');
+    expect(getValue(text, ["model"])).toBe("zhipuai/glm-5");
+    expect(getValue(text, ["provider", "zhipuai"])).toBeDefined();
+    expect(store.opencodeSettingValues()["model"]).toBe("zhipuai/glm-5");
+  });
+
+  it("writes nested agent.build.model and reads it back", () => {
+    const dir = sandbox();
+    writeFileSync(path.join(dir, "opencode.json"), "{}\n");
+    const store = new ConfigStore({ configDirOverride: dir, homeDir: sandbox() });
+
+    store.setOpencodeSetting("agentBuildModel", "kimi/k2");
+
+    const text = readFileSync(path.join(dir, "opencode.json"), "utf8");
+    expect(getValue(text, ["agent", "build", "model"])).toBe("kimi/k2");
+    expect(store.opencodeSettingValues().agentBuildModel).toBe("kimi/k2");
+  });
+
+  it("null removes the key (「未设置」)", () => {
+    const dir = sandbox();
+    writeFileSync(path.join(dir, "opencode.json"), '{ "model": "a/b" }\n');
+    const store = new ConfigStore({ configDirOverride: dir, homeDir: sandbox() });
+
+    store.setOpencodeSetting("model", null);
+
+    const text = readFileSync(path.join(dir, "opencode.json"), "utf8");
+    expect(getValue(text, ["model"])).toBeUndefined();
+    expect(store.opencodeSettingValues()["model"]).toBeNull();
+  });
+
+  it("creates opencode.json when the config dir has none", () => {
+    const dir = sandbox();
+    const store = new ConfigStore({ configDirOverride: dir, homeDir: sandbox() });
+
+    store.setOpencodeSetting("share", "auto");
+
+    const created = path.join(dir, "opencode.json");
+    expect(validate(readFileSync(created, "utf8"))).toEqual([]);
+    expect(getValue(readFileSync(created, "utf8"), ["share"])).toBe("auto");
+  });
+
+  it("opencodeSettingValues returns all-null for a missing config (display-tolerant)", () => {
+    const dir = sandbox();
+    const store = new ConfigStore({ configDirOverride: dir, homeDir: sandbox() });
+    const values = store.opencodeSettingValues();
+    expect(Object.values(values).every((value) => value === null)).toBe(true);
+    expect(Object.keys(values).length).toBeGreaterThan(0);
+  });
+
+  it("aborts with JsoncSyntaxError on a broken opencode config and writes nothing", () => {
+    const dir = sandbox();
+    const target = path.join(dir, "opencode.json");
+    writeFileSync(target, "{ broken");
+    const store = new ConfigStore({ configDirOverride: dir, homeDir: sandbox() });
+    const before = readFileSync(target);
+
+    expect(() => store.setOpencodeSetting("model", "a/b")).toThrow(JsoncSyntaxError);
+    expect(readFileSync(target)).toEqual(before);
+  });
+
+  it("throws OPENCODE_SETTING_INVALID on an unknown key", () => {
+    const dir = sandbox();
+    const store = new ConfigStore({ configDirOverride: dir, homeDir: sandbox() });
+    expect(() => store.setOpencodeSetting("bogus", true)).toThrow("OPENCODE_SETTING_INVALID");
+  });
+
+  it("throws OPENCODE_SETTING_INVALID on a value failing the descriptor validation", () => {
+    const dir = sandbox();
+    const store = new ConfigStore({ configDirOverride: dir, homeDir: sandbox() });
+    expect(() => store.setOpencodeSetting("share", "nope")).toThrow("OPENCODE_SETTING_INVALID");
+    expect(() => store.setOpencodeSetting("model", "not-a-model-id")).toThrow("OPENCODE_SETTING_INVALID");
+  });
+});
+
+describe("ConfigStore.setOmoMiscSetting / omoMiscValues", () => {
+  it("writes [opencode].team_mode.enabled into ~/.omo/omo.jsonc and reads it back", () => {
+    const dir = sandbox();
+    const home = sandbox();
+    mkdirSync(path.join(home, ".omo"), { recursive: true });
+    writeFileSync(path.join(home, ".omo", "omo.jsonc"), '{\n  "[opencode]": {\n    "agents": {},\n  },\n}\n');
+    const store = new ConfigStore({ configDirOverride: dir, homeDir: home });
+
+    store.setOmoMiscSetting("teamMode", true);
+
+    const text = readFileSync(path.join(home, ".omo", "omo.jsonc"), "utf8");
+    expect(validate(text)).toEqual([]);
+    expect(getValue(text, ["[opencode]", "team_mode", "enabled"])).toBe(true);
+    // section-scoped read: the sibling [opencode].agents block survives untouched
+    expect(getValue(text, ["[opencode]", "agents"])).toEqual({});
+    expect(store.omoMiscValues()).toMatchObject({ teamMode: true, telemetry: null });
+  });
+
+  it("writes the legacy top-level path on a legacy target", () => {
+    const dir = seedConfigDir({ opencode: true, ohMy: true });
+    const store = new ConfigStore({ configDirOverride: dir, homeDir: sandbox() });
+
+    store.setOmoMiscSetting("runtimeFallback", true);
+
+    const text = readFileSync(path.join(dir, "oh-my-opencode.json"), "utf8");
+    expect(getValue(text, ["runtime_fallback", "enabled"])).toBe(true);
+    expect(getValue(text, ["[opencode]"])).toBeUndefined();
+    expect(store.omoMiscValues()).toMatchObject({ runtimeFallback: true });
+  });
+
+  it("creates the omo target file when missing (fresh omo machine)", () => {
+    const dir = sandbox();
+    const home = sandbox();
+    mkdirSync(path.join(home, ".omo"), { recursive: true });
+    const store = new ConfigStore({ configDirOverride: dir, homeDir: home });
+
+    store.setOmoMiscSetting("backgroundConcurrency", 0);
+
+    const created = path.join(home, ".omo", "omo.jsonc");
+    expect(validate(readFileSync(created, "utf8"))).toEqual([]);
+    expect(getValue(readFileSync(created, "utf8"), ["[opencode]", "background_task", "defaultConcurrency"])).toBe(0);
+  });
+
+  it("null removes the leaf key on the omo target", () => {
+    const dir = sandbox();
+    const home = sandbox();
+    mkdirSync(path.join(home, ".omo"), { recursive: true });
+    writeFileSync(path.join(home, ".omo", "omo.jsonc"), '{ "[opencode]": { "telemetry": false } }\n');
+    const store = new ConfigStore({ configDirOverride: dir, homeDir: home });
+
+    store.setOmoMiscSetting("telemetry", null);
+
+    const text = readFileSync(path.join(home, ".omo", "omo.jsonc"), "utf8");
+    expect(getValue(text, ["[opencode]", "telemetry"])).toBeUndefined();
+    expect(store.omoMiscValues().telemetry).toBeNull();
+  });
+
+  it("throws OMO_SETTING_INVALID on an unknown key or out-of-bounds value", () => {
+    const dir = sandbox();
+    const store = new ConfigStore({ configDirOverride: dir, homeDir: sandbox() });
+    expect(() => store.setOmoMiscSetting("bogus", true)).toThrow("OMO_SETTING_INVALID");
+    expect(() => store.setOmoMiscSetting("backgroundConcurrency", 3.5)).toThrow("OMO_SETTING_INVALID");
+    expect(() => store.setOmoMiscSetting("backgroundConcurrency", -1)).toThrow("OMO_SETTING_INVALID");
+  });
+});
+
 describe("ConfigStore.readTextForEdit", () => {
   it("returns '' for a genuinely absent file", () => {
     const dir = sandbox();
