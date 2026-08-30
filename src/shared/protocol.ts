@@ -457,7 +457,7 @@ export interface OmoMiscSetting {
   key: string;
   /** Key path inside the agent config, relative to the target's sectionPath prefix. */
   path: string[];
-  kind: "boolean" | "number" | "stringList" | "enumChips" | "shallowObject" | "modelCatalog";
+  kind: "boolean" | "number" | "enum" | "stringList" | "orderedList" | "enumChips" | "shallowObject" | "modelCatalog";
   label: string;
   hint?: string;
   /** Chinese section label used to group rows in the OMO tab. */
@@ -467,7 +467,7 @@ export interface OmoMiscSetting {
   max?: number;
   /** Runtime default shown when the file does not set the key (null in {@link OmoMiscValues}); scalar kinds only — the new kinds default to "empty". */
   default?: boolean | number;
-  /** Selectable values for the enumChips kind (fixed multi-select). */
+  /** Selectable values for the enumChips (fixed multi-select) and enum (single-select) kinds. */
   options?: string[];
   /** Field schemas of the shallowObject kind (Wave-1 type reused, no duplicate shape). */
   fields?: OpencodeSettingField[];
@@ -662,6 +662,105 @@ export const OMO_MISC_SETTINGS: readonly OmoMiscSetting[] = [
     max: 100,
     default: 5,
   },
+  {
+    key: "disabledMcps",
+    path: ["disabled_mcps"],
+    kind: "enumChips",
+    options: ["websearch", "context7", "grep_app", "lsp", "codegraph"],
+    label: "停用内置 MCP",
+    group: "MCP 与命令",
+  },
+  {
+    key: "disabledCommands",
+    path: ["disabled_commands"],
+    kind: "enumChips",
+    options: ["goal", "refactor", "ulw-execute", "stop-continuation", "remove-ai-slops", "hyperplan"],
+    label: "停用内置命令",
+    hint: "命令名受 schema 严格枚举校验",
+    group: "MCP 与命令",
+  },
+  {
+    key: "browserAutomation",
+    path: ["browser_automation_engine", "provider"],
+    kind: "enum",
+    options: ["playwright", "agent-browser", "dev-browser", "playwright-cli"],
+    label: "浏览器自动化引擎",
+    group: "引擎后端",
+  },
+  {
+    key: "websearchProvider",
+    path: ["websearch", "provider"],
+    kind: "enum",
+    options: ["exa", "tavily"],
+    label: "网页搜索后端",
+    group: "引擎后端",
+  },
+  {
+    key: "gitMaster",
+    path: ["git_master"],
+    kind: "shallowObject",
+    label: "Git 提交署名",
+    group: "Git",
+    fields: [
+      { key: "commit_footer", kind: "boolean", label: "提交脚注", default: true },
+      { key: "include_co_authored_by", kind: "boolean", label: "共同作者署名", default: true },
+    ],
+  },
+  {
+    key: "tmuxParams",
+    path: ["tmux"],
+    kind: "shallowObject",
+    label: "tmux 布局参数",
+    group: "团队模式",
+    fields: [
+      {
+        key: "layout",
+        kind: "enum",
+        label: "布局",
+        options: ["main-vertical", "main-horizontal", "tiled", "even-horizontal", "even-vertical"],
+      },
+      { key: "main_pane_size", kind: "number", label: "主窗格占比", min: 20, max: 80, integer: true, default: 60 },
+      { key: "isolation", kind: "enum", label: "隔离方式", options: ["inline", "window", "session"] },
+    ],
+  },
+  {
+    key: "teamModeLimits",
+    path: ["team_mode"],
+    kind: "shallowObject",
+    label: "Team 规模上限",
+    hint: "并行数不应超过成员总数（运行时自校）",
+    group: "团队模式",
+    fields: [
+      { key: "max_parallel_members", kind: "number", label: "最大并行成员", min: 1, max: 8, integer: true, default: 4 },
+      { key: "max_members", kind: "number", label: "成员总数上限", min: 1, max: 8, integer: true, default: 8 },
+      {
+        key: "max_wall_clock_minutes",
+        kind: "number",
+        label: "最大运行分钟数",
+        min: 1,
+        max: 1440,
+        integer: true,
+        default: 120,
+      },
+      {
+        key: "max_member_turns",
+        kind: "number",
+        label: "成员最大轮次",
+        min: 1,
+        max: 10000,
+        integer: true,
+        default: 500,
+      },
+    ],
+  },
+  {
+    key: "agentOrder",
+    path: ["agent_order"],
+    kind: "orderedList",
+    label: "智能体顺序",
+    hint: "未识别名称运行时忽略",
+    group: "智能体开关",
+  },
 ];
 
 /** Current OMO misc values; null = the file does not set the key (UI shows the descriptor default). */
@@ -700,11 +799,11 @@ export const OPENCODE_PERMISSION_TOOLS: readonly string[] = [
   "doom_loop",
 ];
 
-/** stringList value: an ordered list of short string entries (e.g. rule file paths). */
+/** stringList / orderedList value: an ordered list of short string entries (rule file paths, agent_order, …). */
 export type StringListValue = string[];
 
-/** shallowObject value: descriptor-field key → leaf value (null = field absent in file). */
-export type ShallowObjectValue = Record<string, boolean | number | null>;
+/** shallowObject value: descriptor-field key → leaf value (null = field absent in file; string leaves come from enum fields). */
+export type ShallowObjectValue = Record<string, boolean | number | string | null>;
 
 /** permissionTools value: tool name → action (null = remove that tool's key). */
 export type PermissionToolsValue = Record<string, "allow" | "ask" | "deny" | null>;
@@ -733,7 +832,8 @@ export const OMO_REASONING_LEVELS: readonly string[] = [
 /** One field schema of a shallowObject-kind descriptor (a leaf key inside the object). */
 export interface OpencodeSettingField {
   key: string;
-  kind: "boolean" | "number";
+  /** boolean and number leaves are scalars; enum leaves must be one of the listed options. */
+  kind: "boolean" | "number" | "enum";
   label: string;
   hint?: string;
   /** Inclusive bounds of the number kind (absent = unbounded). */
@@ -741,6 +841,8 @@ export interface OpencodeSettingField {
   max?: number;
   /** Reject non-integers when true; decimals allowed exactly when this is not set. */
   integer?: boolean;
+  /** Selectable values of the enum kind (the leaf value must be one of them). */
+  options?: string[];
   /** Documented default shown when the file does not set the field. */
   default?: boolean | number;
 }
@@ -759,6 +861,7 @@ export interface OpencodeSetting {
     | "number"
     | "providers"
     | "stringList"
+    | "orderedList"
     | "enumChips"
     | "shallowObject"
     | "permissionTools"
@@ -774,6 +877,8 @@ export interface OpencodeSetting {
   /** Inclusive bounds of the number kind (absent = unbounded). */
   min?: number;
   max?: number;
+  /** Reject non-integers when true; decimals allowed exactly when this is not set. */
+  integer?: boolean;
   /** Field schemas of the shallowObject kind. */
   fields?: OpencodeSettingField[];
   /** Non-opencode.json target file; "tui" routes this descriptor's reads/writes to configDir/tui.json. */
@@ -971,6 +1076,65 @@ export const OPENCODE_SETTINGS: readonly OpencodeSetting[] = [
     hint: "示例：opencode、catppuccin、tokyo-night；写入 tui.json",
     group: "终端界面",
   },
+  {
+    key: "logLevel",
+    path: ["logLevel"],
+    kind: "enum",
+    label: "日志级别",
+    options: ["DEBUG", "INFO", "WARN", "ERROR"],
+    group: "高级",
+  },
+  {
+    key: "shell",
+    path: ["shell"],
+    kind: "string",
+    label: "Shell 路径",
+    hint: "系统自动探测，仅必要时覆盖",
+    group: "高级",
+  },
+  {
+    key: "subagentDepth",
+    path: ["subagent_depth"],
+    kind: "number",
+    label: "子代理深度",
+    hint: "0=禁止所有子代理",
+    min: 0,
+    max: 16,
+    integer: true,
+    group: "高级",
+  },
+  {
+    key: "toolOutput",
+    path: ["tool_output"],
+    kind: "shallowObject",
+    label: "工具输出上限",
+    group: "终端与输出",
+    fields: [
+      { key: "max_lines", kind: "number", label: "最大行数", integer: true, default: 2000 },
+      { key: "max_bytes", kind: "number", label: "最大字节数", integer: true, default: 51200 },
+    ],
+  },
+  {
+    key: "attachmentImage",
+    path: ["attachment", "image"],
+    kind: "shallowObject",
+    label: "图片附件处理",
+    group: "终端与输出",
+    fields: [
+      { key: "auto_resize", kind: "boolean", label: "自动缩放", default: true },
+      { key: "max_width", kind: "number", label: "最大宽度", integer: true, default: 2000 },
+      { key: "max_height", kind: "number", label: "最大高度", integer: true, default: 2000 },
+      { key: "max_base64_bytes", kind: "number", label: "Base64 字节上限", integer: true, default: 5242880 },
+    ],
+  },
+  {
+    key: "watcherIgnore",
+    path: ["watcher", "ignore"],
+    kind: "stringList",
+    label: "监视忽略",
+    hint: "glob 列表",
+    group: "高级",
+  },
 ];
 
 /** One OpenCode setting value; null = key absent (「未设置」→ remove edit). */
@@ -978,7 +1142,8 @@ export type OpencodeSettingValue =
   string | boolean | number | null | StringListValue | ShallowObjectValue | PermissionToolsValue | McpServersValue;
 
 /** One OMO tab setting value; null = remove op (恢复默认) — the shape follows the descriptor kind. */
-export type OmoSettingValue = boolean | number | null | StringListValue | ShallowObjectValue | ModelCatalogValue;
+export type OmoSettingValue =
+  boolean | number | string | null | StringListValue | ShallowObjectValue | ModelCatalogValue;
 
 /**
  * Read/write-split permission aggregate for the OpenCode tab payload: the string
