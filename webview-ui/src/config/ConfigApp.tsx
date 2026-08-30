@@ -4,6 +4,7 @@ import type {
   ConfigInitPayload,
   ExtToWebview,
   ModelCatalogValue,
+  NumberMapValue,
   OmoMiscSetting,
   OmoSettingValue,
   PresetRow,
@@ -18,6 +19,7 @@ import AgentTextMapEditor from "../controls/AgentTextMapEditor";
 import ChipsEditor from "../controls/ChipsEditor";
 import { isWideSettingKind } from "../controls/helpers";
 import ModelCatalogEditor from "../controls/ModelCatalogEditor";
+import NumberMapEditor from "../controls/NumberMapEditor";
 import OrderedListEditor from "../controls/OrderedListEditor";
 import ShallowObjectFields from "../controls/ShallowObjectFields";
 import StringListEditor from "../controls/StringListEditor";
@@ -194,6 +196,10 @@ function toAgentTextMapValue(value: OmoSettingValue | undefined): AgentTextMapVa
   return value !== null && typeof value === "object" && !Array.isArray(value) ? (value as AgentTextMapValue) : null;
 }
 
+function toNumberMapValue(value: OmoSettingValue | undefined): NumberMapValue | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? (value as NumberMapValue) : null;
+}
+
 /**
  * One 功能设置 row: boolean → switch, number → draft-text input committing on
  * blur/Enter, enum → 未设置+options select, composite kinds → the shared
@@ -358,6 +364,20 @@ function OmoSettingRow({
         <AgentTextMapEditor
           value={current}
           agents={setting.options ?? []}
+          freeKeys={setting.options === undefined}
+          disabled={pending}
+          onChange={(next) => onApplyValue(setting, next, current ?? null)}
+        />
+      );
+    }
+    if (setting.kind === "numberMap") {
+      const current = toNumberMapValue(value);
+      return (
+        <NumberMapEditor
+          value={current}
+          options={setting.options}
+          bounds={setting}
+          wholeKeyRemove={setting.agents === undefined}
           disabled={pending}
           onChange={(next) => onApplyValue(setting, next, current ?? null)}
         />
