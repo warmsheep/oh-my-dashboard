@@ -1,23 +1,24 @@
 import { useState } from "react";
 
-import { parseStringListEntry, removeListEntry } from "./helpers";
+import { moveListEntry, parseOrderedListEntry, removeListEntry } from "./helpers";
 
 /**
- * stringList-kind editor: read-only rows with a 删除 button plus a bottom 添加 input
- * committing on Enter/blur. Invalid entries (empty / over-length / duplicate / cap)
- * keep the draft and show an inline red hint without committing. Every change
- * commits the whole list; an empty list commits null (remove the key).
+ * orderedList-kind editor: ordered rows with ↑/↓ move and 删除 buttons plus a bottom
+ * 添加 input committing on Enter/blur. Add-row validation mirrors core's orderedList
+ * rules (≤64 unique trimmed entries of ≤64 chars); invalid entries keep the draft and
+ * show an inline red hint without committing. Every change commits the FULL ordered
+ * array; an empty list commits null (remove the key).
  */
-export default function StringListEditor({
+export default function OrderedListEditor({
   value,
   disabled,
   onChange,
 }: {
-  /** Current entries; null = key absent (未设置). */
+  /** Current entries in their committed order; null = key absent (未设置). */
   value: string[] | null;
-  /** Pending-write disable shared with the hosting set-row. */
+  /** Pending-write disable shared with the hosting set-row (freezes every control). */
   disabled: boolean;
-  /** Commit the next list (null = empty → remove the key). */
+  /** Commit the full next array (null = empty → remove the key). */
   onChange(next: string[] | null): void;
 }) {
   const entries = value ?? [];
@@ -26,7 +27,7 @@ export default function StringListEditor({
   const [error, setError] = useState<string | null>(null);
 
   const commitDraft = () => {
-    const parsed = parseStringListEntry(draft, entries);
+    const parsed = parseOrderedListEntry(draft, entries);
     if (parsed.kind === "invalid") {
       setError(parsed.error);
       return;
@@ -44,6 +45,24 @@ export default function StringListEditor({
           <span className="ctl-text" title={entry}>
             {entry}
           </span>
+          <button
+            type="button"
+            className="btn secondary ctl-x"
+            disabled={disabled || index === 0}
+            aria-label={`上移条目 ${entry}`}
+            onClick={() => onChange(moveListEntry(entries, index, -1))}
+          >
+            ↑
+          </button>
+          <button
+            type="button"
+            className="btn secondary ctl-x"
+            disabled={disabled || index === entries.length - 1}
+            aria-label={`下移条目 ${entry}`}
+            onClick={() => onChange(moveListEntry(entries, index, 1))}
+          >
+            ↓
+          </button>
           <button
             type="button"
             className="btn secondary ctl-x"

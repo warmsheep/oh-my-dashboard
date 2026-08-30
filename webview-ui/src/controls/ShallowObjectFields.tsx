@@ -8,8 +8,10 @@ import { effectiveShallowBoolean, parseNumberFieldInput } from "./helpers";
  * shared s-switch showing value ?? field.default ?? false; number fields render a
  * draft text input committing on blur/Enter (empty → null = 未设置, decimals allowed
  * unless field.integer, bounds from the field — invalid input keeps the draft and
- * shows the inline Chinese error). Every commit sends the FULL field map with nulls
- * for unset fields; the host accepts the whole snapshot.
+ * shows the inline Chinese error); enum fields render a select (未设置 + field
+ * options — the read path nulls out-of-option leaves, so every shown value is
+ * committable). Every commit sends the FULL field map with nulls for unset fields;
+ * the host accepts the whole snapshot.
  */
 export default function ShallowObjectFields({
   fields,
@@ -87,6 +89,34 @@ export default function ShallowObjectFields({
                 />
                 <span className="s-switch-track" aria-hidden="true" />
               </label>
+            ) : field.kind === "enum" ? (
+              <select
+                className="ctl"
+                aria-label={field.label}
+                disabled={disabled}
+                value={typeof leaf === "string" ? leaf : ""}
+                onChange={(e) => {
+                  // 未设置 commits a null leaf (remove that field's key); sibling
+                  // leaves keep their file values in the full-map snapshot.
+                  const next: ShallowObjectValue = {};
+                  for (const entry of fields) {
+                    next[entry.key] =
+                      entry.key === field.key
+                        ? e.target.value === ""
+                          ? null
+                          : e.target.value
+                        : (value?.[entry.key] ?? null);
+                  }
+                  onChange(next);
+                }}
+              >
+                <option value="">未设置</option>
+                {(field.options ?? []).map((option) => (
+                  <option key={option} value={option}>
+                    {option}
+                  </option>
+                ))}
+              </select>
             ) : (
               <input
                 className="ctl ctl-num"

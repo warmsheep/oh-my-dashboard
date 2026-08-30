@@ -9,10 +9,12 @@ import {
   isWideSettingKind,
   mcpToggleEdit,
   modelAliasError,
+  moveListEntry,
   parseNumberFieldInput,
+  parseOrderedListEntry,
   parseStringListEntry,
   permissionToolEdit,
-  removeStringListEntry,
+  removeListEntry,
   toggleChipValue,
   withCatalogEntry,
   withoutCatalogAlias,
@@ -46,14 +48,59 @@ describe("parseStringListEntry (add-row validation)", () => {
   });
 });
 
-describe("removeStringListEntry", () => {
+describe("removeListEntry (shared by stringList + orderedList)", () => {
   it("removes by index and returns null when the list becomes empty (remove the key)", () => {
-    expect(removeStringListEntry(["a", "b", "c"], 1)).toEqual(["a", "c"]);
-    expect(removeStringListEntry(["a"], 0)).toBeNull();
+    expect(removeListEntry(["a", "b", "c"], 1)).toEqual(["a", "c"]);
+    expect(removeListEntry(["a"], 0)).toBeNull();
   });
 
   it("ignores out-of-range indices (defensive)", () => {
-    expect(removeStringListEntry(["a"], 5)).toEqual(["a"]);
+    expect(removeListEntry(["a"], 5)).toEqual(["a"]);
+  });
+});
+
+describe("parseOrderedListEntry (add-row validation, orderedList bounds 64/64)", () => {
+  it("commits trimmed non-empty unique entries", () => {
+    expect(parseOrderedListEntry("  build  ", [])).toEqual({ kind: "commit", value: "build" });
+    expect(parseOrderedListEntry("plan", ["build"])).toEqual({ kind: "commit", value: "plan" });
+  });
+
+  it("rejects empty and whitespace-only input", () => {
+    expect(parseOrderedListEntry("", [])).toEqual({ kind: "invalid", error: "条目不能为空" });
+    expect(parseOrderedListEntry("   ", ["build"])).toEqual({ kind: "invalid", error: "条目不能为空" });
+  });
+
+  it("rejects duplicates against the current list (after trimming)", () => {
+    expect(parseOrderedListEntry("build", ["build"])).toEqual({ kind: "invalid", error: "该条目已存在" });
+    expect(parseOrderedListEntry(" build ", ["build"])).toEqual({ kind: "invalid", error: "该条目已存在" });
+  });
+
+  it("rejects entries longer than 64 characters", () => {
+    expect(parseOrderedListEntry("x".repeat(65), [])).toEqual({ kind: "invalid", error: "最长 64 个字符" });
+    expect(parseOrderedListEntry("x".repeat(64), [])).toEqual({ kind: "commit", value: "x".repeat(64) });
+  });
+
+  it("rejects adds once the list holds 64 entries", () => {
+    const full = Array.from({ length: 64 }, (_, i) => `agent-${i}`);
+    expect(parseOrderedListEntry("new", full)).toEqual({ kind: "invalid", error: "最多 64 条" });
+    expect(parseOrderedListEntry("new", full.slice(0, 63))).toEqual({ kind: "commit", value: "new" });
+  });
+});
+
+describe("moveListEntry", () => {
+  it("swaps neighbours in both directions and keeps the rest in place", () => {
+    expect(moveListEntry(["build", "plan", "general"], 1, -1)).toEqual(["plan", "build", "general"]);
+    expect(moveListEntry(["build", "plan", "general"], 0, 1)).toEqual(["plan", "build", "general"]);
+    expect(moveListEntry(["build", "plan", "general"], 2, -1)).toEqual(["build", "general", "plan"]);
+  });
+
+  it("is a no-op at the list edges (the ↑/↓ buttons are disabled there)", () => {
+    expect(moveListEntry(["build", "plan"], 0, -1)).toEqual(["build", "plan"]);
+    expect(moveListEntry(["build", "plan"], 1, 1)).toEqual(["build", "plan"]);
+  });
+
+  it("ignores out-of-range indices (defensive)", () => {
+    expect(moveListEntry(["build"], 5, -1)).toEqual(["build"]);
   });
 });
 
@@ -214,6 +261,7 @@ describe("isWideSettingKind", () => {
     for (const kind of [
       "providers",
       "stringList",
+      "orderedList",
       "enumChips",
       "shallowObject",
       "permissionTools",

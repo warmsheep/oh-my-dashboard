@@ -19,6 +19,9 @@ import type {
 // Mirror of core STRING_LIST_MAX_ENTRIES / STRING_LIST_ENTRY_MAX_LENGTH (opencodeSettings.ts).
 const STRING_LIST_MAX_ENTRIES = 16;
 const STRING_LIST_ENTRY_MAX_LENGTH = 256;
+// Mirror of core ORDERED_LIST_MAX_ENTRIES / ORDERED_LIST_ENTRY_MAX_LENGTH (opencodeSettings.ts).
+const ORDERED_LIST_MAX_ENTRIES = 64;
+const ORDERED_LIST_ENTRY_MAX_LENGTH = 64;
 // Mirror of core MODEL_CATALOG_MAX_ENTRIES / MODEL_ALIAS_MAX_LENGTH / MODEL_ALIAS_PATTERN (omoSettings.ts).
 const MODEL_CATALOG_MAX_ENTRIES = 32;
 const MODEL_ALIAS_MAX_LENGTH = 32;
@@ -28,38 +31,70 @@ const MODEL_ALIAS_PATTERN = /^[A-Za-z0-9._-]+$/;
 export type PermissionAction = "allow" | "ask" | "deny";
 
 // ---------------------------------------------------------------------------
-// stringList kind
+// stringList + orderedList kinds
 // ---------------------------------------------------------------------------
 
-/** Result of parsing a stringList add-row commit: commit posts, invalid keeps the draft + shows the red hint. */
-export type StringListEntryParse = { kind: "commit"; value: string } | { kind: "invalid"; error: string };
+/** Result of a list-kind add-row commit: commit posts, invalid keeps the draft + shows the red hint. */
+export type ListEntryParse = { kind: "commit"; value: string } | { kind: "invalid"; error: string };
 
 /**
- * Validate one add-row entry against the current list: trimmed non-empty, ≤256 chars,
- * unique, and the list stays ≤16 entries — the same rules core's
- * isValidStringListValue enforces on the write path.
+ * Shared add-row validation of the list kinds: trimmed non-empty, ≤maxEntryLength
+ * chars, unique, and the list stays ≤maxEntries — the same rules core's
+ * isValidUniqueStringEntries enforces on the write path (stringList and
+ * orderedList differ ONLY in these bounds).
  */
-export function parseStringListEntry(raw: string, current: readonly string[]): StringListEntryParse {
+function parseUniqueListEntry(
+  raw: string,
+  current: readonly string[],
+  maxEntries: number,
+  maxEntryLength: number,
+): ListEntryParse {
   const text = raw.trim();
   if (text === "") {
     return { kind: "invalid", error: "条目不能为空" };
   }
-  if (text.length > STRING_LIST_ENTRY_MAX_LENGTH) {
-    return { kind: "invalid", error: `最长 ${STRING_LIST_ENTRY_MAX_LENGTH} 个字符` };
+  if (text.length > maxEntryLength) {
+    return { kind: "invalid", error: `最长 ${maxEntryLength} 个字符` };
   }
   if (current.includes(text)) {
     return { kind: "invalid", error: "该条目已存在" };
   }
-  if (current.length >= STRING_LIST_MAX_ENTRIES) {
-    return { kind: "invalid", error: `最多 ${STRING_LIST_MAX_ENTRIES} 条` };
+  if (current.length >= maxEntries) {
+    return { kind: "invalid", error: `最多 ${maxEntries} 条` };
   }
   return { kind: "commit", value: text };
 }
 
+/** stringList add-row validation (≤16 entries of ≤256 chars — core's STRING_LIST_* bounds). */
+export function parseStringListEntry(raw: string, current: readonly string[]): ListEntryParse {
+  return parseUniqueListEntry(raw, current, STRING_LIST_MAX_ENTRIES, STRING_LIST_ENTRY_MAX_LENGTH);
+}
+
+/** orderedList add-row validation (≤64 entries of ≤64 chars — core's ORDERED_LIST_* bounds). */
+export function parseOrderedListEntry(raw: string, current: readonly string[]): ListEntryParse {
+  return parseUniqueListEntry(raw, current, ORDERED_LIST_MAX_ENTRIES, ORDERED_LIST_ENTRY_MAX_LENGTH);
+}
+
 /** Remove one entry by index; an empty result becomes null (remove the whole key). */
-export function removeStringListEntry(current: readonly string[], index: number): string[] | null {
+export function removeListEntry(current: readonly string[], index: number): string[] | null {
   const next = current.filter((_, i) => i !== index);
   return next.length === 0 ? null : next;
+}
+
+/**
+ * Move one entry by one slot (delta -1 = up, +1 = down); edge and out-of-range
+ * moves return the list unchanged (the ↑/↓ buttons are disabled at the edges —
+ * defensive only).
+ */
+export function moveListEntry(current: readonly string[], index: number, delta: -1 | 1): string[] {
+  const target = index + delta;
+  if (index < 0 || index >= current.length || target < 0 || target >= current.length) {
+    return [...current];
+  }
+  const next = [...current];
+  const [entry] = next.splice(index, 1);
+  next.splice(target, 0, entry);
+  return next;
 }
 
 // ---------------------------------------------------------------------------
@@ -212,6 +247,7 @@ export function withoutCatalogAlias(catalog: ModelCatalogValue | null, alias: st
 const WIDE_KINDS: ReadonlySet<string> = new Set([
   "providers",
   "stringList",
+  "orderedList",
   "enumChips",
   "shallowObject",
   "permissionTools",
