@@ -1,6 +1,18 @@
 import { MODEL_ID_PATTERN } from "../constants";
-import { OMO_MISC_SETTINGS, OMO_REASONING_LEVELS } from "../shared/protocol";
-import type { ModelCatalogValue, OmoMiscSetting, OmoMiscValues, OmoSettingValue } from "../shared/protocol";
+import {
+  AGENT_TEXT_MAX_LENGTH,
+  OMO_MISC_SETTINGS,
+  OMO_REASONING_LEVELS,
+  OPENCODE_STRING_VALUE_MAX_LENGTH,
+} from "../shared/protocol";
+import type {
+  AgentPairMapValue,
+  AgentTextMapValue,
+  ModelCatalogValue,
+  OmoMiscSetting,
+  OmoMiscValues,
+  OmoSettingValue,
+} from "../shared/protocol";
 import { getValue } from "./jsoncEditor";
 import type { JsoncEdit } from "./jsoncEditor";
 import {
@@ -40,6 +52,7 @@ function coerceOmoValue(setting: OmoMiscSetting, value: unknown): OmoSettingValu
     case "number":
       return typeof value === "number" && Number.isFinite(value) ? value : null;
     case "enum":
+    case "string":
       return typeof value === "string" ? value : null;
     case "stringList":
     case "orderedList":
@@ -49,6 +62,10 @@ function coerceOmoValue(setting: OmoMiscSetting, value: unknown): OmoSettingValu
       return extractShallowObjectValue(setting.fields ?? [], value);
     case "modelCatalog":
       return coerceModelCatalogValue(value);
+    case "agentPairMap":
+      return coerceAgentPairMapValue(setting, value);
+    case "agentTextMap":
+      return coerceAgentTextMapValue(setting, value);
   }
 }
 
@@ -85,6 +102,72 @@ function coerceModelCatalogValue(value: unknown): ModelCatalogValue | null {
 }
 
 /**
+ * The agentPairMap read (batch 5): one lookup at the effective `agents` path, then per
+ * options-agent extraction of agents.<name>.<leafKey>. Entries with a non-object value
+ * or a missing/invalid model are SKIPPED (broken hand-written overrides survive instead
+ * of being wiped — the write path never touches agents absent from the submitted map);
+ * an invalid reasoning string degrades to null inside the entry (display-safe); agents
+ * outside the options key set never surface. Null entries are never produced by reads —
+ * null only marks deletion intent from the UI.
+ */
+function coerceAgentPairMapValue(setting: OmoMiscSetting, value: unknown): AgentPairMapValue | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const leafKey = setting.agents?.leafKey ?? "";
+  const map: AgentPairMapValue = {};
+  for (const agent of setting.options ?? []) {
+    const agentEntry = value[agent];
+    if (!isRecord(agentEntry)) {
+      continue;
+    }
+    const override = agentEntry[leafKey];
+    if (!isRecord(override)) {
+      continue;
+    }
+    const model = override.model;
+    if (typeof model !== "string" || !MODEL_ID_PATTERN.test(model)) {
+      continue;
+    }
+    const reasoning = override.reasoning;
+    map[agent] = {
+      model,
+      reasoning: typeof reasoning === "string" && OMO_REASONING_LEVELS.includes(reasoning) ? reasoning : null,
+    };
+  }
+  return map;
+}
+
+/**
+ * The agentTextMap read (batch 5): per options-agent string leaf at
+ * agents.<name>.<leafKey> — non-strings, empty-after-trim and over-{@link AGENT_TEXT_MAX_LENGTH}
+ * strings are omitted; agents outside the options key set never surface.
+ */
+function coerceAgentTextMapValue(setting: OmoMiscSetting, value: unknown): AgentTextMapValue | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const leafKey = setting.agents?.leafKey ?? "";
+  const map: AgentTextMapValue = {};
+  for (const agent of setting.options ?? []) {
+    const agentEntry = value[agent];
+    if (!isRecord(agentEntry)) {
+      continue;
+    }
+    const text = agentEntry[leafKey];
+    if (typeof text !== "string") {
+      continue;
+    }
+    const trimmed = text.trim();
+    if (trimmed.length === 0 || trimmed.length > AGENT_TEXT_MAX_LENGTH) {
+      continue;
+    }
+    map[agent] = text;
+  }
+  return map;
+}
+
+/**
  * Read every OMO_MISC_SETTINGS value from an agent-config text at the target's scope:
  * omo targets read plugin-scope keys ONLY at [...sectionPath, ...path] (the `[opencode]`
  * block) while shared-scope keys read at the top level, and legacy targets
@@ -106,7 +189,10 @@ export function readOmoMiscValues(text: string, sectionPath: JsonPath): OmoMiscV
  * {@link shallowObjectEdits} (null leaf → remove that field; null value or an all-null
  * map → remove the key); modelCatalog emits one set/remove per alias (null entry →
  * remove that alias; reasoning null → only `model` is written; value null →
- * remove the whole key). Pure edit builder — value validation lives in
+ * remove the whole key); agentPairMap/agentTextMap emit one set/remove per agent at
+ * agents.<name>.<leafKey (null entry → remove that leafKey; a null VALUE produces no
+ * edits — never removes, or risks wiping, the shared `agents` config block, the same
+ * philosophy as the mcp recordEditor). Pure edit builder — value validation lives in
  * {@link isValidOmoMiscValue} and is enforced by callers.
  */
 export function omoMiscEdits(sectionPath: JsonPath, setting: OmoMiscSetting, value: OmoSettingValue): JsoncEdit[] {
@@ -115,6 +201,7 @@ export function omoMiscEdits(sectionPath: JsonPath, setting: OmoMiscSetting, val
     case "boolean":
     case "number":
     case "enum":
+    case "string":
     case "stringList":
     case "orderedList":
     case "enumChips":
@@ -147,18 +234,59 @@ export function omoMiscEdits(sectionPath: JsonPath, setting: OmoMiscSetting, val
       }
       return edits;
     }
+    case "agentPairMap": {
+      if (value === null || !isRecord(value)) {
+        return [];
+      }
+      const leafKey = setting.agents?.leafKey ?? "";
+      const edits: JsoncEdit[] = [];
+      for (const [agent, entry] of Object.entries(value)) {
+        if (entry === null) {
+          edits.push({ path: [...fullPath, agent, leafKey], value: undefined, op: "remove" });
+        } else if (isRecord(entry)) {
+          edits.push({
+            path: [...fullPath, agent, leafKey],
+            value:
+              entry.reasoning === null || entry.reasoning === undefined
+                ? { model: entry.model }
+                : { model: entry.model, reasoning: entry.reasoning },
+            op: "set",
+          });
+        }
+      }
+      return edits;
+    }
+    case "agentTextMap": {
+      if (value === null || !isRecord(value)) {
+        return [];
+      }
+      const leafKey = setting.agents?.leafKey ?? "";
+      const edits: JsoncEdit[] = [];
+      for (const [agent, text] of Object.entries(value)) {
+        if (text === null) {
+          edits.push({ path: [...fullPath, agent, leafKey], value: undefined, op: "remove" });
+        } else if (typeof text === "string") {
+          edits.push({ path: [...fullPath, agent, leafKey], value: text, op: "set" });
+        }
+      }
+      return edits;
+    }
   }
 }
 
 /**
  * Host-side value validator (guards the protocol write path): boolean kind accepts
  * booleans, number kind accepts integers within the descriptor bounds (min ?? 0,
- * max ?? 100), enum kind accepts listed options only, enumChips entries must be unique
- * members of the descriptor options (≤32), stringList follows the shared entry rules,
- * orderedList follows the ordered entry rules (1–64 unique trimmed non-empty ≤64-char
- * entries), shallowObject leaves must match their field schemas (null leaf = field
- * unset), modelCatalog bounds the alias charset/count and the model/reasoning shapes
- * (null entry = delete marker). null (remove op / 恢复默认) is always valid.
+ * max ?? 100), enum kind accepts listed options only, string kind accepts trimmed
+ * non-empty strings within maxLen (default OPENCODE_STRING_VALUE_MAX_LENGTH),
+ * enumChips entries must be unique members of the descriptor options (≤32),
+ * stringList follows the shared entry rules, orderedList follows the ordered entry
+ * rules (1–64 unique trimmed non-empty ≤64-char entries), shallowObject leaves must
+ * match their field schemas (null leaf = field unset), modelCatalog bounds the alias
+ * charset/count and the model/reasoning shapes, agentPairMap bounds the agent keys
+ * to the descriptor options plus the model/reasoning shapes, agentTextMap bounds
+ * the agent keys and the trimmed ≤8000 text shape (null entry = delete marker).
+ * null (remove op / 恢复默认) is always valid.
  */
 export function isValidOmoMiscValue(setting: OmoMiscSetting, value: unknown): boolean {
   if (value === null) {
@@ -174,6 +302,13 @@ export function isValidOmoMiscValue(setting: OmoMiscSetting, value: unknown): bo
     }
     case "enum":
       return typeof value === "string" && (setting.options ?? []).includes(value);
+    case "string": {
+      if (typeof value !== "string") {
+        return false;
+      }
+      const trimmed = value.trim();
+      return trimmed.length > 0 && trimmed.length <= (setting.maxLen ?? OPENCODE_STRING_VALUE_MAX_LENGTH);
+    }
     case "enumChips": {
       if (!Array.isArray(value) || value.length > ENUM_CHIPS_MAX_ENTRIES) {
         return false;
@@ -232,6 +367,55 @@ export function isValidOmoMiscValue(setting: OmoMiscSetting, value: unknown): bo
           reasoning !== null &&
           (typeof reasoning !== "string" || !OMO_REASONING_LEVELS.includes(reasoning))
         ) {
+          return false;
+        }
+      }
+      return true;
+    }
+    case "agentPairMap": {
+      if (!isRecord(value)) {
+        return false;
+      }
+      const options = setting.options ?? [];
+      for (const [agent, entry] of Object.entries(value)) {
+        if (!options.includes(agent)) {
+          return false;
+        }
+        if (entry === null) {
+          continue;
+        }
+        if (!isRecord(entry) || typeof entry.model !== "string" || !MODEL_ID_PATTERN.test(entry.model)) {
+          return false;
+        }
+        const reasoning = entry.reasoning;
+        // Absent reasoning key counts as the null form ({ model } object literals).
+        if (
+          reasoning !== undefined &&
+          reasoning !== null &&
+          (typeof reasoning !== "string" || !OMO_REASONING_LEVELS.includes(reasoning))
+        ) {
+          return false;
+        }
+      }
+      return true;
+    }
+    case "agentTextMap": {
+      if (!isRecord(value)) {
+        return false;
+      }
+      const options = setting.options ?? [];
+      for (const [agent, text] of Object.entries(value)) {
+        if (!options.includes(agent)) {
+          return false;
+        }
+        if (text === null) {
+          continue;
+        }
+        if (typeof text !== "string") {
+          return false;
+        }
+        const trimmed = text.trim();
+        if (trimmed.length === 0 || trimmed.length > AGENT_TEXT_MAX_LENGTH) {
           return false;
         }
       }

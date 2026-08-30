@@ -531,3 +531,285 @@ describe("batch-3 descriptors (OMO tab)", () => {
     expect(getValue(text, ["git_master"])).toEqual({ commit_footer: false });
   });
 });
+
+describe("batch-5 agentPairMap kind (agentUltrawork / agentCompaction)", () => {
+  it("descriptor metadata: options reuse KNOWN_AGENTS and agents.leafKey names the per-agent sub-key", () => {
+    const ultrawork = setting("agentUltrawork");
+    expect(ultrawork.kind).toBe("agentPairMap");
+    expect(ultrawork.path).toEqual(["agents"]);
+    expect(ultrawork.options).toEqual([...KNOWN_AGENTS]);
+    expect(ultrawork.agents).toEqual({ leafKey: "ultrawork" });
+    expect(setting("agentCompaction").agents).toEqual({ leafKey: "compaction" });
+  });
+
+  it("read extracts per-agent agents.<name>.<leafKey>; broken entries are omitted, invalid reasoning degrades to null", () => {
+    const text = JSON.stringify({
+      agents: {
+        oracle: { model: "zhipuai/glm-5", reasoning: "high", ultrawork: { model: "kimi/k2", reasoning: "max" } },
+        atlas: { model: "zhipuai/glm-5", ultrawork: { model: "moonshotai/kimi-k2" } },
+        sisyphus: { model: "zhipuai/glm-5", ultrawork: { model: "bad-id" } },
+        hephaestus: { model: "zhipuai/glm-5", ultrawork: { model: "kimi/k2", reasoning: "ultra" } },
+        metis: { model: "zhipuai/glm-5", ultrawork: "not an object" },
+        momus: { model: "zhipuai/glm-5" },
+        "made-up-agent": { ultrawork: { model: "kimi/k2" } },
+      },
+    });
+    expect(readOmoMiscValues(text, []).agentUltrawork).toEqual({
+      oracle: { model: "kimi/k2", reasoning: "max" },
+      atlas: { model: "moonshotai/kimi-k2", reasoning: null },
+      // invalid reasoning string degrades to null inside the entry (display-safe, pinned)
+      hephaestus: { model: "kimi/k2", reasoning: null },
+    });
+  });
+
+  it("read prefixes the omo sectionPath and degrades an absent/non-object agents block to null", () => {
+    const text = JSON.stringify({
+      "[opencode]": { agents: { oracle: { compaction: { model: "kimi/k2", reasoning: "off" } } } },
+      agents: { oracle: { compaction: { model: "evil/decoy" } } },
+    });
+    expect(readOmoMiscValues(text, ["[opencode]"]).agentCompaction).toEqual({
+      oracle: { model: "kimi/k2", reasoning: "off" },
+    });
+    expect(readOmoMiscValues("{}", []).agentUltrawork).toBeNull();
+    expect(readOmoMiscValues(JSON.stringify({ agents: "nope" }), []).agentUltrawork).toBeNull();
+  });
+
+  it("edits: per-agent set writes {model} / {model, reasoning} at agents.<name>.<leafKey>; null entry removes the leafKey", () => {
+    const value = {
+      oracle: { model: "kimi/k2", reasoning: "high" },
+      atlas: { model: "moonshotai/kimi-k2", reasoning: null },
+      metis: null,
+    };
+    const text = applyEdits("{}", omoMiscEdits(["[opencode]"], setting("agentUltrawork"), value));
+    expect(getValue(text, ["[opencode]", "agents", "oracle", "ultrawork"])).toEqual({
+      model: "kimi/k2",
+      reasoning: "high",
+    });
+    expect(getValue(text, ["[opencode]", "agents", "atlas", "ultrawork"])).toEqual({ model: "moonshotai/kimi-k2" });
+    expect(getValue(text, ["[opencode]", "agents", "metis"])).toBeUndefined();
+
+    const seeded = JSON.stringify({ agents: { oracle: { ultrawork: { model: "kimi/k2" } } } });
+    const removed = applyEdits(seeded, omoMiscEdits([], setting("agentUltrawork"), { oracle: null }));
+    expect(getValue(removed, ["agents", "oracle", "ultrawork"])).toBeUndefined();
+    expect(getValue(removed, ["agents", "oracle"])).toEqual({});
+  });
+
+  it("edits: a whole null value produces NO edits (never touches the agents block)", () => {
+    const seeded = JSON.stringify({ agents: { oracle: { model: "zhipuai/glm-5" } } });
+    expect(omoMiscEdits(["[opencode]"], setting("agentUltrawork"), null)).toEqual([]);
+    const untouched = applyEdits(seeded, omoMiscEdits([], setting("agentCompaction"), null));
+    expect(untouched).toBe(seeded);
+  });
+
+  it("edits never disturb the sibling model/reasoning keys owned by the 模型配置 section (byte-identical)", () => {
+    const seeded =
+      '{\n  "agents": {\n    // 模型配置 owns these\n    "oracle": { "model": "zhipuai/glm-5", "reasoning": "high" },\n  },\n}\n';
+    const next = applyEdits(
+      seeded,
+      omoMiscEdits([], setting("agentUltrawork"), { oracle: { model: "kimi/k2", reasoning: "low" } }),
+    );
+    // The ultrawork leaf lands NEXT TO the sibling keys without rewriting them.
+    expect(getValue(next, ["agents", "oracle"])).toEqual({
+      model: "zhipuai/glm-5",
+      reasoning: "high",
+      ultrawork: { model: "kimi/k2", reasoning: "low" },
+    });
+    expect(next).toContain("// 模型配置 owns these");
+    const afterRemove = applyEdits(next, omoMiscEdits([], setting("agentUltrawork"), { oracle: null }));
+    expect(getValue(afterRemove, ["agents", "oracle"])).toEqual({ model: "zhipuai/glm-5", reasoning: "high" });
+  });
+
+  it("read omits a reasoning-only leaf (no model); a commit for another agent leaves the hand-written leaf untouched", () => {
+    const seeded = JSON.stringify({ agents: { hephaestus: { ultrawork: { reasoning: "high" } } } });
+    // No model ⇒ not a valid override: the read skips the entry instead of wiping it.
+    expect(readOmoMiscValues(seeded, []).agentUltrawork).toEqual({});
+    const next = applyEdits(
+      seeded,
+      omoMiscEdits([], setting("agentUltrawork"), { oracle: { model: "kimi/k2", reasoning: "low" } }),
+    );
+    expect(getValue(next, ["agents", "hephaestus", "ultrawork"])).toEqual({ reasoning: "high" });
+    expect(getValue(next, ["agents", "oracle", "ultrawork"])).toEqual({ model: "kimi/k2", reasoning: "low" });
+  });
+
+  it("validator: keys ⊆ options, MODEL_ID_PATTERN, reasoning ∈ OMO_REASONING_LEVELS or null, null entries ok", () => {
+    const descriptor = setting("agentUltrawork");
+    expect(isValidOmoMiscValue(descriptor, { oracle: { model: "kimi/k2", reasoning: "high" } })).toBe(true);
+    expect(isValidOmoMiscValue(descriptor, { oracle: { model: "kimi/k2", reasoning: null } })).toBe(true);
+    expect(isValidOmoMiscValue(descriptor, { oracle: { model: "kimi/k2" } })).toBe(true); // absent reasoning
+    expect(isValidOmoMiscValue(descriptor, { oracle: null })).toBe(true);
+    expect(isValidOmoMiscValue(descriptor, {})).toBe(true);
+    expect(isValidOmoMiscValue(descriptor, null)).toBe(true);
+    expect(isValidOmoMiscValue(descriptor, { "made-up-agent": { model: "kimi/k2", reasoning: null } })).toBe(false);
+    expect(isValidOmoMiscValue(descriptor, { oracle: { model: "no-slash", reasoning: null } })).toBe(false);
+    expect(isValidOmoMiscValue(descriptor, { oracle: { model: "kimi/k2", reasoning: "ultra" } })).toBe(false);
+    expect(isValidOmoMiscValue(descriptor, { oracle: "not-an-entry" })).toBe(false);
+    expect(isValidOmoMiscValue(descriptor, [{ model: "kimi/k2" }])).toBe(false);
+    expect(isValidOmoMiscValue(descriptor, "nope")).toBe(false);
+  });
+});
+
+describe("batch-5 agentTextMap kind (agentPrompt / agentPromptAppend)", () => {
+  it("descriptor metadata: KNOWN_AGENTS options + per-agent leafKey prompt / prompt_append", () => {
+    expect(setting("agentPrompt").agents).toEqual({ leafKey: "prompt" });
+    expect(setting("agentPromptAppend").agents).toEqual({ leafKey: "prompt_append" });
+    expect(setting("agentPrompt").options).toEqual([...KNOWN_AGENTS]);
+  });
+
+  it("read keeps string leaves per agent and omits non-strings, empty-after-trim and over-8000 ones", () => {
+    const text = JSON.stringify({
+      agents: {
+        oracle: { prompt: "你是审计员。", prompt_append: "追加一段。" },
+        atlas: { prompt: "   " },
+        metis: { prompt: 42 },
+        momus: { prompt: "x".repeat(8001) },
+        sisyphus: { prompt: "x".repeat(8000) },
+        hephaestus: {},
+        "made-up-agent": { prompt: "invisible" },
+      },
+    });
+    const values = readOmoMiscValues(text, []);
+    expect(values.agentPrompt).toEqual({ oracle: "你是审计员。", sisyphus: "x".repeat(8000) });
+    expect(values.agentPromptAppend).toEqual({ oracle: "追加一段。" });
+  });
+
+  it("read degrades an absent agents block to null and prefixes the omo sectionPath", () => {
+    expect(readOmoMiscValues("{}", []).agentPrompt).toBeNull();
+    const text = JSON.stringify({ "[opencode]": { agents: { oracle: { prompt: "p" } } } });
+    expect(readOmoMiscValues(text, ["[opencode]"]).agentPrompt).toEqual({ oracle: "p" });
+    // The omo read only looks under [opencode].agents — a top-level agents decoy is
+    // invisible, so an empty [opencode] block reads the same as an absent one (null).
+    const decoy = JSON.stringify({ "[opencode]": {}, agents: { oracle: { prompt: "decoy" } } });
+    expect(readOmoMiscValues(decoy, ["[opencode]"]).agentPrompt).toBeNull();
+  });
+
+  it("edits: per-agent set/remove at agents.<name>.<leafKey>; whole null produces no edits", () => {
+    const seeded = JSON.stringify({ agents: { oracle: { prompt: "old" } } });
+    const next = applyEdits(
+      seeded,
+      omoMiscEdits(["[opencode]"], setting("agentPromptAppend"), { oracle: "追加", atlas: null }),
+    );
+    expect(getValue(next, ["[opencode]", "agents", "oracle", "prompt_append"])).toBe("追加");
+    expect(getValue(next, ["[opencode]", "agents", "atlas"])).toBeUndefined();
+    expect(omoMiscEdits([], setting("agentPrompt"), null)).toEqual([]);
+    expect(applyEdits(seeded, omoMiscEdits([], setting("agentPrompt"), null))).toBe(seeded);
+  });
+
+  it("edits touching only oracle leave a hand-written over-long momus prompt byte-identical (combined trace)", () => {
+    // 8001 chars exceeds the read/validator bound, so the read omits it — the pin:
+    // per-agent writes must never rewrite untouched leaves, whatever they contain.
+    const longPrompt = "提".repeat(8001);
+    const seeded = JSON.stringify({ agents: { momus: { prompt: longPrompt }, oracle: { prompt: "old" } } });
+    const next = applyEdits(seeded, omoMiscEdits([], setting("agentPrompt"), { oracle: "new" }));
+    expect(getValue(next, ["agents", "oracle", "prompt"])).toBe("new");
+    expect(getValue(next, ["agents", "momus", "prompt"])).toBe(longPrompt);
+    expect(next).toContain(longPrompt);
+  });
+
+  it("validator: keys ⊆ options, trimmed non-empty ≤8000 or null", () => {
+    const descriptor = setting("agentPrompt");
+    expect(isValidOmoMiscValue(descriptor, { oracle: "text", atlas: null })).toBe(true);
+    expect(isValidOmoMiscValue(descriptor, {})).toBe(true);
+    expect(isValidOmoMiscValue(descriptor, null)).toBe(true);
+    expect(isValidOmoMiscValue(descriptor, { "made-up-agent": "text" })).toBe(false);
+    expect(isValidOmoMiscValue(descriptor, { oracle: "   " })).toBe(false);
+    expect(isValidOmoMiscValue(descriptor, { oracle: "x".repeat(8000) })).toBe(true);
+    expect(isValidOmoMiscValue(descriptor, { oracle: "x".repeat(8001) })).toBe(false);
+    expect(isValidOmoMiscValue(descriptor, { oracle: 42 })).toBe(false);
+    expect(isValidOmoMiscValue(descriptor, ["text"])).toBe(false);
+  });
+});
+
+describe("batch-5 scalar/shallow descriptors (claude_code / keyword / goal / codegraph / monitor / notification / i18n)", () => {
+  it("claudeCode (shallowObject): six boolean leaves default true", () => {
+    const descriptor = setting("claudeCode");
+    expect(descriptor.path).toEqual(["claude_code"]);
+    expect(descriptor.fields?.map((field) => [field.key, field.default])).toEqual([
+      ["mcp", true],
+      ["commands", true],
+      ["skills", true],
+      ["agents", true],
+      ["hooks", true],
+      ["plugins", true],
+    ]);
+    expect(isValidOmoMiscValue(descriptor, { mcp: false, hooks: null })).toBe(true);
+    expect(isValidOmoMiscValue(descriptor, { mcp: "yes" })).toBe(false);
+    expect(isValidOmoMiscValue(descriptor, { made_up: true })).toBe(false);
+  });
+
+  it("keywordExpansions (enumChips): unique entries ∈ the four expansion keywords", () => {
+    const descriptor = setting("keywordExpansions");
+    expect(descriptor.path).toEqual(["keyword_detector", "enabled_expansions"]);
+    expect(descriptor.options).toEqual(["ultrawork", "team", "hyperplan", "hyperplan-ultrawork"]);
+    expect(isValidOmoMiscValue(descriptor, [])).toBe(true);
+    expect(isValidOmoMiscValue(descriptor, ["ultrawork", "hyperplan-ultrawork"])).toBe(true);
+    expect(isValidOmoMiscValue(descriptor, ["team", "team"])).toBe(false);
+    expect(isValidOmoMiscValue(descriptor, ["ulw"])).toBe(false);
+  });
+
+  it("goalParams (shallowObject): enabled/auto_start booleans + default_max_iterations int 1–1000", () => {
+    const descriptor = setting("goalParams");
+    expect(isValidOmoMiscValue(descriptor, { enabled: true, auto_start: false, default_max_iterations: 100 })).toBe(
+      true,
+    );
+    expect(isValidOmoMiscValue(descriptor, { default_max_iterations: 1 })).toBe(true);
+    expect(isValidOmoMiscValue(descriptor, { default_max_iterations: 1000 })).toBe(true);
+    expect(isValidOmoMiscValue(descriptor, { default_max_iterations: 0 })).toBe(false);
+    expect(isValidOmoMiscValue(descriptor, { default_max_iterations: 1001 })).toBe(false);
+    expect(isValidOmoMiscValue(descriptor, { default_max_iterations: 1.5 })).toBe(false);
+    expect(isValidOmoMiscValue(descriptor, { auto_start: "yes" })).toBe(false);
+  });
+
+  it("codegraph / monitorParams (shallowObject): boolean leaves with their defaults", () => {
+    const codegraph = setting("codegraph");
+    expect(codegraph.fields?.every((field) => field.kind === "boolean" && field.default === true)).toBe(true);
+    expect(isValidOmoMiscValue(codegraph, { daemon: false })).toBe(true);
+    expect(isValidOmoMiscValue(codegraph, { daemon: 1 })).toBe(false);
+
+    const monitor = setting("monitorParams");
+    expect(monitor.fields?.map((field) => [field.key, field.default])).toEqual([
+      ["enabled", false],
+      ["live_mode_enabled", false],
+    ]);
+    expect(isValidOmoMiscValue(monitor, { enabled: true, live_mode_enabled: null })).toBe(true);
+    expect(isValidOmoMiscValue(monitor, { enabled: 1 })).toBe(false);
+  });
+
+  it("notificationForce (boolean) / i18nLocale (string ≤16) validators", () => {
+    const notification = setting("notificationForce");
+    expect(notification.path).toEqual(["notification", "force_enable"]);
+    expect(notification.default).toBe(false);
+    expect(isValidOmoMiscValue(notification, true)).toBe(true);
+    expect(isValidOmoMiscValue(notification, 1)).toBe(false);
+
+    const locale = setting("i18nLocale");
+    expect(locale.path).toEqual(["i18n", "locale"]);
+    expect(locale.maxLen).toBe(16);
+    expect(isValidOmoMiscValue(locale, "zh")).toBe(true);
+    expect(isValidOmoMiscValue(locale, "en")).toBe(true);
+    expect(isValidOmoMiscValue(locale, "x".repeat(16))).toBe(true);
+    expect(isValidOmoMiscValue(locale, "x".repeat(17))).toBe(false);
+    expect(isValidOmoMiscValue(locale, "   ")).toBe(false);
+    expect(isValidOmoMiscValue(locale, 42)).toBe(false);
+    expect(isValidOmoMiscValue(locale, null)).toBe(true);
+  });
+
+  it("string kind reads pass strings through and degrade others to null; edits set/remove the nested leaf", () => {
+    expect(readOmoMiscValues(JSON.stringify({ i18n: { locale: "zh" } }), []).i18nLocale).toBe("zh");
+    expect(readOmoMiscValues(JSON.stringify({ i18n: { locale: 7 } }), []).i18nLocale).toBeNull();
+    const edits = omoMiscEdits(["[opencode]"], setting("i18nLocale"), "en");
+    expect(edits).toEqual([{ path: ["[opencode]", "i18n", "locale"], value: "en", op: "set" }]);
+    const removed = applyEdits('{"i18n":{"locale":"en"}}', omoMiscEdits([], setting("i18nLocale"), null));
+    expect(getValue(removed, ["i18n", "locale"])).toBeUndefined();
+  });
+
+  it("batch-5 group order is stable on first appearance (覆写矩阵 → 提示词 → 兼容层 → 关键词 → 目标循环 → 工具链 → 通知)", () => {
+    const groups: string[] = [];
+    for (const entry of OMO_MISC_SETTINGS) {
+      if (!groups.includes(entry.group)) {
+        groups.push(entry.group);
+      }
+    }
+    const batch5 = ["覆写矩阵", "提示词", "兼容层", "关键词", "目标循环", "工具链", "通知"];
+    expect(groups.slice(-batch5.length)).toEqual(batch5);
+  });
+});
