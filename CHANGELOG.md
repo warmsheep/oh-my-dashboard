@@ -2,6 +2,14 @@
 
 > 版本与日期以 git 历史为准；0.8.0–0.14.0、0.16.x、0.18.0 等中间版本为本地打包、版本号未入库，相关变更归并入下一个入库版本。
 
+## 0.41.0 (2026-08-30)
+
+- **可视化配置第三批（P1 轻件批，14 项）**：全部复用既有描述符 kind，仅两处小扩展（shallowObject 枚举叶、orderedList）。设计方案见 `docs/plans/2026-08-30-visual-config-batch3-design.md`
+- **OpenCode 选项卡**：日志级别 `logLevel`、Shell 路径、子代理深度 `subagent_depth`（整数闸，0=禁止）、工具输出上限 `tool_output`、图片附件处理 `attachment.image`、监视忽略 `watcher.ignore`（glob 列表）
+- **OMO 选项卡**：停用内置 MCP `disabled_mcps` 与停用内置命令 `disabled_commands`（严格枚举 chips）、浏览器自动化引擎与网页搜索后端（枚举下拉）、Git 提交署名 `git_master`、tmux 布局参数（枚举叶 layout/isolation + main_pane_size）、Team 规模上限 4 字段、智能体顺序 `agent_order`（↑↓ 排序编辑器）
+- **新控件**：`OrderedListEditor`（移动/添加/删除/去重校验）；`ShallowObjectFields` 支持枚举叶下拉；修复子代理深度小数预检缺口（`commitNumber` 透传 `integer` 标志）
+- **审查修复**：手写重复条目的 React key 冲突（索引复合键）、超长 orderedList 读侧显示容忍语义钉测、omo 目标 agentOrder 往返钉测、OMO 分组标签顺序钉测。测试：根套件 735、webview 143、e2e 67 checks 全绿
+
 ## 0.40.0 (2026-08-30)
 
 - **可视化配置第二批（P0 批次 + tui.json）**：OpenCode/OMO 选项卡新增 11 项配置与 5 个新描述符 kind（stringList/enumChips/shallowObject/permissionTools/modelCatalog）、6 个可复用控件（`webview-ui/src/controls/`）。设计方案见 `docs/plans/2026-08-30-visual-config-batch2-design.md`
