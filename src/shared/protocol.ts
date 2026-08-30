@@ -1274,28 +1274,48 @@ export const AGENT_TEXT_MAX_LENGTH = 8000;
  */
 export type StringMapValue = Record<string, string | null>;
 
-/** One record field value: string (text/multiline/enum/model), boolean, number, string list, string map, or null (= field unset). */
-export type RecordFieldValue = string | boolean | number | string[] | StringMapValue | null;
+/** One record field value: string (text/multiline/enum/model), boolean, number, string list, string map, nested record (kind "record"), or null (= field unset). */
+export type RecordFieldValue = string | boolean | number | string[] | StringMapValue | RecordEditorValue | null;
 
 /**
  * One named record entry (command/formatter/lsp): field key → value. Reads omit
  * fields failing their kind (never null them), so a broken entry stays repairable.
+ * Declared as an interface (not Record<...>) to break the recursive alias cycle
+ * RecordFieldValue → RecordEditorValue → this type.
  */
-export type RecordEntryValue = Record<string, RecordFieldValue>;
+export interface RecordEntryValue {
+  [fieldKey: string]: RecordFieldValue;
+}
 
 /** recordEditor write value: name → entry (null entry = delete that name; reads never produce null). */
 export type RecordEditorValue = Record<string, RecordEntryValue | null>;
+
+/**
+ * Name/entry rules of a recordEditor — shared by the descriptor root
+ * (OpencodeSetting.record) and nested "record"-kind fields (RecordFieldDef.record).
+ */
+export interface RecordSchema {
+  fields: RecordFieldDef[];
+  /** Name charset source (compiled host-side); default /^[A-Za-z0-9._-]+$/. */
+  namePattern?: string;
+  nameMaxLen?: number;
+  maxEntries?: number;
+}
 
 /**
  * One field schema of a recordEditor descriptor (a leaf inside each named entry).
  * The key MAY be dotted ("a.b" addresses the nested leaf entry.a.b — the core read
  * path traverses the containers and the write path emits per-leaf edits at the
  * nested path; the protocol entry itself stays FLAT, keyed by the dotted string,
- * so webview drafts/gaps index it directly).
+ * so webview drafts/gaps index it directly). The "record" kind nests ONE more
+ * named-entry level inside the entry (value = RecordEditorValue): reads coerce
+ * each sub-entry with {@link RecordSchema.fields} and writes recurse per-leaf, so
+ * hand-written leaves inside a touched sub-entry survive (recursive safety
+ * contract of recordEditorEdits).
  */
 export interface RecordFieldDef {
   key: string;
-  kind: "text" | "multiline" | "boolean" | "stringList" | "enum" | "model" | "number" | "stringMap";
+  kind: "text" | "multiline" | "boolean" | "stringList" | "enum" | "model" | "number" | "stringMap" | "record";
   label: string;
   hint?: string;
   /** Selectable values of the enum kind (leaf values outside them are rejected). */
@@ -1311,6 +1331,8 @@ export interface RecordFieldDef {
   max?: number;
   /** Reject non-integers when true; decimals allowed exactly when this is not set. */
   integer?: boolean;
+  /** Entry schemas + name rules of the "record" kind (ignored by other kinds). */
+  record?: RecordSchema;
 }
 
 /**
@@ -1406,13 +1428,7 @@ export interface OpencodeSetting {
    * recordEditor metadata: entry field schemas plus name rules. Defaults:
    * namePattern /^[A-Za-z0-9._-]+$/, nameMaxLen 64, maxEntries 32.
    */
-  record?: {
-    fields: RecordFieldDef[];
-    /** Name charset source (compiled host-side); default /^[A-Za-z0-9._-]+$/. */
-    namePattern?: string;
-    nameMaxLen?: number;
-    maxEntries?: number;
-  };
+  record?: RecordSchema;
   /** Non-opencode.json target file; "tui" routes this descriptor's reads/writes to configDir/tui.json. */
   file?: "tui";
 }
@@ -1496,7 +1512,7 @@ export const OPENCODE_SETTINGS: readonly OpencodeSetting[] = [
     path: ["provider"],
     kind: "recordEditor",
     label: "自定义供应商",
-    hint: "供应商明细的 models 模型块请在文件中手写，UI 不会触碰",
+    hint: "models 模型块已可视化（名称/限额）；env、options.timeout 与模型级高级字段仍需手写",
     group: "供应商",
     record: {
       fields: [
@@ -1504,15 +1520,47 @@ export const OPENCODE_SETTINGS: readonly OpencodeSetting[] = [
         { key: "npm", kind: "text", label: "npm 包", hint: "如 @ai-sdk/openai-compatible" },
         { key: "options.apiKey", kind: "text", label: "API Key", hint: "支持 {env:VAR} 与 {file:路径} 替换" },
         { key: "options.baseURL", kind: "text", label: "Base URL", hint: "自定义接入点地址" },
+        {
+          key: "models",
+          kind: "record",
+          label: "模型",
+          hint: "该供应商的模型定义",
+          record: {
+            fields: [
+              { key: "name", kind: "text", label: "名称", hint: "展示名，缺省用模型 id" },
+              {
+                key: "limit.context",
+                kind: "number",
+                label: "上下文窗口",
+                hint: "tokens",
+                integer: true,
+                min: 1,
+                max: 100000000,
+              },
+              {
+                key: "limit.output",
+                kind: "number",
+                label: "输出上限",
+                hint: "tokens",
+                integer: true,
+                min: 1,
+                max: 10000000,
+              },
+            ],
+            maxEntries: 64,
+          },
+        },
         { key: "whitelist", kind: "stringList", label: "模型白名单" },
         { key: "blacklist", kind: "stringList", label: "模型黑名单" },
       ],
     },
-    // Schema fields deliberately unexposed: models.<id> is a deep ModelConfig map no
-    // descriptor kind expresses (hand-edit the file — per-leaf edits keep it intact);
-    // env (string[]) is a rare hand-tuned leaf; options.timeout is an `integer | false`
-    // union the number kind cannot express (same reason mcp oauth stays out).
-    // id is derived from the entry name itself.
+    // Schema fields deliberately unexposed: env (string[]) is a rare hand-tuned
+    // leaf; options.timeout is an `integer | false` union the number kind cannot
+    // express (same reason mcp oauth stays out). models.<id> IS exposed via the
+    // nested record kind, but only its high-frequency leaves (name / limit.*) —
+    // per-model advanced leaves (options, tool_call, …) stay hand-written and
+    // survive UI edits through the per-leaf write semantics. id is derived from
+    // the entry name itself.
   },
   {
     key: "defaultAgent",

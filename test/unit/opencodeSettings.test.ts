@@ -2203,7 +2203,7 @@ describe("shallowObject multiline leaf (agent prompt)", () => {
 
 describe("batch-8 providerEntries recordEditor (自定义供应商)", () => {
   const descriptor = setting("providerEntries");
-  it("descriptor pins the provider field vocabulary and the unexposed leaves", () => {
+  it("descriptor pins the provider field vocabulary incl. the nested models record", () => {
     expect(descriptor.kind).toBe("recordEditor");
     expect(descriptor.path).toEqual(["provider"]);
     expect(descriptor.group).toBe("供应商");
@@ -2214,15 +2214,22 @@ describe("batch-8 providerEntries recordEditor (自定义供应商)", () => {
       ["npm", "text"],
       ["options.apiKey", "text"],
       ["options.baseURL", "text"],
+      ["models", "record"],
       ["whitelist", "stringList"],
       ["blacklist", "stringList"],
     ]);
-    // env / options.timeout / models.<id> deliberately unexposed (models is a deep
-    // ModelConfig map; env is a rare hand-tuned array) — hand-edit the file instead.
+    const modelsField = descriptor.record?.fields.find((field) => field.key === "models");
+    expect(modelsField?.record?.maxEntries).toBe(64);
+    expect(modelsField?.record?.fields.map((field) => [field.key, field.kind])).toEqual([
+      ["name", "text"],
+      ["limit.context", "number"],
+      ["limit.output", "number"],
+    ]);
+    // env / options.timeout stay deliberately unexposed (rare hand-tuned leaves;
+    // timeout is an integer|false union the number kind cannot express).
     const keys = (descriptor.record?.fields ?? []).map((field) => field.key).join("|");
     expect(keys).not.toContain("env");
     expect(keys).not.toContain("timeout");
-    expect(keys).not.toContain("models");
   });
 
   it("round-trip: write a provider entry, read it back through the provider record slot", () => {
@@ -2267,6 +2274,158 @@ describe("batch-8 providerEntries recordEditor (自定义供应商)", () => {
   it("providerEntries values never enter the scalar values map (rides payload.records.provider)", () => {
     const values = readOpencodeSettingValues(JSON.stringify({ provider: { mygw: { name: "GW" } } }));
     expect(Object.hasOwn(values, "providerEntries")).toBe(false);
+  });
+});
+
+describe("providerEntries nested models record (models 模型块可视化)", () => {
+  const descriptor = setting("providerEntries");
+  const providerFields = descriptor.record?.fields ?? [];
+  const modelsLeaf = { pro: { name: "GW Pro", "limit.context": 128000, "limit.output": 8192 } };
+
+  it("writes nested model leaves at provider.<name>.models.<id> paths", () => {
+    const written = applyEdits("{}", opencodeSettingEdits(descriptor, { mygw: { models: modelsLeaf } }));
+    expect(getValue(written, ["provider", "mygw", "models", "pro"])).toEqual({
+      name: "GW Pro",
+      limit: { context: 128000, output: 8192 },
+    });
+  });
+
+  it("round-trip: written models read back through the provider record slot unchanged", () => {
+    const written = applyEdits("{}", opencodeSettingEdits(descriptor, { mygw: { models: modelsLeaf } }));
+    const states = readRecordStates(written);
+    expect(states.provider).toEqual({
+      mode: "entries",
+      booleanValue: null,
+      entries: { mygw: { models: modelsLeaf } },
+    });
+    // Posting the read form back is idempotent (same leaves rewritten, nothing else).
+    const again = applyEdits(written, opencodeSettingEdits(descriptor, states.provider.entries));
+    expect(getValue(again, ["provider", "mygw", "models", "pro"])).toEqual(
+      getValue(written, ["provider", "mygw", "models", "pro"]),
+    );
+  });
+
+  it("per-leaf safety: hand-written sibling models and advanced leaves inside a touched model survive", () => {
+    const seeded =
+      '{\n  "provider": {\n    "mygw": {\n      "models": {\n        // tuned by hand\n        "pro": { "name": "Old", "tool_call": true, "options": { "temperature": 0.2 } },\n        "legacy": { "name": "Legacy" },\n      },\n    },\n  },\n}\n';
+    const next = applyEdits(seeded, opencodeSettingEdits(descriptor, { mygw: { models: { pro: { name: "New" } } } }));
+    expect(getValue(next, ["provider", "mygw", "models", "pro", "name"])).toBe("New");
+    expect(getValue(next, ["provider", "mygw", "models", "pro", "tool_call"])).toBe(true);
+    expect(getValue(next, ["provider", "mygw", "models", "pro", "options"])).toEqual({ temperature: 0.2 });
+    expect(getValue(next, ["provider", "mygw", "models", "legacy"])).toEqual({ name: "Legacy" });
+    expect(next).toContain("// tuned by hand");
+  });
+
+  it("null sub-entry removes exactly that model; null models leaf removes the block; {} emits no edits", () => {
+    const seeded = JSON.stringify({ provider: { mygw: { models: { pro: { name: "P" }, lite: { name: "L" } } } } });
+    const minusOne = applyEdits(seeded, opencodeSettingEdits(descriptor, { mygw: { models: { lite: null } } }));
+    expect(getValue(minusOne, ["provider", "mygw", "models"])).toEqual({ pro: { name: "P" } });
+    const minusAll = applyEdits(seeded, opencodeSettingEdits(descriptor, { mygw: { models: null } }));
+    expect(getValue(minusAll, ["provider", "mygw", "models"])).toBe(undefined);
+    expect(recordEditorEdits(["provider"], { mygw: { models: {} } }, providerFields)).toEqual([]);
+  });
+
+  it("kind-aware dispatch: without field schemas a nested-shaped leaf is skipped, not stringMap-rewritten", () => {
+    const value = { mygw: { models: { pro: { name: "P" } } } };
+    expect(recordEditorEdits(["provider"], value)).toEqual([]);
+    expect(recordEditorEdits(["provider"], value, providerFields).length).toBeGreaterThan(0);
+  });
+
+  it("validator accepts well-formed nested models and rejects shape violations", () => {
+    expect(isValidOpencodeSettingValue(descriptor, { mygw: { models: modelsLeaf } })).toBe(true);
+    expect(isValidOpencodeSettingValue(descriptor, { mygw: { models: { pro: null } } })).toBe(true);
+    expect(isValidOpencodeSettingValue(descriptor, { mygw: { models: {} } })).toBe(true);
+    // Out-of-bounds / non-integer numbers fail the nested number bounds.
+    expect(isValidOpencodeSettingValue(descriptor, { mygw: { models: { pro: { "limit.context": 0 } } } })).toBe(false);
+    expect(isValidOpencodeSettingValue(descriptor, { mygw: { models: { pro: { "limit.context": 1.5 } } } })).toBe(
+      false,
+    );
+    // Unknown field inside a nested entry fails (mirrors the top-level rule).
+    expect(isValidOpencodeSettingValue(descriptor, { mygw: { models: { pro: { tool_call: true } } } })).toBe(false);
+    // Model ids must fit the record name charset (slash is not in it).
+    expect(isValidOpencodeSettingValue(descriptor, { mygw: { models: { "a/b": { name: "X" } } } })).toBe(false);
+    // Nested entry cap (64) is enforced.
+    const overflow: Record<string, unknown> = {};
+    for (let index = 0; index < 65; index += 1) {
+      overflow[`m${index}`] = { name: "X" };
+    }
+    expect(isValidOpencodeSettingValue(descriptor, { mygw: { models: overflow } })).toBe(false);
+  });
+
+  it("read degrades tolerantly: non-record sub-entries and out-of-bounds leaves drop out", () => {
+    const seeded = JSON.stringify({
+      provider: {
+        mygw: {
+          models: {
+            pro: { name: "P", limit: { context: 0, output: 8192 } },
+            broken: "not-a-record",
+            empty: {},
+          },
+        },
+      },
+    });
+    const states = readRecordStates(seeded);
+    expect(states.provider.entries.mygw?.models).toEqual({
+      pro: { name: "P", "limit.output": 8192 },
+      empty: {},
+    });
+  });
+
+  it("round-trippable contract: name-invalid sub-entries (slash ids) drop out of the read form and survive edits", () => {
+    const seeded = JSON.stringify({
+      provider: {
+        mygw: {
+          name: "Old",
+          models: {
+            "deepseek/deepseek-chat": { name: "DSC" },
+            pro: { name: "P" },
+          },
+        },
+      },
+    });
+    const states = readRecordStates(seeded);
+    // The slash id fails the record name charset, so the read form carries only
+    // the valid sibling — reposting the form can never fail the write backstop.
+    expect(states.provider.entries.mygw?.models).toEqual({ pro: { name: "P" } });
+    const posted = { ...states.provider.entries, mygw: { ...states.provider.entries.mygw, name: "New" } };
+    expect(isValidOpencodeSettingValue(descriptor, posted)).toBe(true);
+    const next = applyEdits(seeded, opencodeSettingEdits(descriptor, posted));
+    expect(getValue(next, ["provider", "mygw", "name"])).toBe("New");
+    expect(getValue(next, ["provider", "mygw", "models", "deepseek/deepseek-chat"])).toEqual({ name: "DSC" });
+  });
+
+  it("read caps nested sub-entries at the schema maxEntries (65 hand-written models → 64 readable)", () => {
+    const models: Record<string, unknown> = {};
+    for (let index = 0; index < 65; index += 1) {
+      models[`m${index}`] = { name: "X" };
+    }
+    const seeded = JSON.stringify({ provider: { mygw: { models } } });
+    const states = readRecordStates(seeded);
+    const readable = states.provider.entries.mygw?.models;
+    expect(Object.keys(readable ?? {}).length).toBe(64);
+    // The capped read form reposts cleanly; the 65th model stays file-only and intact.
+    expect(isValidOpencodeSettingValue(descriptor, states.provider.entries)).toBe(true);
+    const next = applyEdits(seeded, opencodeSettingEdits(descriptor, states.provider.entries));
+    expect(getValue(next, ["provider", "mygw", "models", "m64"])).toEqual({ name: "X" });
+  });
+
+  it("a read-omitted out-of-bounds leaf survives a write that touches only other fields", () => {
+    const seeded = JSON.stringify({
+      provider: { mygw: { models: { pro: { name: "P", limit: { context: 0 } } } } },
+    });
+    const states = readRecordStates(seeded);
+    expect(states.provider.entries.mygw?.models).toEqual({ pro: { name: "P" } });
+    const next = applyEdits(seeded, opencodeSettingEdits(descriptor, states.provider.entries));
+    expect(getValue(next, ["provider", "mygw", "models", "pro", "limit", "context"])).toBe(0);
+  });
+
+  it("validator rejects nested numbers above the schema max bound", () => {
+    expect(isValidOpencodeSettingValue(descriptor, { mygw: { models: { pro: { "limit.context": 100000001 } } } })).toBe(
+      false,
+    );
+    expect(isValidOpencodeSettingValue(descriptor, { mygw: { models: { pro: { "limit.output": 10000001 } } } })).toBe(
+      false,
+    );
   });
 });
 

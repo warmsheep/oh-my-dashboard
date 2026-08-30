@@ -14,9 +14,11 @@ import type {
   OpencodeSettingValue,
   PermissionToolsValue,
   RecordAggregate,
+  RecordEditorValue,
   RecordEntryValue,
   RecordFieldDef,
   RecordFieldValue,
+  RecordSchema,
   ShallowObjectValue,
   StringMapValue,
 } from "../shared/protocol";
@@ -358,6 +360,32 @@ function coerceRecordField(field: RecordFieldDef, leaf: unknown): RecordFieldVal
       }
       return Object.keys(kept).length > 0 ? kept : undefined;
     }
+    case "record": {
+      if (!isRecord(leaf)) {
+        return undefined;
+      }
+      // Validator-aligned degrade (the module's round-trippable contract): sub-entry
+      // names failing the level's name rules and entries beyond the cap are dropped
+      // from the read form, so a reposted snapshot can never fail the write backstop
+      // — hand-written exotic ids (openrouter-style "vendor/model") and overflow
+      // entries stay file-only, untouched by UI edits (absent names emit no edits).
+      const schema = field.record;
+      const pattern = schema?.namePattern === undefined ? RECORD_NAME_PATTERN : new RegExp(schema.namePattern);
+      const nameMaxLen = schema?.nameMaxLen ?? RECORD_NAME_MAX_LENGTH;
+      const maxEntries = schema?.maxEntries ?? RECORD_MAX_ENTRIES;
+      const nestedFields = schema?.fields ?? [];
+      const out: RecordEditorValue = {};
+      for (const [subName, subEntry] of Object.entries(leaf)) {
+        if (Object.keys(out).length >= maxEntries) {
+          break;
+        }
+        if (!isRecord(subEntry) || subName.length > nameMaxLen || !pattern.test(subName)) {
+          continue;
+        }
+        out[subName] = coerceRecordEntry(nestedFields, subEntry);
+      }
+      return Object.keys(out).length > 0 ? out : undefined;
+    }
   }
 }
 
@@ -406,7 +434,7 @@ export function shallowObjectEdits(parentPath: JsonPath, value: unknown, ownsKey
  * "options.apiKey" → entry.options.apiKey; plain keys are single-segment). Entries
  * whose submitted object has no fields emit NO edits: name removal is ONLY the
  * explicit null marker, so unknown/hand-written leaves inside a touched entry are
- * never collateral damage (the provider safety contract — users keep models blocks
+ * never collateral damage (the provider safety contract — users keep env blocks
  * and options.timeout there). An entry left with no fields may leave an empty {}
  * container behind on disk — the same tolerated residue as permissionTools.
  * stringMap markers apply per map key (null map entries drop their keys); an
@@ -415,13 +443,31 @@ export function shallowObjectEdits(parentPath: JsonPath, value: unknown, ownsKey
  * Rename = old name null + new name fields in one value. A null VALUE itself
  * null-guards to no edits — the whole-key remove for it lives in the descriptor
  * dispatch ({@link opencodeSettingEdits}), so raw callers can never wipe the key
- * by accident. Pure edit builder — value validation lives in
- * {@link isValidOpencodeSettingValue} and is enforced by callers.
+ * by accident. `fields` (the descriptor's field schemas) enables kind-aware
+ * dispatch: when provided, keys with no field schema are skipped (validated
+ * upstream) and record-kind leaves recurse into one more level of the same
+ * per-leaf semantics at the field's path (null removes the whole field leaf, a
+ * null sub-entry removes that name, an object sub-entry edits only ITS present
+ * fields — hand-written sub-entries and advanced leaves inside a touched
+ * sub-entry survive); without fields the legacy shape-based behavior
+ * (record-shaped leaves treated as stringMaps) is kept. Pure edit builder —
+ * value validation lives in {@link isValidOpencodeSettingValue} and is enforced
+ * by callers.
  */
-export function recordEditorEdits(path: JsonPath, value: unknown): JsoncEdit[] {
+export function recordEditorEdits(path: JsonPath, value: unknown, fields?: readonly RecordFieldDef[]): JsoncEdit[] {
   if (value === null || !isRecord(value)) {
     return [];
   }
+  return recordEntriesEdits(path, value, fields);
+}
+
+/** The per-name loop shared by the descriptor root and every nested record field. */
+function recordEntriesEdits(
+  path: JsonPath,
+  value: Record<string, unknown>,
+  fields?: readonly RecordFieldDef[],
+): JsoncEdit[] {
+  const fieldByKey = fields === undefined ? null : new Map(fields.map((field) => [field.key, field]));
   const edits: JsoncEdit[] = [];
   for (const [name, entry] of Object.entries(value)) {
     if (entry === null) {
@@ -433,6 +479,14 @@ export function recordEditorEdits(path: JsonPath, value: unknown): JsoncEdit[] {
     }
     for (const [fieldKey, leaf] of Object.entries(entry)) {
       const leafPath = [...path, name, ...fieldKey.split(".")];
+      const field = fieldByKey?.get(fieldKey);
+      if (field !== undefined && field.kind === "record") {
+        edits.push(...recordFieldEdits(leafPath, leaf, field));
+        continue;
+      }
+      if (fieldByKey !== null && field === undefined) {
+        continue; // unknown field — callers validate first; tolerated no-op
+      }
       if (leaf === null) {
         edits.push({ path: leafPath, value: undefined, op: "remove" });
         continue;
@@ -460,6 +514,17 @@ export function recordEditorEdits(path: JsonPath, value: unknown): JsoncEdit[] {
     }
   }
   return edits;
+}
+
+/** One "record"-kind leaf at its resolved path: null removes the whole leaf, records recurse. */
+function recordFieldEdits(leafPath: JsonPath, leaf: unknown, field: RecordFieldDef): JsoncEdit[] {
+  if (leaf === null) {
+    return [{ path: leafPath, value: undefined, op: "remove" }];
+  }
+  if (!isRecord(leaf)) {
+    return []; // tolerated residue (callers validate first)
+  }
+  return recordEntriesEdits(leafPath, leaf, field.record?.fields ?? []);
 }
 
 /**
@@ -525,7 +590,7 @@ export function opencodeSettingEdits(setting: OpencodeSetting, value: OpencodeSe
       // recordEditorEdits helper still null-guards raw input to no edits.
       return value === null
         ? [{ path: setting.path, value: undefined, op: "remove" }]
-        : recordEditorEdits(setting.path, value);
+        : recordEditorEdits(setting.path, value, setting.record?.fields);
     case "recordMaster":
       // Kind validation guarantees true|false|null here; anything else is a tolerated no-op.
       return value === true || value === false || value === null ? recordMasterEdits(setting.path, value) : [];
@@ -648,40 +713,27 @@ export function isValidOpencodeSettingValue(setting: OpencodeSetting, value: unk
       return true;
     }
     case "recordEditor": {
-      if (!isRecord(value)) {
+      if (!isValidRecordEditorShape(setting.record, value)) {
         return false;
       }
-      const record = setting.record;
-      const names = Object.keys(value);
-      if (names.length > (record?.maxEntries ?? RECORD_MAX_ENTRIES)) {
-        return false;
-      }
-      const pattern = record?.namePattern === undefined ? RECORD_NAME_PATTERN : new RegExp(record.namePattern);
-      const nameMaxLen = record?.nameMaxLen ?? RECORD_NAME_MAX_LENGTH;
-      const fields = record?.fields ?? [];
-      for (const name of names) {
-        if (name.length > nameMaxLen || !pattern.test(name)) {
-          return false;
+      // Cross-field rules, deliberately inline (design: NOT a generic framework),
+      // checked on the shape-validated entries: an mcpEntries entry of type=remote
+      // must carry a usable url — the text-field kind already bounds presence/shape
+      // for PRESENT urls, this adds the coupling "remote ⇒ url required" that
+      // per-field schemas cannot express.
+      for (const entry of Object.values(value)) {
+        if (entry === null) {
+          continue;
         }
-        const entry = value[name];
-        // null entry = delete marker (write path removes the name).
-        if (entry !== null && (!isRecord(entry) || !isValidRecordEntry(fields, entry))) {
-          return false;
-        }
-        // Cross-field rule, deliberately inline (design: NOT a generic framework):
-        // an mcpEntries entry of type=remote must carry a usable url — the text-field
-        // kind already bounds presence/shape for PRESENT urls, this adds the coupling
-        // "remote ⇒ url required" that per-field schemas cannot express.
-        if (setting.key === "mcpEntries" && entry !== null) {
+        if (setting.key === "mcpEntries") {
           if (entry.type === "remote" && (typeof entry.url !== "string" || entry.url.trim().length === 0)) {
             return false;
           }
         }
-        // Cross-field rule, deliberately inline (same design): a referenceEntries
-        // entry must carry EXACTLY ONE of repository/path (schema $defs git/local
-        // variants are disjoint), and branch rides only on the repository form —
-        // couplings per-field schemas cannot express.
-        if (setting.key === "referenceEntries" && entry !== null) {
+        // A referenceEntries entry must carry EXACTLY ONE of repository/path (schema
+        // $defs git/local variants are disjoint), and branch rides only on the
+        // repository form — couplings per-field schemas cannot express.
+        if (setting.key === "referenceEntries") {
           const hasRepository = typeof entry.repository === "string" && entry.repository.trim().length > 0;
           const hasPath = typeof entry.path === "string" && entry.path.trim().length > 0;
           const hasBranch = typeof entry.branch === "string" && entry.branch.trim().length > 0;
@@ -701,13 +753,45 @@ export function isValidOpencodeSettingValue(setting: OpencodeSetting, value: unk
 }
 
 /**
+ * One recordEditor LEVEL against its name rules and per-entry schemas — shared by
+ * the descriptor root (recordEditor kind) and nested "record"-kind fields: a
+ * record value whose names fit the charset/length/entry cap and whose non-null
+ * entries pass {@link isValidRecordEntry} with the level's field schemas. Type
+ * predicate: on true the value is a well-formed RecordEditorValue (non-null
+ * entries are records), letting callers iterate without re-checking shapes.
+ */
+function isValidRecordEditorShape(record: RecordSchema | undefined, value: unknown): value is RecordEditorValue {
+  if (!isRecord(value)) {
+    return false;
+  }
+  const names = Object.keys(value);
+  if (names.length > (record?.maxEntries ?? RECORD_MAX_ENTRIES)) {
+    return false;
+  }
+  const pattern = record?.namePattern === undefined ? RECORD_NAME_PATTERN : new RegExp(record.namePattern);
+  const nameMaxLen = record?.nameMaxLen ?? RECORD_NAME_MAX_LENGTH;
+  const fields = record?.fields ?? [];
+  for (const name of names) {
+    if (name.length > nameMaxLen || !pattern.test(name)) {
+      return false;
+    }
+    // null entry = delete marker (write path removes the name).
+    const entry = value[name];
+    if (entry !== null && (!isRecord(entry) || !isValidRecordEntry(fields, entry))) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
  * One recordEditor entry against its field schemas: every present key must be a known
  * field (unknown keys are rejected, mirroring shallowObject); null/absent leaves mean
  * "field unset" and are rejected for required fields; every other leaf must pass its
  * kind rules (text/multiline trimmed non-empty within maxLen, enum ∈ options, model
  * id shape, boolean, stringList 1..field.maxEntries unique trimmed ≤256-char entries,
  * number finite within bounds, stringMap ≤16 bounded entries with string-or-null
- * values).
+ * values, record = a nested recordEditor level with its own name rules).
  */
 function isValidRecordEntry(fields: readonly RecordFieldDef[], entry: Record<string, unknown>): boolean {
   const knownKeys = new Set(fields.map((field) => field.key));
@@ -755,6 +839,8 @@ function isValidRecordFieldLeaf(field: RecordFieldDef, leaf: unknown): boolean {
       return isValidBoundedNumber(leaf, field);
     case "stringMap":
       return isValidRecordStringMap(leaf);
+    case "record":
+      return isValidRecordEditorShape(field.record, leaf);
   }
 }
 
