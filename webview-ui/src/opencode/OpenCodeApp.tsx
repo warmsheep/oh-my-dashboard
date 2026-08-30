@@ -1,7 +1,21 @@
-import type { ExtToWebview, OpencodeSetting, OpencodeSettingsPayload, OpencodeSettingValue } from "@shared/protocol";
+import type {
+  ExtToWebview,
+  OpencodePermissionState,
+  OpencodeSetting,
+  OpencodeSettingsPayload,
+  OpencodeSettingValue,
+  ShallowObjectValue,
+} from "@shared/protocol";
 import { OPENCODE_SETTINGS } from "@shared/protocol";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import ChipsEditor from "../controls/ChipsEditor";
+import { isWideSettingKind, mcpToggleEdit, parseNumberFieldInput, permissionToolEdit } from "../controls/helpers";
+import type { PermissionAction } from "../controls/helpers";
+import McpToggleList from "../controls/McpToggleList";
+import PermissionEditor from "../controls/PermissionEditor";
+import ShallowObjectFields from "../controls/ShallowObjectFields";
+import StringListEditor from "../controls/StringListEditor";
 import { groupModelsByProvider } from "../helpers";
 import { mergeIncomingDrafts } from "../settings/helpers";
 import { hasVSCodeApi, postToHost } from "../vscode";
@@ -9,6 +23,7 @@ import {
   effectiveOpencodeBoolean,
   groupOpencodeSettings,
   parseOpencodeStringInput,
+  parseTuiThemeInput,
   toggleProviderValue,
   TRISTATE_OPTIONS,
   tristateFromSelectValue,
@@ -18,21 +33,58 @@ import {
 
 // Dev-preview fallback so `vite dev` renders the page outside a real webview (mirrors QuotaApp's DEV_SNAPSHOT).
 const DEV_PAYLOAD: OpencodeSettingsPayload = {
-  values: { share: "manual", autoupdate: true, snapshot: true, username: "dev" },
+  values: {
+    share: "manual",
+    autoupdate: true,
+    snapshot: true,
+    username: "dev",
+    instructions: null,
+    compaction: { auto: null, prune: null, tail_turns: null },
+    agentBuildTemperature: null,
+  },
   configPath: "~/.config/opencode/opencode.json",
   models: [
     { id: "opencode/glm-4.7", provider: "opencode", model: "glm-4.7", label: "GLM-4.7" },
     { id: "kimi/kimi-k2", provider: "kimi", model: "kimi-k2", label: "Kimi K2" },
     { id: "deepseek/deepseek-v3", provider: "deepseek", model: "deepseek-v3", label: "DeepSeek V3" },
   ],
+  permission: { shorthand: null, tools: {}, advancedTools: [] },
+  mcp: [],
+  tui: { theme: null, path: "~/.config/opencode/tui.json" },
 };
+
+/**
+ * Pre-edit snapshot of a dedicated payload slot (permission / mcp / tui) — the revert
+ * source on a !ok reply for keys whose display state does NOT live in payload.values.
+ */
+type StructuredSnapshot =
+  | { slot: "permission"; state: OpencodePermissionState }
+  | { slot: "mcp"; servers: { name: string; disabled: boolean }[] }
+  | { slot: "tui"; theme: string | null };
+
+/** Restore one structured snapshot into the payload (revert path of the structured edits). */
+function applyStructuredSnapshot(
+  payload: OpencodeSettingsPayload,
+  snapshot: StructuredSnapshot,
+): OpencodeSettingsPayload {
+  switch (snapshot.slot) {
+    case "permission":
+      return { ...payload, permission: snapshot.state };
+    case "mcp":
+      return { ...payload, mcp: snapshot.servers };
+    case "tui":
+      return { ...payload, tui: { ...payload.tui, theme: snapshot.theme } };
+  }
+}
 
 /**
  * OpenCode tab: visual editor for the high-frequency opencode.json keys declared by
  * OPENCODE_SETTINGS. Every control commits immediately (one opencodeSetSetting post,
  * optimistic with revert on a !ok reply, per-key pending disable and a stale-reply
- * guard — the same contract as the OMO tab's model rows). State comes from
- * opencodeInit pushes only — the tab never requests data.
+ * guard — the same contract as the OMO tab's model rows). Scalar kinds patch
+ * payload.values; the permission / mcp / tui faces patch their dedicated payload
+ * slots through the structured-edit path below. State comes from opencodeInit pushes
+ * only — the tab never requests data.
  */
 export default function OpenCodeApp() {
   const [payload, setPayload] = useState<OpencodeSettingsPayload | null>(null);
@@ -43,6 +95,8 @@ export default function OpenCodeApp() {
 
   // Pre-edit values of keys with an in-flight save — the revert source on a !ok reply.
   const preEditRef = useRef(new Map<string, OpencodeSettingValue>());
+  // Same revert source for the dedicated payload slots (permission / mcp / tui faces).
+  const preStructuredRef = useRef(new Map<string, StructuredSnapshot>());
   // Key of the focused text input — opencodeInit pushes must never clobber its draft.
   const focusedKeyRef = useRef<string | null>(null);
 
@@ -57,6 +111,7 @@ export default function OpenCodeApp() {
         // any in-flight optimistic edit (its own saved reply settles the key).
         setPayload(msg.payload);
         preEditRef.current.clear();
+        preStructuredRef.current.clear();
         setPending(new Set());
         setError(null);
         // Drafts full-replace too, but the focused input keeps its in-progress text
@@ -66,6 +121,8 @@ export default function OpenCodeApp() {
         const { ok, key } = msg.payload;
         const prev = preEditRef.current.get(key);
         preEditRef.current.delete(key);
+        const structured = preStructuredRef.current.get(key);
+        preStructuredRef.current.delete(key);
         setPending((current) => {
           if (!current.has(key)) {
             return current;
@@ -75,9 +132,11 @@ export default function OpenCodeApp() {
           return next;
         });
         if (!ok) {
-          // Revert only when the pre-edit value still exists — an intervening opencodeInit
+          // Revert only when a pre-edit snapshot still exists — an intervening opencodeInit
           // full replace (or the stale-reply guard) already made the push authoritative.
-          if (prev !== undefined) {
+          if (structured !== undefined) {
+            setPayload((current) => (current === null ? current : applyStructuredSnapshot(current, structured)));
+          } else if (prev !== undefined) {
             setPayload((current) =>
               current === null ? current : { ...current, values: { ...current.values, [key]: prev ?? null } },
             );
@@ -105,6 +164,7 @@ export default function OpenCodeApp() {
     }
     const t = window.setTimeout(() => {
       preEditRef.current.clear();
+      preStructuredRef.current.clear();
       setPending(new Set());
       setError("保存无响应，请重试");
     }, 12_000);
@@ -124,6 +184,29 @@ export default function OpenCodeApp() {
         current === null ? current : { ...current, values: { ...current.values, [setting.key]: value } },
       );
       postToHost({ type: "opencodeSetSetting", payload: { key: setting.key, value } });
+    },
+    [],
+  );
+
+  /**
+   * Optimistically patch a dedicated payload slot and post the value — the structured
+   * twin of applySetting (permission / mcp / tui faces); same per-key in-flight rule.
+   */
+  const applyStructured = useCallback(
+    (
+      key: string,
+      value: OpencodeSettingValue,
+      snapshot: StructuredSnapshot,
+      patch: (current: OpencodeSettingsPayload) => OpencodeSettingsPayload,
+    ) => {
+      if (preEditRef.current.has(key) || preStructuredRef.current.has(key)) {
+        return;
+      }
+      preStructuredRef.current.set(key, snapshot);
+      setPending((current) => new Set(current).add(key));
+      setError(null);
+      setPayload((current) => (current === null ? current : patch(current)));
+      postToHost({ type: "opencodeSetSetting", payload: { key, value } });
     },
     [],
   );
@@ -156,6 +239,110 @@ export default function OpenCodeApp() {
     [applySetting],
   );
 
+  /**
+   * Commit a number-kind draft (agent temperatures): decimals allowed, empty → null,
+   * out-of-bounds keeps the draft with the descriptor-bounds error.
+   */
+  const commitNumber = useCallback(
+    (setting: OpencodeSetting, raw: string, prev: number | null) => {
+      focusedKeyRef.current = null;
+      const parsed = parseNumberFieldInput(raw, { min: setting.min, max: setting.max });
+      if (parsed.kind === "invalid") {
+        setError(parsed.error);
+        return;
+      }
+      if (parsed.kind === "noop") {
+        return;
+      }
+      setDrafts((current) => {
+        const next = { ...current };
+        delete next[setting.key];
+        return next;
+      });
+      if (parsed.value === prev) {
+        return;
+      }
+      applySetting(setting, parsed.value, prev);
+    },
+    [applySetting],
+  );
+
+  /**
+   * Commit the tui.json theme draft. parseTuiThemeInput pre-checks the shared
+   * TUI_THEME_MAX_LENGTH constant — the exact bound core's isValidTuiTheme
+   * enforces, so the friendly error can never drift from the host validator.
+   */
+  const commitTuiTheme = (raw: string) => {
+    focusedKeyRef.current = null;
+    const parsed = parseTuiThemeInput(raw);
+    if (parsed.kind === "invalid") {
+      setError(parsed.error);
+      return;
+    }
+    setDrafts((current) => {
+      const next = { ...current };
+      delete next.tuiTheme;
+      return next;
+    });
+    const current = payload?.tui.theme ?? null;
+    if (parsed.value === current) {
+      return;
+    }
+    applyStructured("tuiTheme", parsed.value, { slot: "tui", theme: current }, (p) => ({
+      ...p,
+      tui: { ...p.tui, theme: parsed.value },
+    }));
+  };
+
+  /** Commit the permission global shorthand (null → removes the permission key). */
+  const commitPermissionShorthand = (next: PermissionAction | null) => {
+    if (payload === null) {
+      return;
+    }
+    applyStructured("permissionShorthand", next, { slot: "permission", state: payload.permission }, (p) => ({
+      ...p,
+      permission: { shorthand: next, tools: {}, advancedTools: [] },
+    }));
+  };
+
+  /** Commit ONE tool's action as a single-key map (null removes that tool's key). */
+  const commitPermissionTool = (tool: string, next: PermissionAction | null) => {
+    if (payload === null) {
+      return;
+    }
+    applyStructured(
+      "permissionTools",
+      permissionToolEdit(tool, next),
+      { slot: "permission", state: payload.permission },
+      (p) => {
+        const tools = { ...p.permission.tools };
+        if (next === null) {
+          delete tools[tool];
+        } else {
+          tools[tool] = next;
+        }
+        return { ...p, permission: { ...p.permission, tools } };
+      },
+    );
+  };
+
+  /** Commit ONE server's disabled flag as a single-key snapshot map. */
+  const commitMcpToggle = (name: string, nextDisabled: boolean) => {
+    if (payload === null) {
+      return;
+    }
+    const index = payload.mcp.findIndex((server) => server.name === name);
+    if (index < 0) {
+      return;
+    }
+    applyStructured(
+      "mcpServers",
+      mcpToggleEdit(name, nextDisabled),
+      { slot: "mcp", servers: payload.mcp.map((server) => ({ ...server })) },
+      (p) => ({ ...p, mcp: p.mcp.map((server, i) => (i === index ? { ...server, disabled: nextDisabled } : server)) }),
+    );
+  };
+
   const toggleCollapsed = useCallback((key: string) => {
     setCollapsed((c) => ({ ...c, [key]: !(c[key] ?? false) }));
   }, []);
@@ -165,7 +352,13 @@ export default function OpenCodeApp() {
   const modelIds = useMemo(() => new Set((payload?.models ?? []).map((m) => m.id)), [payload?.models]);
   const providerNames = useMemo(() => uniqueProviderNames(payload?.models ?? []), [payload?.models]);
 
-  /** The control of one descriptor row (select / switch / input / provider chips). */
+  /** Narrow an unknown-slot value back to its descriptor kind's shape (reads are display-tolerant). */
+  const toStringList = (value: OpencodeSettingValue | undefined): string[] | null =>
+    Array.isArray(value) ? value : null;
+  const toShallowObject = (value: OpencodeSettingValue | undefined): ShallowObjectValue | null =>
+    value !== null && typeof value === "object" && !Array.isArray(value) ? (value as ShallowObjectValue) : null;
+
+  /** The control of one descriptor row (select / switch / input / chips / composite editor). */
   const renderControl = (setting: OpencodeSetting, value: OpencodeSettingValue | undefined) => {
     const isPending = pending.has(setting.key);
     switch (setting.kind) {
@@ -263,6 +456,30 @@ export default function OpenCodeApp() {
           </label>
         );
       case "string":
+        if (setting.file === "tui") {
+          // The standalone tui.json face: display state lives in payload.tui, not values.
+          return (
+            <input
+              className="ctl oc-text"
+              type="text"
+              placeholder="示例主题名"
+              aria-label={setting.label}
+              disabled={isPending}
+              value={drafts.tuiTheme ?? payload?.tui.theme ?? ""}
+              onFocus={() => {
+                focusedKeyRef.current = "tuiTheme";
+              }}
+              onBlur={(e) => commitTuiTheme(e.currentTarget.value)}
+              onKeyDown={(e) => {
+                // Enter commits through the single blur path, so a commit can never fire twice.
+                if (e.key === "Enter") {
+                  e.currentTarget.blur();
+                }
+              }}
+              onChange={(e) => setDrafts((current) => ({ ...current, tuiTheme: e.target.value }))}
+            />
+          );
+        }
         return (
           <input
             className="ctl oc-text"
@@ -283,6 +500,29 @@ export default function OpenCodeApp() {
             onChange={(e) => setDrafts((current) => ({ ...current, [setting.key]: e.target.value }))}
           />
         );
+      case "number": {
+        const leaf = typeof value === "number" ? value : null;
+        return (
+          <input
+            className="ctl ctl-num"
+            type="text"
+            inputMode="decimal"
+            aria-label={setting.label}
+            disabled={isPending}
+            value={drafts[setting.key] ?? (leaf === null ? "" : String(leaf))}
+            onFocus={() => {
+              focusedKeyRef.current = setting.key;
+            }}
+            onBlur={(e) => commitNumber(setting, e.currentTarget.value, leaf)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.currentTarget.blur();
+              }
+            }}
+            onChange={(e) => setDrafts((current) => ({ ...current, [setting.key]: e.target.value }))}
+          />
+        );
+      }
       case "providers": {
         const current = Array.isArray(value) ? value : [];
         return (
@@ -310,6 +550,56 @@ export default function OpenCodeApp() {
           </div>
         );
       }
+      case "stringList": {
+        const current = toStringList(value);
+        return (
+          <StringListEditor
+            value={current}
+            disabled={isPending}
+            onChange={(next) => applySetting(setting, next, current ?? null)}
+          />
+        );
+      }
+      case "enumChips": {
+        const current = toStringList(value);
+        return (
+          <ChipsEditor
+            options={setting.options ?? []}
+            value={current}
+            disabled={isPending}
+            onChange={(next) => applySetting(setting, next, current ?? null)}
+          />
+        );
+      }
+      case "shallowObject": {
+        const current = toShallowObject(value);
+        return (
+          <ShallowObjectFields
+            fields={setting.fields ?? []}
+            value={current}
+            disabled={isPending}
+            onChange={(next) => applySetting(setting, next, current ?? null)}
+          />
+        );
+      }
+      case "permissionTools":
+        return (
+          <PermissionEditor
+            state={payload?.permission ?? { shorthand: null, tools: {}, advancedTools: [] }}
+            disabled={isPending}
+            onShorthandChange={commitPermissionShorthand}
+            onToolChange={commitPermissionTool}
+          />
+        );
+      case "mcpServers":
+        return (
+          <McpToggleList
+            servers={payload?.mcp ?? []}
+            configPath={payload?.configPath ?? ""}
+            disabled={isPending}
+            onToggle={commitMcpToggle}
+          />
+        );
     }
   };
 
@@ -340,6 +630,9 @@ export default function OpenCodeApp() {
           {settingGroups.map((group) => {
             const key = `opencode:${group.label}`;
             const isCollapsed = collapsed[key] ?? false;
+            // The permissionShorthand descriptor has no row of its own: its 简写 select
+            // lives inside PermissionEditor (the permissionTools row right below it).
+            const rendered = group.settings.filter((setting) => setting.key !== "permissionShorthand");
             return (
               <section className="block" key={group.label}>
                 <button
@@ -352,21 +645,28 @@ export default function OpenCodeApp() {
                     ▸
                   </span>
                   <span className="block-title">{group.label}</span>
-                  <span className="block-count">{group.settings.length} 项</span>
+                  <span className="block-count">{rendered.length} 项</span>
                 </button>
                 {!isCollapsed && (
                   <div className="block-body">
-                    {group.settings.map((setting) => (
-                      <div
-                        className={setting.kind === "providers" ? "set-row set-row-wrap" : "set-row"}
-                        key={setting.key}
-                      >
-                        <span className="set-row-main">
-                          <span className="set-row-label">{setting.label}</span>
-                          {setting.hint !== undefined && <span className="set-row-hint">{setting.hint}</span>}
-                        </span>
-                        {renderControl(setting, payload.values[setting.key])}
-                      </div>
+                    {rendered.map((setting) => (
+                      <Fragment key={setting.key}>
+                        <div className={isWideSettingKind(setting.kind) ? "set-row set-row-wrap" : "set-row"}>
+                          <span className="set-row-main">
+                            <span className="set-row-label">{setting.label}</span>
+                            {setting.hint !== undefined && <span className="set-row-hint">{setting.hint}</span>}
+                          </span>
+                          {renderControl(setting, payload.values[setting.key])}
+                        </div>
+                        {setting.file === "tui" && payload.tui.path !== "" && (
+                          <p className="cfg-target tui-file-path">
+                            主题文件：
+                            <code className="cfg-target-path" title={payload.tui.path}>
+                              {payload.tui.path}
+                            </code>
+                          </p>
+                        )}
+                      </Fragment>
                     ))}
                   </div>
                 )}

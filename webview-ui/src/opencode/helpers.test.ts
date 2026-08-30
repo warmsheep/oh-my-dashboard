@@ -1,11 +1,12 @@
 import type { ModelOption, OpencodeSetting } from "@shared/protocol";
-import { OPENCODE_SETTINGS, OPENCODE_STRING_VALUE_MAX_LENGTH } from "@shared/protocol";
+import { OPENCODE_SETTINGS, OPENCODE_STRING_VALUE_MAX_LENGTH, TUI_THEME_MAX_LENGTH } from "@shared/protocol";
 import { describe, expect, it } from "vitest";
 
 import {
   effectiveOpencodeBoolean,
   groupOpencodeSettings,
   parseOpencodeStringInput,
+  parseTuiThemeInput,
   toggleProviderValue,
   tristateFromSelectValue,
   tristateToSelectValue,
@@ -21,12 +22,31 @@ function model(id: string, provider: string): ModelOption {
 }
 
 describe("groupOpencodeSettings", () => {
-  it("groups by the descriptor group field in first-appearance order (模型 / 行为 / 其他)", () => {
+  it("groups by the descriptor group field in first-appearance order", () => {
     const groups = groupOpencodeSettings(OPENCODE_SETTINGS);
-    expect(groups.map((g) => g.label)).toEqual(["模型", "行为", "其他"]);
+    expect(groups.map((g) => g.label)).toEqual([
+      "模型",
+      "行为",
+      "其他",
+      "权限",
+      "规则文件",
+      "MCP 服务器",
+      "上下文",
+      "智能体",
+      "终端界面",
+    ]);
     expect(groups[0]?.settings.map((s) => s.key)).toEqual(["model", "smallModel", "agentBuildModel", "agentPlanModel"]);
     expect(groups[1]?.settings.map((s) => s.key)).toEqual(["defaultAgent", "share", "autoupdate", "snapshot"]);
     expect(groups[2]?.settings.map((s) => s.key)).toEqual(["username", "disabledProviders"]);
+    expect(groups[3]?.settings.map((s) => s.key)).toEqual(["permissionShorthand", "permissionTools"]);
+    expect(groups[7]?.settings.map((s) => s.key)).toEqual([
+      "agentBuildDisable",
+      "agentBuildTemperature",
+      "agentPlanDisable",
+      "agentPlanTemperature",
+      "agentGeneralModel",
+      "agentExploreModel",
+    ]);
   });
 
   it("covers every OPENCODE_SETTINGS descriptor exactly once", () => {
@@ -129,6 +149,22 @@ describe("parseOpencodeStringInput", () => {
     expect(parseOpencodeStringInput("x".repeat(OPENCODE_STRING_VALUE_MAX_LENGTH + 1))).toEqual({
       kind: "invalid",
       error: "最长 64 个字符",
+    });
+  });
+});
+
+describe("parseTuiThemeInput", () => {
+  it("trims the theme into a commit and commits null for empty input", () => {
+    expect(parseTuiThemeInput("  catppuccin  ")).toEqual({ kind: "commit", value: "catppuccin" });
+    expect(parseTuiThemeInput("   ")).toEqual({ kind: "commit", value: null });
+  });
+
+  it("bounds the theme with TUI_THEME_MAX_LENGTH (the shared isValidTuiTheme constant)", () => {
+    const text = "x".repeat(TUI_THEME_MAX_LENGTH);
+    expect(parseTuiThemeInput(text)).toEqual({ kind: "commit", value: text });
+    expect(parseTuiThemeInput("x".repeat(TUI_THEME_MAX_LENGTH + 1))).toEqual({
+      kind: "invalid",
+      error: `最长 ${TUI_THEME_MAX_LENGTH} 个字符`,
     });
   });
 });

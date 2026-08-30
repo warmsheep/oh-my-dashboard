@@ -1,5 +1,5 @@
 import type { ModelOption, OpencodeSetting, OpencodeSettingValue } from "@shared/protocol";
-import { OPENCODE_STRING_VALUE_MAX_LENGTH } from "@shared/protocol";
+import { OPENCODE_STRING_VALUE_MAX_LENGTH, TUI_THEME_MAX_LENGTH } from "@shared/protocol";
 
 /** Tristate values a select can commit (null = 未设置, the key gets removed). */
 export type TristateValue = boolean | "notify" | null;
@@ -109,12 +109,26 @@ export type OpencodeStringParse = { kind: "commit"; value: string | null } | { k
  * message instead of the protocol backstop error).
  */
 export function parseOpencodeStringInput(raw: string): OpencodeStringParse {
+  return parseBoundedStringInput(raw, OPENCODE_STRING_VALUE_MAX_LENGTH);
+}
+
+/**
+ * Parse a tui.json theme commit: the same rules with the theme-specific bound —
+ * TUI_THEME_MAX_LENGTH is the exact constant core's isValidTuiTheme uses, so the
+ * pre-check can never drift from the host validator.
+ */
+export function parseTuiThemeInput(raw: string): OpencodeStringParse {
+  return parseBoundedStringInput(raw, TUI_THEME_MAX_LENGTH);
+}
+
+/** Shared commit parser behind the string-field pre-checks: trim, empty → null, over the bound → invalid. */
+function parseBoundedStringInput(raw: string, maxLength: number): OpencodeStringParse {
   const text = raw.trim();
   if (text === "") {
     return { kind: "commit", value: null };
   }
-  if (text.length > OPENCODE_STRING_VALUE_MAX_LENGTH) {
-    return { kind: "invalid", error: `最长 ${OPENCODE_STRING_VALUE_MAX_LENGTH} 个字符` };
+  if (text.length > maxLength) {
+    return { kind: "invalid", error: `最长 ${maxLength} 个字符` };
   }
   return { kind: "commit", value: text };
 }
