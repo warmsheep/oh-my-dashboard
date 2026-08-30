@@ -1,8 +1,21 @@
-import type { ConfigInitPayload, ExtToWebview, OmoMiscSetting, PresetRow } from "@shared/protocol";
-import { OMO_MISC_SETTINGS } from "@shared/protocol";
+import type {
+  ConfigInitPayload,
+  ExtToWebview,
+  ModelCatalogValue,
+  OmoMiscSetting,
+  OmoSettingValue,
+  PresetRow,
+  ShallowObjectValue,
+} from "@shared/protocol";
+import { OMO_MISC_SETTINGS, OMO_REASONING_LEVELS } from "@shared/protocol";
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { SECTIONS, VARIANT_ORDER } from "../constants";
+import ChipsEditor from "../controls/ChipsEditor";
+import { isWideSettingKind } from "../controls/helpers";
+import ModelCatalogEditor from "../controls/ModelCatalogEditor";
+import ShallowObjectFields from "../controls/ShallowObjectFields";
+import StringListEditor from "../controls/StringListEditor";
 import { countConfigured, groupModelsByProvider, isKnownVariant, mergeRows, type ModelOption } from "../helpers";
 import { mergeIncomingDrafts } from "../settings/helpers";
 import { postToHost } from "../vscode";
@@ -155,58 +168,81 @@ function ModelSection({
   );
 }
 
-/** One 功能设置 row: boolean → switch, number → draft-text input committing on blur/Enter. */
+/** Narrow a values-slot entry back to its descriptor kind's shape (reads are display-tolerant). */
+function toStringListValue(value: OmoSettingValue | undefined): string[] | null {
+  return Array.isArray(value) ? value : null;
+}
+
+function toShallowObjectValue(value: OmoSettingValue | undefined): ShallowObjectValue | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? (value as ShallowObjectValue) : null;
+}
+
+function toModelCatalogValue(value: OmoSettingValue | undefined): ModelCatalogValue | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? (value as ModelCatalogValue) : null;
+}
+
+/**
+ * One 功能设置 row: boolean → switch, number → draft-text input committing on
+ * blur/Enter, composite kinds → the shared controls/ editors (every change commits
+ * the whole descriptor value immediately through onApplyValue).
+ */
 function OmoSettingRow({
   setting,
   value,
+  models,
   pending,
   draft,
   onDraft,
   onToggle,
   onCommit,
+  onApplyValue,
   onFocusKey,
 }: {
   setting: OmoMiscSetting;
-  value: boolean | number | null | undefined;
+  value: OmoSettingValue | undefined;
+  models: readonly ModelOption[];
   pending: boolean;
   draft: string | undefined;
   onDraft(key: string, raw: string): void;
   onToggle(setting: OmoMiscSetting, fileValue: boolean | number | null): void;
   onCommit(setting: OmoMiscSetting, raw: string, fileValue: boolean | number | null): void;
+  onApplyValue(setting: OmoMiscSetting, next: OmoSettingValue, prev: OmoSettingValue): void;
   onFocusKey(key: string): void;
 }) {
   const hintText =
     setting.kind === "number"
-      ? [setting.hint, `默认 ${setting.default}`].filter(Boolean).join("；")
+      ? [setting.hint, setting.default !== undefined ? `默认 ${setting.default}` : undefined].filter(Boolean).join("；")
       : (setting.hint ?? "");
-  return (
-    <div className="set-row">
-      <span className="set-row-main">
-        <span className="set-row-label">{setting.label}</span>
-        {hintText !== "" && <span className="set-row-hint">{hintText}</span>}
-      </span>
-      {setting.kind === "boolean" ? (
+  const control = (() => {
+    if (setting.kind === "boolean") {
+      return (
         <label className="s-switch">
           <input
             type="checkbox"
             className="s-switch-input"
             aria-label={setting.label}
-            checked={effectiveOmoValue(value, setting) === true}
+            checked={
+              effectiveOmoValue(typeof value === "boolean" || typeof value === "number" ? value : null, setting) ===
+              true
+            }
             disabled={pending}
-            onChange={() => onToggle(setting, value ?? null)}
+            onChange={() => onToggle(setting, typeof value === "boolean" || typeof value === "number" ? value : null)}
           />
           <span className="s-switch-track" aria-hidden="true" />
         </label>
-      ) : (
+      );
+    }
+    if (setting.kind === "number") {
+      return (
         <input
           className="ctl s-num"
           type="number"
           step={1}
           disabled={pending}
           aria-label={setting.label}
-          value={draft ?? (value === null || value === undefined ? "" : String(value))}
+          value={draft ?? (typeof value === "number" ? String(value) : "")}
           onFocus={() => onFocusKey(setting.key)}
-          onBlur={(e) => onCommit(setting, e.currentTarget.value, value ?? null)}
+          onBlur={(e) => onCommit(setting, e.currentTarget.value, typeof value === "number" ? value : null)}
           onKeyDown={(e) => {
             // Enter commits through the single blur path, so a commit can never fire twice.
             if (e.key === "Enter") {
@@ -215,7 +251,58 @@ function OmoSettingRow({
           }}
           onChange={(e) => onDraft(setting.key, e.target.value)}
         />
-      )}
+      );
+    }
+    if (setting.kind === "stringList") {
+      const current = toStringListValue(value);
+      return (
+        <StringListEditor
+          value={current}
+          disabled={pending}
+          onChange={(next) => onApplyValue(setting, next, current ?? null)}
+        />
+      );
+    }
+    if (setting.kind === "enumChips") {
+      const current = toStringListValue(value);
+      return (
+        <ChipsEditor
+          options={setting.options ?? []}
+          value={current}
+          disabled={pending}
+          onChange={(next) => onApplyValue(setting, next, current ?? null)}
+        />
+      );
+    }
+    if (setting.kind === "shallowObject") {
+      const current = toShallowObjectValue(value);
+      return (
+        <ShallowObjectFields
+          fields={setting.fields ?? []}
+          value={current}
+          disabled={pending}
+          onChange={(next) => onApplyValue(setting, next, current ?? null)}
+        />
+      );
+    }
+    const current = toModelCatalogValue(value);
+    return (
+      <ModelCatalogEditor
+        value={current}
+        models={models}
+        reasoningLevels={OMO_REASONING_LEVELS}
+        disabled={pending}
+        onChange={(next) => onApplyValue(setting, next, current ?? null)}
+      />
+    );
+  })();
+  return (
+    <div className={isWideSettingKind(setting.kind) ? "set-row set-row-wrap" : "set-row"}>
+      <span className="set-row-main">
+        <span className="set-row-label">{setting.label}</span>
+        {hintText !== "" && <span className="set-row-hint">{hintText}</span>}
+      </span>
+      {control}
     </div>
   );
 }
@@ -235,8 +322,8 @@ export default function ConfigApp() {
 
   // Pre-edit values of rows with an in-flight save — the revert source on a !ok reply.
   const preEditRef = useRef(new Map<string, { model: string | null; variant: string | null }>());
-  // Same revert source for 功能设置 keys (boolean | number | null file values).
-  const preOmoEditRef = useRef(new Map<string, boolean | number | null>());
+  // Same revert source for 功能设置 keys (descriptor-kind file values, incl. composites).
+  const preOmoEditRef = useRef(new Map<string, OmoSettingValue>());
   // Key of the focused 功能设置 number input — configInit pushes must never clobber its draft.
   const focusedOmoKeyRef = useRef<string | null>(null);
 
@@ -333,43 +420,13 @@ export default function ConfigApp() {
     });
   }, []);
 
-  /** Optimistically flip a 功能设置 boolean and post the explicit new value. */
-  const toggleOmoSetting = useCallback((setting: OmoMiscSetting, fileValue: boolean | number | null) => {
-    if (preOmoEditRef.current.has(setting.key)) {
-      return;
-    }
-    const next = !(effectiveOmoValue(fileValue, setting) === true);
-    preOmoEditRef.current.set(setting.key, fileValue);
-    setPending((current) => new Set(current).add(setting.key));
-    setError(null);
-    setPayload((current) => ({ ...current, omo: { ...current.omo, [setting.key]: next } }));
-    postToHost({ type: "omoSetSetting", payload: { key: setting.key, value: next } });
-  }, []);
-
   /**
-   * Commit a 功能设置 number draft: empty → null (remove key); out-of-bounds keeps the
-   * draft and shows the descriptor-bounds error without posting; no-op when unchanged.
+   * Optimistically apply one 功能设置 value (any descriptor kind) and post it; at
+   * most one in-flight save per key. The scalar toggle/commit paths below funnel
+   * into this too — one mechanism, one revert source.
    */
-  const commitOmoNumber = useCallback((setting: OmoMiscSetting, raw: string, fileValue: boolean | number | null) => {
-    // The blur path is the only caller, so focus tracking ends here.
-    focusedOmoKeyRef.current = null;
-    const parsed = parseOmoNumberInput(raw, setting);
-    if (parsed.kind === "invalid") {
-      // Keep the draft so the user can fix the text; post nothing.
-      setError(parsed.error);
-      return;
-    }
-    setOmoDrafts((current) => {
-      const next = { ...current };
-      delete next[setting.key];
-      return next;
-    });
-    if (parsed.kind === "noop") {
-      return;
-    }
-    const value = parsed.value;
-    const prev = typeof fileValue === "number" ? fileValue : null;
-    if (value === prev || preOmoEditRef.current.has(setting.key)) {
+  const applyOmoValue = useCallback((setting: OmoMiscSetting, value: OmoSettingValue, prev: OmoSettingValue) => {
+    if (preOmoEditRef.current.has(setting.key)) {
       return;
     }
     preOmoEditRef.current.set(setting.key, prev);
@@ -378,6 +435,47 @@ export default function ConfigApp() {
     setPayload((current) => ({ ...current, omo: { ...current.omo, [setting.key]: value } }));
     postToHost({ type: "omoSetSetting", payload: { key: setting.key, value } });
   }, []);
+
+  /** Optimistically flip a 功能设置 boolean and post the explicit new value. */
+  const toggleOmoSetting = useCallback(
+    (setting: OmoMiscSetting, fileValue: boolean | number | null) => {
+      const next = !(effectiveOmoValue(fileValue, setting) === true);
+      applyOmoValue(setting, next, typeof fileValue === "boolean" ? fileValue : null);
+    },
+    [applyOmoValue],
+  );
+
+  /**
+   * Commit a 功能设置 number draft: empty → null (remove key); out-of-bounds keeps the
+   * draft and shows the descriptor-bounds error without posting; no-op when unchanged.
+   */
+  const commitOmoNumber = useCallback(
+    (setting: OmoMiscSetting, raw: string, fileValue: boolean | number | null) => {
+      // The blur path is the only caller, so focus tracking ends here.
+      focusedOmoKeyRef.current = null;
+      const parsed = parseOmoNumberInput(raw, setting);
+      if (parsed.kind === "invalid") {
+        // Keep the draft so the user can fix the text; post nothing.
+        setError(parsed.error);
+        return;
+      }
+      setOmoDrafts((current) => {
+        const next = { ...current };
+        delete next[setting.key];
+        return next;
+      });
+      if (parsed.kind === "noop") {
+        return;
+      }
+      const value = parsed.value;
+      const prev = typeof fileValue === "number" ? fileValue : null;
+      if (value === prev) {
+        return;
+      }
+      applyOmoValue(setting, value, prev);
+    },
+    [applyOmoValue],
+  );
 
   /** Mark a 功能设置 number input as focused — its draft survives init pushes. */
   const focusOmoField = useCallback((key: string) => {
@@ -469,11 +567,13 @@ export default function ConfigApp() {
                     key={setting.key}
                     setting={setting}
                     value={payload.omo[setting.key]}
+                    models={payload.models}
                     pending={pending.has(setting.key)}
                     draft={omoDrafts[setting.key]}
                     onDraft={setOmoDraft}
                     onToggle={toggleOmoSetting}
                     onCommit={commitOmoNumber}
+                    onApplyValue={applyOmoValue}
                     onFocusKey={focusOmoField}
                   />
                 ))}

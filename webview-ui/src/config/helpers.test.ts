@@ -44,6 +44,12 @@ describe("effectiveOmoValue", () => {
     expect(effectiveOmoValue(null, setting)).toBe(true);
     expect(effectiveOmoValue(undefined, setting)).toBe(true);
   });
+
+  it("falls back to false when the descriptor carries no default (optional since the composite kinds)", () => {
+    const noDefault: OmoMiscSetting = { key: "k", path: ["k"], kind: "boolean", label: "k", group: "g" };
+    expect(effectiveOmoValue(null, noDefault)).toBe(false);
+    expect(effectiveOmoValue(undefined, noDefault)).toBe(false);
+  });
 });
 
 describe("parseOmoNumberInput", () => {

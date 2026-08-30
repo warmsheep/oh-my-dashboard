@@ -22,12 +22,20 @@ export function groupOmoMiscSettings(settings: readonly OmoMiscSetting[]): OmoSe
   return groups;
 }
 
-/** Effective value a control shows: file value ?? descriptor default (null = unset in file). */
+/**
+ * Effective value a scalar control shows: file value ?? descriptor default ?? false.
+ * The default is optional (composite kinds carry no default), so boolean kinds
+ * without one display as false — honest "unset" rendering, matching the OpenCode
+ * tab's effectiveOpencodeBoolean semantics.
+ */
 export function effectiveOmoValue(
   value: boolean | number | null | undefined,
   setting: OmoMiscSetting,
 ): boolean | number {
-  return value ?? setting.default;
+  if (value !== null && value !== undefined) {
+    return value;
+  }
+  return setting.default ?? false;
 }
 
 /**

@@ -447,6 +447,79 @@ fieldset[disabled] {
   white-space: nowrap;
 }
 
+/* ---------- composite controls (controls/ dir: list / chips / fields / catalog / permission / mcp) ---------- */
+
+/* Vertical stack of sub-rows inside one wide set-row (wraps onto its own full line). */
+.ctl-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 2px 0;
+  min-width: 0;
+}
+
+.set-row-wrap .ctl-list {
+  flex-basis: 100%;
+}
+
+/* One sub-row: label/text grows left, the control(s) sit right. */
+.ctl-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 26px;
+}
+
+.ctl-label,
+.ctl-text {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ctl-mono,
+.ctl-alias {
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+/* Mini secondary button for row-level ops (删除 / 添加). */
+.btn.ctl-x {
+  height: 22px;
+  padding: 0 8px;
+  font-size: 11px;
+}
+
+.ctl-add {
+  flex: 1;
+  min-width: 140px;
+}
+
+.ctl-num {
+  width: 90px;
+}
+
+/* Inline red validation hint under a composite control's rows (kept next to the draft). */
+.ctl-inline-error {
+  font-size: 11px;
+  color: var(--err);
+}
+
+/* 高级规则 badge: a tool whose permission value is a hand-written pattern object. */
+.ctl-badge {
+  flex: none;
+  font-size: 10px;
+  color: var(--fg);
+  background: var(--section-bg);
+  border: 1px solid var(--hairline);
+  border-radius: 2px;
+  padding: 1px 6px;
+  white-space: nowrap;
+}
+
 /* ---------- footer ---------- */
 
 .footer {
