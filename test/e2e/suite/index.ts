@@ -29,7 +29,7 @@ import { parseSafe, setValues, validate } from "../../../src/core/jsoncEditor";
 import { PresetService } from "../../../src/core/presetService";
 import type { JsoncError, Preset } from "../../../src/core/types";
 import { OPENCODE_SETTINGS } from "../../../src/shared/protocol";
-import type { ManagerTab } from "../../../src/shared/protocol";
+import type { ManagerTab, RecordAggregate } from "../../../src/shared/protocol";
 import { buildConfigTree, CURRENT_PRESET_BADGE } from "../../../src/tree/nodes";
 import type { BaseNode } from "../../../src/tree/nodes";
 
@@ -549,6 +549,8 @@ interface OpencodeInitMessage {
   mcp?: { name?: unknown; disabled?: unknown }[];
   /** 终端界面 group face (batch 2): current tui.json theme + the tui.json path. */
   tui?: { theme?: unknown; path?: unknown };
+  /** 命令/格式化/LSP group read aggregates (batch 4): one per recordEditor path root. */
+  records?: { command?: RecordAggregate; formatter?: RecordAggregate; lsp?: RecordAggregate };
 }
 
 function opencodeInits(bridge: PanelBridge): OpencodeInitMessage[] {
@@ -584,6 +586,11 @@ function settingSavedReplies(
         typeof (message.payload as SettingSavedReply).ok === "boolean",
     )
     .map((message) => message.payload);
+}
+
+/** Entries map of one record slot (command/formatter/lsp) from an init message. */
+function recordEntriesOf(init: OpencodeInitMessage, slot: "command" | "formatter" | "lsp"): Record<string, unknown> {
+  return init.records?.[slot]?.entries ?? {};
 }
 
 /**
@@ -1475,11 +1482,17 @@ function tests(): TestCase[] {
         const boot = opencodeInits(bridge)[0];
         // Fresh sandbox: the seeded fixture opencode.json sets none of the descriptors.
         // Product rule (core readOpencodeSettingValues): file-targeted descriptors
-        // (tui.json) and the mcpServers kind are EXCLUDED from the scalar values map —
-        // their data rides the payload's dedicated tui/mcp fields (next test).
+        // (tui.json) and the mcpServers/recordEditor/recordMaster kinds are EXCLUDED
+        // from the scalar values map — their data rides the payload's dedicated
+        // tui/mcp/records fields (next test + the batch-4 section at the chain end).
         const expected: Record<string, null> = {};
         for (const setting of OPENCODE_SETTINGS) {
-          if (setting.file !== undefined || setting.kind === "mcpServers") {
+          if (
+            setting.file !== undefined ||
+            setting.kind === "mcpServers" ||
+            setting.kind === "recordEditor" ||
+            setting.kind === "recordMaster"
+          ) {
             continue;
           }
           expected[setting.key] = null;
@@ -1491,6 +1504,18 @@ function tests(): TestCase[] {
         // trips a loudly-labeled assertion instead of silently leaving the map.
         for (const key of ["logLevel", "shell", "subagentDepth", "toolOutput", "attachmentImage", "watcherIgnore"]) {
           assert.equal(boot.values[key], null, `boot values.${key} must read null on the fresh sandbox`);
+        }
+        // Batch 4 tripwire (mirrors the batch-3 loop above, inverted): the five record
+        // descriptors NEVER enter the scalar values map — the recordEditor/recordMaster
+        // kinds are read-side excluded, their data rides payload.records instead
+        // (asserted in the batch-4 section at the chain end). A descriptor edit that
+        // accidentally lets one into values fails here loudly.
+        for (const key of ["command", "formatterMaster", "formatterEntries", "lspMaster", "lspEntries"]) {
+          assert.equal(
+            boot.values[key],
+            undefined,
+            `boot values.${key} must stay out of the scalar map (record kinds ride payload.records)`,
+          );
         }
         assert.equal(
           boot.configPath,
@@ -3476,6 +3501,501 @@ function tests(): TestCase[] {
           parsed.compaction,
           { auto: false },
           "disk compaction must carry ONLY the non-null fields — no literal null leaf",
+        );
+      },
+    },
+
+    // ---- Section 4e: batch-4 record kinds (same manager panel bridge) ---------
+    // command/formatter/lsp ride the payload's records slot (read) and the
+    // command/formatterEntries/lspEntries/formatterMaster/lspMaster descriptor
+    // keys (write). The current panel's boot push predates this section, so its
+    // records slot still mirrors the pristine fixture.
+    {
+      name: "OpenCode tab: boot opencodeInit 携带 records 槽位（命令/格式化未设置，LSP 读出 fixture 条目）",
+      fn: async () => {
+        assert.ok(managerBridge, "manager panel must still be open from the previous step");
+        const boot = opencodeInits(managerBridge)[0];
+        assert.ok(boot, "the current panel's boot opencodeInit must be captured");
+        const unset = { mode: "unset", booleanValue: null, entries: {} };
+        assert.deepEqual(
+          boot.records?.command,
+          unset,
+          "boot records.command must read unset — the fixture seeds no command key",
+        );
+        assert.deepEqual(
+          boot.records?.formatter,
+          unset,
+          "boot records.formatter must read unset — the fixture seeds no formatter key",
+        );
+        // The fixture DOES seed lsp.kotlin-ls (with an advanced `priority` field):
+        // the read aggregate surfaces only the descriptor fields (command/extensions),
+        // `priority` stays disk-only — the lspEntries test below pins its survival.
+        assert.deepEqual(
+          boot.records?.lsp,
+          {
+            mode: "entries",
+            booleanValue: null,
+            entries: {
+              "kotlin-ls": {
+                command: ["~/.local/share/opencode/bin/kotlin-ls/official/kotlin-lsp.sh", "--stdio"],
+                extensions: [".kt", ".kts"],
+              },
+            },
+          },
+          "boot records.lsp must mirror the fixture's kotlin-ls entry with priority omitted",
+        );
+      },
+    },
+    {
+      name: "opencodeSetSetting command 写入：新增/改名/删除写回磁盘并回推 records 聚合",
+      fn: async () => {
+        assert.ok(managerBridge, "manager panel must still be open from the previous step");
+        const bridge = managerBridge;
+        const opencodeJson = path.join(configDir, "opencode.json");
+        const releaseEntry = {
+          template: "Write release notes for $ARGUMENTS",
+          description: "生成发布说明",
+          agent: "build",
+          model: "kimi/kimi-k2",
+          subtask: true,
+        };
+
+        const repliesBefore = settingSavedReplies(bridge, "opencodeSettingSaved").length;
+        const initsBefore = opencodeInits(bridge).length;
+        bridge.deliver({
+          type: "opencodeSetSetting",
+          payload: { key: "command", value: { "release-notes": releaseEntry } },
+        });
+        await pollUntil(
+          () =>
+            settingSavedReplies(bridge, "opencodeSettingSaved")
+              .slice(repliesBefore)
+              .some((reply) => reply.ok && reply.key === "command"),
+          10_000,
+          "opencodeSetSetting(command) must produce an opencodeSettingSaved(ok:true) reply",
+        );
+        await pollUntil(
+          () =>
+            opencodeInits(bridge)
+              .slice(initsBefore)
+              .some(
+                (init) =>
+                  init.records?.command?.mode === "entries" &&
+                  JSON.stringify(recordEntriesOf(init, "command")["release-notes"]) === JSON.stringify(releaseEntry),
+              ),
+          10_000,
+          "a refreshed opencodeInit carrying records.command.entries[release-notes] must follow the write",
+        );
+        assertNoJsoncErrors(opencodeJson);
+        let parsed = parseSafe<{ command?: Record<string, Record<string, unknown>> }>(
+          fs.readFileSync(opencodeJson, "utf8"),
+        ).value;
+        assert.ok(parsed !== null, "opencode.json must parse to an object");
+        assert.deepEqual(
+          parsed.command?.["release-notes"],
+          releaseEntry,
+          "on-disk command[release-notes] must carry template/description/agent/model/subtask",
+        );
+
+        // Rename = old name null + new name set in ONE value (per-name diff semantics).
+        const repliesBeforeRename = settingSavedReplies(bridge, "opencodeSettingSaved").length;
+        bridge.deliver({
+          type: "opencodeSetSetting",
+          payload: {
+            key: "command",
+            value: { "release-notes": null, rn: { template: "Write release notes for $ARGUMENTS" } },
+          },
+        });
+        await pollUntil(
+          () =>
+            settingSavedReplies(bridge, "opencodeSettingSaved")
+              .slice(repliesBeforeRename)
+              .some((reply) => reply.ok && reply.key === "command"),
+          10_000,
+          "the rename write must produce its own opencodeSettingSaved(ok:true) reply",
+        );
+        assertNoJsoncErrors(opencodeJson);
+        parsed = parseSafe<{ command?: Record<string, Record<string, unknown>> }>(
+          fs.readFileSync(opencodeJson, "utf8"),
+        ).value;
+        assert.ok(parsed !== null, "opencode.json must parse to an object");
+        assert.equal("release-notes" in (parsed.command ?? {}), false, "the old name must be gone after the rename");
+        assert.equal(
+          parsed.command?.rn?.template,
+          "Write release notes for $ARGUMENTS",
+          "the new name must carry the template",
+        );
+
+        // Delete the remaining entry: the name disappears; the empty `command: {}`
+        // container MAY stay behind (same tolerated residue as permissionTools —
+        // the pure edit builder never rewrites the parent key).
+        const repliesBeforeDelete = settingSavedReplies(bridge, "opencodeSettingSaved").length;
+        const initsBeforeDelete = opencodeInits(bridge).length;
+        bridge.deliver({ type: "opencodeSetSetting", payload: { key: "command", value: { rn: null } } });
+        await pollUntil(
+          () =>
+            settingSavedReplies(bridge, "opencodeSettingSaved")
+              .slice(repliesBeforeDelete)
+              .some((reply) => reply.ok && reply.key === "command"),
+          10_000,
+          "the delete write must produce its own opencodeSettingSaved(ok:true) reply",
+        );
+        await pollUntil(
+          () =>
+            opencodeInits(bridge)
+              .slice(initsBeforeDelete)
+              .some((init) => recordEntriesOf(init, "command")["rn"] === undefined),
+          10_000,
+          "a refreshed opencodeInit without records.command.entries[rn] must follow the delete",
+        );
+        assertNoJsoncErrors(opencodeJson);
+        const afterDelete = parseSafe<{ command?: Record<string, unknown> }>(
+          fs.readFileSync(opencodeJson, "utf8"),
+        ).value;
+        assert.ok(afterDelete !== null, "opencode.json must parse to an object");
+        assert.equal(
+          Object.keys(afterDelete.command ?? {}).length,
+          0,
+          "the deleted name must be gone (command absent or an empty container residue)",
+        );
+      },
+    },
+    {
+      name: "recordEditor 破损兄弟条目保护：合法条目写入后破损条目字节级保留",
+      fn: async () => {
+        assert.ok(managerBridge, "manager panel must still be open from the previous step");
+        const bridge = managerBridge;
+        const opencodeJson = path.join(configDir, "opencode.json");
+        // Seed a hand-written BROKEN entry through the product's own JSONC editor —
+        // a plain string where an entry object belongs. The read side skips it
+        // (non-object entries never enter the aggregate); the write side only touches
+        // names present in the posted value, so it must survive byte-identically
+        // (same protection contract as the permissionTools pattern-object sibling).
+        const seeded = setValues(fs.readFileSync(opencodeJson, "utf8"), [
+          { path: ["command", "legacy"], value: "just-a-string" },
+        ]);
+        fs.writeFileSync(opencodeJson, seeded);
+        const snippetOf = (text: string): string => /"legacy"\s*:\s*"just-a-string"/.exec(text)?.[0] ?? "";
+        const snippetBefore = snippetOf(seeded);
+        assert.ok(snippetBefore.length > 0, "the seeded broken entry must be present before the write");
+
+        const repliesBefore = settingSavedReplies(bridge, "opencodeSettingSaved").length;
+        const initsBefore = opencodeInits(bridge).length;
+        bridge.deliver({
+          type: "opencodeSetSetting",
+          payload: { key: "command", value: { "ok-entry": { template: "ok" } } },
+        });
+        await pollUntil(
+          () =>
+            settingSavedReplies(bridge, "opencodeSettingSaved")
+              .slice(repliesBefore)
+              .some((reply) => reply.ok && reply.key === "command"),
+          10_000,
+          "the sibling write must produce an opencodeSettingSaved(ok:true) reply",
+        );
+        await pollUntil(
+          () =>
+            opencodeInits(bridge)
+              .slice(initsBefore)
+              .some(
+                (init) =>
+                  recordEntriesOf(init, "command")["ok-entry"] !== undefined &&
+                  recordEntriesOf(init, "command")["legacy"] === undefined,
+              ),
+          10_000,
+          "a refreshed opencodeInit must carry ok-entry but NOT the broken legacy entry (read side skips it)",
+        );
+
+        assertNoJsoncErrors(opencodeJson);
+        const after = fs.readFileSync(opencodeJson, "utf8");
+        const parsed = parseSafe<{ command?: Record<string, unknown> }>(after).value;
+        assert.ok(parsed !== null, "opencode.json must parse to an object");
+        assert.deepEqual(
+          parsed.command?.["ok-entry"],
+          { template: "ok" },
+          "the valid sibling entry must be written to disk",
+        );
+        assert.equal(
+          parsed.command?.legacy,
+          "just-a-string",
+          "the broken entry must survive the sibling write with its value intact",
+        );
+        assert.equal(snippetOf(after), snippetBefore, "the broken entry must survive byte-identically");
+      },
+    },
+    {
+      name: "opencodeSetSetting formatterMaster/Entries：master false 写回布尔，布尔形态下条目写被拒不写盘，清 master 后条目落地",
+      fn: async () => {
+        assert.ok(managerBridge, "manager panel must still be open from the previous step");
+        const bridge = managerBridge;
+        const opencodeJson = path.join(configDir, "opencode.json");
+        const prettierEntry = { command: ["npx", "prettier"], extensions: ["ts", "json"] };
+
+        const repliesBefore = settingSavedReplies(bridge, "opencodeSettingSaved").length;
+        const initsBefore = opencodeInits(bridge).length;
+        bridge.deliver({ type: "opencodeSetSetting", payload: { key: "formatterMaster", value: false } });
+        await pollUntil(
+          () =>
+            settingSavedReplies(bridge, "opencodeSettingSaved")
+              .slice(repliesBefore)
+              .some((reply) => reply.ok && reply.key === "formatterMaster"),
+          10_000,
+          "opencodeSetSetting(formatterMaster) must produce an opencodeSettingSaved(ok:true) reply",
+        );
+        await pollUntil(
+          () =>
+            opencodeInits(bridge)
+              .slice(initsBefore)
+              .some(
+                (init) => init.records?.formatter?.mode === "boolean" && init.records.formatter.booleanValue === false,
+              ),
+          10_000,
+          "a refreshed opencodeInit carrying records.formatter boolean mode must follow the write",
+        );
+        assertNoJsoncErrors(opencodeJson);
+        let parsed = parseSafe<{ formatter?: unknown }>(fs.readFileSync(opencodeJson, "utf8")).value;
+        assert.ok(parsed !== null, "opencode.json must parse to an object");
+        assert.equal(parsed.formatter, false, "on-disk formatter must be the boolean false");
+
+        // Boolean-form → entries write: the PROTOCOL accepts the value (recordEditor
+        // validation is pure — it never re-checks the file shape; the UI interlock is
+        // what prevents this flow in the panel), but the JSONC edit cannot nest a
+        // property into the boolean leaf: jsonc-parser throws, the host answers !ok
+        // and the file stays untouched. Pinned as a REFUSAL — safe, no corruption.
+        const bytesBefore = fs.readFileSync(opencodeJson);
+        const repliesBeforeRefusal = settingSavedReplies(bridge, "opencodeSettingSaved").length;
+        bridge.deliver({
+          type: "opencodeSetSetting",
+          payload: { key: "formatterEntries", value: { prettier: prettierEntry } },
+        });
+        await pollUntil(
+          () =>
+            settingSavedReplies(bridge, "opencodeSettingSaved")
+              .slice(repliesBeforeRefusal)
+              .some((reply) => reply.ok === false && reply.key === "formatterEntries"),
+          10_000,
+          "the entries-over-boolean write must produce a !ok reply echoing the key",
+        );
+        assert.ok(
+          fs.readFileSync(opencodeJson).equals(bytesBefore),
+          "the refused formatterEntries write must leave opencode.json byte-identical",
+        );
+
+        // The panel's own way out of the boolean form: clear the master (null removes
+        // the key), then the entry lands as the object form.
+        const repliesBeforeClear = settingSavedReplies(bridge, "opencodeSettingSaved").length;
+        bridge.deliver({ type: "opencodeSetSetting", payload: { key: "formatterMaster", value: null } });
+        await pollUntil(
+          () =>
+            settingSavedReplies(bridge, "opencodeSettingSaved")
+              .slice(repliesBeforeClear)
+              .some((reply) => reply.ok && reply.key === "formatterMaster"),
+          10_000,
+          "the master-clear write must produce its own opencodeSettingSaved(ok:true) reply",
+        );
+        assertNoJsoncErrors(opencodeJson);
+        parsed = parseSafe<{ formatter?: unknown }>(fs.readFileSync(opencodeJson, "utf8")).value;
+        assert.ok(parsed !== null, "opencode.json must parse to an object");
+        assert.equal("formatter" in parsed, false, "the null master write must remove the formatter key from disk");
+
+        const repliesBeforeEntries = settingSavedReplies(bridge, "opencodeSettingSaved").length;
+        const initsBeforeEntries = opencodeInits(bridge).length;
+        bridge.deliver({
+          type: "opencodeSetSetting",
+          payload: { key: "formatterEntries", value: { prettier: prettierEntry } },
+        });
+        await pollUntil(
+          () =>
+            settingSavedReplies(bridge, "opencodeSettingSaved")
+              .slice(repliesBeforeEntries)
+              .some((reply) => reply.ok && reply.key === "formatterEntries"),
+          10_000,
+          "the formatterEntries write must produce an opencodeSettingSaved(ok:true) reply",
+        );
+        // Interlock payload check: with entries on disk the aggregate flips to the
+        // entries form — the face the master select locks against (已有条目).
+        await pollUntil(
+          () =>
+            opencodeInits(bridge)
+              .slice(initsBeforeEntries)
+              .some(
+                (init) =>
+                  init.records?.formatter?.mode === "entries" &&
+                  JSON.stringify(recordEntriesOf(init, "formatter")["prettier"]) === JSON.stringify(prettierEntry),
+              ),
+          10_000,
+          "a refreshed opencodeInit carrying records.formatter entries mode with prettier must follow the write",
+        );
+        assertNoJsoncErrors(opencodeJson);
+        const entriesParsed = parseSafe<{ formatter?: Record<string, Record<string, unknown>> }>(
+          fs.readFileSync(opencodeJson, "utf8"),
+        ).value;
+        assert.ok(entriesParsed !== null, "opencode.json must parse to an object");
+        assert.deepEqual(
+          entriesParsed.formatter?.prettier,
+          prettierEntry,
+          "on-disk formatter must be an object carrying the prettier entry",
+        );
+      },
+    },
+    {
+      name: "opencodeSetSetting lspEntries 写入/停用/删除：fixture 条目 kotlin-ls（含 priority）字节级保留",
+      fn: async () => {
+        assert.ok(managerBridge, "manager panel must still be open from the previous step");
+        const bridge = managerBridge;
+        const opencodeJson = path.join(configDir, "opencode.json");
+        // The fixture's lsp.kotlin-ls carries `priority` — an advanced field outside
+        // the descriptor. Every write below touches only names present in the posted
+        // value, so the whole kotlin-ls block (priority included) must survive.
+        const snippetOf = (text: string): string => /"priority"\s*:\s*10/.exec(text)?.[0] ?? "";
+        const snippetBefore = snippetOf(fs.readFileSync(opencodeJson, "utf8"));
+        assert.ok(snippetBefore.length > 0, "the fixture's kotlin-ls priority leaf must be present before the writes");
+
+        const repliesBefore = settingSavedReplies(bridge, "opencodeSettingSaved").length;
+        const initsBefore = opencodeInits(bridge).length;
+        bridge.deliver({
+          type: "opencodeSetSetting",
+          payload: {
+            key: "lspEntries",
+            value: { "rust-analyzer": { command: ["rust-analyzer"], extensions: ["rs"] } },
+          },
+        });
+        await pollUntil(
+          () =>
+            settingSavedReplies(bridge, "opencodeSettingSaved")
+              .slice(repliesBefore)
+              .some((reply) => reply.ok && reply.key === "lspEntries"),
+          10_000,
+          "opencodeSetSetting(lspEntries) must produce an opencodeSettingSaved(ok:true) reply",
+        );
+        await pollUntil(
+          () =>
+            opencodeInits(bridge)
+              .slice(initsBefore)
+              .some(
+                (init) =>
+                  recordEntriesOf(init, "lsp")["rust-analyzer"] !== undefined &&
+                  recordEntriesOf(init, "lsp")["kotlin-ls"] !== undefined,
+              ),
+          10_000,
+          "a refreshed opencodeInit carrying both lsp entries must follow the write",
+        );
+        assertNoJsoncErrors(opencodeJson);
+        let parsed = parseSafe<{ lsp?: Record<string, Record<string, unknown>> }>(
+          fs.readFileSync(opencodeJson, "utf8"),
+        ).value;
+        assert.ok(parsed !== null, "opencode.json must parse to an object");
+        assert.deepEqual(
+          parsed.lsp?.["rust-analyzer"],
+          { command: ["rust-analyzer"], extensions: ["rs"] },
+          "on-disk lsp[rust-analyzer] must carry command+extensions",
+        );
+        assert.deepEqual(
+          parsed.lsp?.["kotlin-ls"],
+          {
+            command: ["~/.local/share/opencode/bin/kotlin-ls/official/kotlin-lsp.sh", "--stdio"],
+            extensions: [".kt", ".kts"],
+            priority: 10,
+          },
+          "the fixture's kotlin-ls entry (priority included) must survive the sibling write",
+        );
+
+        // Disable = full-entry set with disabled:true (the set replaces the entry).
+        const repliesBeforeDisable = settingSavedReplies(bridge, "opencodeSettingSaved").length;
+        bridge.deliver({
+          type: "opencodeSetSetting",
+          payload: {
+            key: "lspEntries",
+            value: { "rust-analyzer": { command: ["rust-analyzer"], extensions: ["rs"], disabled: true } },
+          },
+        });
+        await pollUntil(
+          () =>
+            settingSavedReplies(bridge, "opencodeSettingSaved")
+              .slice(repliesBeforeDisable)
+              .some((reply) => reply.ok && reply.key === "lspEntries"),
+          10_000,
+          "the disable write must produce its own opencodeSettingSaved(ok:true) reply",
+        );
+        assertNoJsoncErrors(opencodeJson);
+        parsed = parseSafe<{ lsp?: Record<string, Record<string, unknown>> }>(
+          fs.readFileSync(opencodeJson, "utf8"),
+        ).value;
+        assert.ok(parsed !== null, "opencode.json must parse to an object");
+        assert.equal(parsed.lsp?.["rust-analyzer"]?.disabled, true, "the disable write must set disabled:true");
+        assert.deepEqual(
+          parsed.lsp?.["rust-analyzer"]?.command,
+          ["rust-analyzer"],
+          "the wholesale entry set must still carry the command field",
+        );
+
+        // Delete rust-analyzer; kotlin-ls must remain (byte-identical priority leaf).
+        const repliesBeforeDelete = settingSavedReplies(bridge, "opencodeSettingSaved").length;
+        const initsBeforeDelete = opencodeInits(bridge).length;
+        bridge.deliver({
+          type: "opencodeSetSetting",
+          payload: { key: "lspEntries", value: { "rust-analyzer": null } },
+        });
+        await pollUntil(
+          () =>
+            settingSavedReplies(bridge, "opencodeSettingSaved")
+              .slice(repliesBeforeDelete)
+              .some((reply) => reply.ok && reply.key === "lspEntries"),
+          10_000,
+          "the delete write must produce its own opencodeSettingSaved(ok:true) reply",
+        );
+        await pollUntil(
+          () =>
+            opencodeInits(bridge)
+              .slice(initsBeforeDelete)
+              .some((init) => recordEntriesOf(init, "lsp")["rust-analyzer"] === undefined),
+          10_000,
+          "a refreshed opencodeInit without records.lsp.entries[rust-analyzer] must follow the delete",
+        );
+        assertNoJsoncErrors(opencodeJson);
+        const after = fs.readFileSync(opencodeJson, "utf8");
+        parsed = parseSafe<{ lsp?: Record<string, Record<string, unknown>> }>(after).value;
+        assert.ok(parsed !== null, "opencode.json must parse to an object");
+        assert.equal("rust-analyzer" in (parsed.lsp ?? {}), false, "the deleted lsp entry must be gone from disk");
+        assert.ok(parsed.lsp?.["kotlin-ls"], "the fixture's kotlin-ls entry must survive the delete");
+        assert.equal(snippetOf(after), snippetBefore, "the kotlin-ls priority leaf must survive byte-identically");
+      },
+    },
+    {
+      name: "recordEditor 非法值兜底：非法名称/缺必填字段/master 非布尔收 !ok 回执且不写盘",
+      fn: async () => {
+        assert.ok(managerBridge, "manager panel must still be open from the previous step");
+        const bridge = managerBridge;
+        const opencodeJson = path.join(configDir, "opencode.json");
+        const bytesBefore = fs.readFileSync(opencodeJson);
+        const repliesBefore = settingSavedReplies(bridge, "opencodeSettingSaved").length;
+
+        // Known descriptors with OUT-OF-KIND values: "bad entry!" fails the entry-name
+        // charset; {x:{}} misses the required template; "yes" is not true|false|null.
+        bridge.deliver({
+          type: "opencodeSetSetting",
+          payload: { key: "command", value: { "bad entry!": { template: "x" } } },
+        });
+        bridge.deliver({ type: "opencodeSetSetting", payload: { key: "command", value: { x: {} } } });
+        bridge.deliver({ type: "opencodeSetSetting", payload: { key: "formatterMaster", value: "yes" } });
+        await pollUntil(
+          () => {
+            const rejections = settingSavedReplies(bridge, "opencodeSettingSaved")
+              .slice(repliesBefore)
+              .filter(
+                (reply) =>
+                  reply.ok === false && (reply.error ?? "").includes("格式无法识别") && typeof reply.key === "string",
+              );
+            const commandRejections = rejections.filter((reply) => reply.key === "command").length;
+            const formatterRejections = rejections.filter((reply) => reply.key === "formatterMaster").length;
+            return commandRejections >= 2 && formatterRejections >= 1;
+          },
+          10_000,
+          "all three invalid record writes must produce !ok key-echo replies",
+        );
+        assert.ok(
+          fs.readFileSync(opencodeJson).equals(bytesBefore),
+          "the rejected record writes must not touch opencode.json",
         );
       },
     },
