@@ -814,6 +814,34 @@ export type McpServersValue = Record<string, boolean>;
 /** modelCatalog value: alias → model binding; a null entry marks "remove that alias" (UI deletion intent only). */
 export type ModelCatalogValue = Record<string, { model: string; reasoning: string | null } | null>;
 
+/** One record field value: string (text/multiline/enum/model), boolean, string list, or null (= field unset). */
+export type RecordFieldValue = string | boolean | string[] | null;
+
+/**
+ * One named record entry (command/formatter/lsp): field key → value. Reads omit
+ * fields failing their kind (never null them), so a broken entry stays repairable.
+ */
+export type RecordEntryValue = Record<string, RecordFieldValue>;
+
+/** recordEditor write value: name → entry (null entry = delete that name; reads never produce null). */
+export type RecordEditorValue = Record<string, RecordEntryValue | null>;
+
+/** One field schema of a recordEditor descriptor (a leaf inside each named entry). */
+export interface RecordFieldDef {
+  key: string;
+  kind: "text" | "multiline" | "boolean" | "stringList" | "enum" | "model";
+  label: string;
+  hint?: string;
+  /** Selectable values of the enum kind (leaf values outside them are rejected). */
+  options?: string[];
+  /** Field must be present as a non-empty trimmed string (write-side gate). */
+  required?: boolean;
+  /** Length bound of text (default 256) and multiline (default 8000) fields, after trimming. */
+  maxLen?: number;
+  /** Entry cap of a stringList field (default 8; entry rules reuse the shared stringList bounds). */
+  maxEntries?: number;
+}
+
 /**
  * The 8 reasoning levels a modelCatalog alias entry may pin. Single source for the
  * omoSettings validator and the webview reasoning dropdown (same pattern as VARIANTS).
@@ -865,7 +893,9 @@ export interface OpencodeSetting {
     | "enumChips"
     | "shallowObject"
     | "permissionTools"
-    | "mcpServers";
+    | "mcpServers"
+    | "recordEditor"
+    | "recordMaster";
   label: string;
   hint?: string;
   /** Selectable values for the enum kind. */
@@ -881,6 +911,17 @@ export interface OpencodeSetting {
   integer?: boolean;
   /** Field schemas of the shallowObject kind. */
   fields?: OpencodeSettingField[];
+  /**
+   * recordEditor metadata: entry field schemas plus name rules. Defaults:
+   * namePattern /^[A-Za-z0-9._-]+$/, nameMaxLen 64, maxEntries 32.
+   */
+  record?: {
+    fields: RecordFieldDef[];
+    /** Name charset source (compiled host-side); default /^[A-Za-z0-9._-]+$/. */
+    namePattern?: string;
+    nameMaxLen?: number;
+    maxEntries?: number;
+  };
   /** Non-opencode.json target file; "tui" routes this descriptor's reads/writes to configDir/tui.json. */
   file?: "tui";
 }
@@ -1135,11 +1176,85 @@ export const OPENCODE_SETTINGS: readonly OpencodeSetting[] = [
     hint: "glob 列表",
     group: "高级",
   },
+  {
+    key: "command",
+    path: ["command"],
+    kind: "recordEditor",
+    label: "自定义命令",
+    group: "命令",
+    record: {
+      fields: [
+        {
+          key: "template",
+          kind: "multiline",
+          label: "模板",
+          required: true,
+          hint: "支持 $ARGUMENTS 等模板变量",
+        },
+        { key: "description", kind: "text", label: "描述" },
+        { key: "agent", kind: "enum", label: "智能体", options: ["build", "plan", "general", "explore"] },
+        { key: "model", kind: "model", label: "模型" },
+        { key: "subtask", kind: "boolean", label: "子代理任务", hint: "作为子代理任务运行" },
+      ],
+    },
+  },
+  {
+    key: "formatterMaster",
+    path: ["formatter"],
+    kind: "recordMaster",
+    label: "内置格式化器",
+    hint: "true=启用内置 false=全部关闭",
+    group: "格式化",
+  },
+  {
+    key: "formatterEntries",
+    path: ["formatter"],
+    kind: "recordEditor",
+    label: "格式化器",
+    group: "格式化",
+    record: {
+      fields: [
+        { key: "disabled", kind: "boolean", label: "停用" },
+        { key: "command", kind: "stringList", label: "命令" },
+        { key: "extensions", kind: "stringList", label: "扩展名", hint: "文件扩展名如 ts" },
+      ],
+    },
+  },
+  {
+    key: "lspMaster",
+    path: ["lsp"],
+    kind: "recordMaster",
+    label: "内置语言服务器",
+    hint: "true=启用内置 false=全部关闭",
+    group: "LSP",
+  },
+  {
+    key: "lspEntries",
+    path: ["lsp"],
+    kind: "recordEditor",
+    label: "语言服务器",
+    group: "LSP",
+    record: {
+      fields: [
+        { key: "disabled", kind: "boolean", label: "停用" },
+        { key: "command", kind: "stringList", label: "命令" },
+        { key: "extensions", kind: "stringList", label: "扩展名", hint: "文件扩展名如 ts" },
+      ],
+    },
+  },
 ];
 
 /** One OpenCode setting value; null = key absent (「未设置」→ remove edit). */
 export type OpencodeSettingValue =
-  string | boolean | number | null | StringListValue | ShallowObjectValue | PermissionToolsValue | McpServersValue;
+  | string
+  | boolean
+  | number
+  | null
+  | StringListValue
+  | ShallowObjectValue
+  | PermissionToolsValue
+  | McpServersValue
+  | RecordEditorValue;
 
 /** One OMO tab setting value; null = remove op (恢复默认) — the shape follows the descriptor kind. */
 export type OmoSettingValue =
@@ -1157,6 +1272,24 @@ export interface OpencodePermissionState {
   advancedTools: string[];
 }
 
+/**
+ * Read/write-split record aggregate for the OpenCode tab payload: the boolean master
+ * form (mode "boolean"), the named-entry form (mode "entries"), or absent/garbage
+ * (mode "unset"). command has no master, so it is only ever entries/unset.
+ */
+export interface RecordAggregate {
+  mode: "unset" | "boolean" | "entries";
+  booleanValue: boolean | null;
+  entries: Record<string, RecordEntryValue>;
+}
+
+/** The OpenCode tab payload's record slot: one aggregate per recordEditor path (命令/格式化/LSP). */
+export interface OpencodeRecordStates {
+  command: RecordAggregate;
+  formatter: RecordAggregate;
+  lsp: RecordAggregate;
+}
+
 /** Boot/refresh payload of the OpenCode tab: current values + the config file path + model options. */
 export interface OpencodeSettingsPayload {
   values: Record<string, OpencodeSettingValue>;
@@ -1168,4 +1301,6 @@ export interface OpencodeSettingsPayload {
   mcp: { name: string; disabled: boolean }[];
   /** The standalone tui.json face: current theme + file path shown in the 终端界面 group. */
   tui: { theme: string | null; path: string };
+  /** Record aggregates (read path of the 命令/格式化/LSP groups; writes go through the record descriptors). */
+  records: OpencodeRecordStates;
 }
