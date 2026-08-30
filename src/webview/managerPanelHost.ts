@@ -3,6 +3,8 @@ import * as vscode from "vscode";
 import { CMD, MANAGER_PANEL_VIEW_TYPE, MODEL_ID_PATTERN } from "../constants";
 import type { ConfigStore } from "../core/configStore";
 import { errorMessage } from "../core/errors";
+import { isValidOmoMiscValue } from "../core/omoSettings";
+import { isValidOpencodeSettingValue } from "../core/opencodeSettings";
 import type { QuotaService } from "../core/quotaService";
 import type {
   AutoRefreshSettings,
@@ -10,12 +12,21 @@ import type {
   ConfigInitPayload,
   ManagerTab,
   ModelOption,
+  OmoMiscSetting,
+  OpencodeSetting,
+  OpencodeSettingsPayload,
+  OpencodeSettingValue,
   PresetListEntry,
   QuotaInitPayload,
   QuotaProviderId,
   SkillSummary,
 } from "../shared/protocol";
-import { normalizeAutoRefreshSettings, QUOTA_PROVIDER_IDS } from "../shared/protocol";
+import {
+  normalizeAutoRefreshSettings,
+  OMO_MISC_SETTINGS,
+  OPENCODE_SETTINGS,
+  QUOTA_PROVIDER_IDS,
+} from "../shared/protocol";
 import type { QuotaStatusBar } from "../ui/quotaStatusBar";
 import { buildWebviewHtml, readWebviewHtml } from "./panelHtml";
 import type { PresetEditorSession } from "./presetEditorHost";
@@ -157,9 +168,25 @@ export function notifyManagerPanelConfigChanged(payload: ConfigInitPayload | (()
 }
 
 /**
+ * Push a refreshed opencodeInit to the open panel's OpenCode tab (same lazy-provider
+ * contract as the config push): watcher-driven opencode.json changes re-sync the open
+ * page. Mirrors {@link notifyManagerPanelConfigChanged}.
+ */
+export function notifyManagerPanelOpencodeChanged(
+  payload: OpencodeSettingsPayload | (() => OpencodeSettingsPayload),
+): void {
+  if (openPanel === undefined) {
+    return;
+  }
+  const resolved = typeof payload === "function" ? payload() : payload;
+  void openPanel.webview.postMessage({ type: "opencodeInit", payload: resolved });
+}
+
+/**
  * Build the 配置 tab boot payload: live assignment rows (no preset overlay),
- * merged model options, discovered skills, and the current write target (kind +
- * path only). Exported so the extension can feed {@link notifyManagerPanelConfigChanged}
+ * merged model options, discovered skills, the current write target (kind +
+ * path only), and the OMO misc feature values powering the 功能设置 section.
+ * Exported so the extension can feed {@link notifyManagerPanelConfigChanged}
  * with a lazy provider over the same deps. `skills` lets the watcher-driven push
  * reuse the tree snapshot's locations instead of re-running a full discover scan.
  */
@@ -170,6 +197,21 @@ export function buildConfigInitPayload(deps: ManagerPanelDeps, skills?: SkillSum
     models: deps.configStore.listModels(),
     skills: skills ?? deps.listSkills(),
     target: { kind: target.kind, path: target.path },
+    omo: deps.configStore.omoMiscValues(),
+  };
+}
+
+/**
+ * Build the OpenCode tab boot payload: current settings values, the opencode.json[c]
+ * path (displayed at the top of the tab), and merged model options for the model
+ * pickers. Exported so the extension can feed {@link notifyManagerPanelOpencodeChanged}
+ * with a lazy provider over the same deps.
+ */
+export function buildOpencodeInitPayload(deps: ManagerPanelDeps): OpencodeSettingsPayload {
+  return {
+    values: deps.configStore.opencodeSettingValues(),
+    configPath: deps.configStore.resolveOpencodeConfigPath(),
+    models: deps.configStore.listModels(),
   };
 }
 
@@ -312,6 +354,18 @@ function postNavigateMessages(
     // The 打开设置 entry now lands here (first tab): keep the settings tab's
     // data fresh on arrival, preserving the entry's pre-config-tab guarantee.
     post({ type: "settingsInit", payload: { settings: deps.readSettings() } });
+    return;
+  }
+  if (options.tab === "opencode") {
+    post({ type: "managerNavigate", payload: { tab: "opencode" } });
+    post({ type: "opencodeInit", payload: buildOpencodeInitPayload(deps) });
+    return;
+  }
+  if (options.tab === "skills") {
+    post({ type: "managerNavigate", payload: { tab: "skills" } });
+    // Skills data rides configInit (no own channel): re-push it so navigation
+    // lands on a fresh skills list, exactly like a config-tab navigation would.
+    post({ type: "configInit", payload: buildConfigInitPayload(deps) });
     return;
   }
   post({ type: "managerNavigate", payload: { tab: "settings" } });
@@ -466,6 +520,20 @@ function createManagerPanel(
           payload: { ok: false, ...configSetModelEcho(raw), error: "配置请求格式无法识别" },
         });
       }
+      // Backstop (OpenCode/OMO tabs): same busy-forever contract for the two
+      // settings-write messages; the key echo lets the page clear its pending row.
+      if (isOpencodeSetSettingTyped(raw)) {
+        post({
+          type: "opencodeSettingSaved",
+          payload: { ok: false, ...settingKeyEcho(raw), error: "设置请求格式无法识别" },
+        });
+      }
+      if (isOmoSetSettingTyped(raw)) {
+        post({
+          type: "omoSettingSaved",
+          payload: { ok: false, ...settingKeyEcho(raw), error: "设置请求格式无法识别" },
+        });
+      }
       return;
     }
     switch (message.kind) {
@@ -488,6 +556,8 @@ function createManagerPanel(
         // Same for the 配置 tab's payload: the tab body is always mounted, so the
         // live assignments + skills must boot regardless of the entry tab.
         post({ type: "configInit", payload: buildConfigInitPayload(deps) });
+        // Same for the OpenCode tab: always-mounted body, settings boot with the panel.
+        post({ type: "opencodeInit", payload: buildOpencodeInitPayload(deps) });
         // Same for the 模板 tab's preset list: tab bodies are always mounted, so the
         // list must boot regardless of the entry tab (a preset-targeted navigate
         // already pushed one — the duplicate carries the same data and is harmless).
@@ -526,6 +596,35 @@ function createManagerPanel(
             type: "configModelSaved",
             payload: { ok: false, section: message.section, name: message.name, error: msg },
           });
+        }
+        break;
+      case "setOpencodeSetting":
+        try {
+          // Same write contract as setModel, for one OPENCODE_SETTINGS entry in opencode.json[c].
+          deps.configStore.setOpencodeSetting(message.setting.key, message.value);
+          deps.log(`managerPanel: 已更新 OpenCode 设置 ${message.setting.key}`);
+          post({ type: "opencodeSettingSaved", payload: { ok: true, key: message.setting.key } });
+          post({ type: "opencodeInit", payload: buildOpencodeInitPayload(deps) });
+          deps.refreshAll();
+        } catch (error) {
+          const msg = errorMessage(error);
+          deps.log(`managerPanel: OpenCode 设置写入失败: ${msg}`);
+          post({ type: "opencodeSettingSaved", payload: { ok: false, key: message.setting.key, error: msg } });
+        }
+        break;
+      case "setOmoSetting":
+        try {
+          // Same write contract, for one OMO_MISC_SETTINGS entry in the agent config target.
+          deps.configStore.setOmoMiscSetting(message.setting.key, message.value);
+          deps.log(`managerPanel: 已更新 OMO 功能设置 ${message.setting.key}`);
+          post({ type: "omoSettingSaved", payload: { ok: true, key: message.setting.key } });
+          // The OMO misc values ride configInit — re-push that channel.
+          post({ type: "configInit", payload: buildConfigInitPayload(deps) });
+          deps.refreshAll();
+        } catch (error) {
+          const msg = errorMessage(error);
+          deps.log(`managerPanel: OMO 功能设置写入失败: ${msg}`);
+          post({ type: "omoSettingSaved", payload: { ok: false, key: message.setting.key, error: msg } });
         }
         break;
       case "refresh":
@@ -657,7 +756,9 @@ type ParsedMessage =
   | { kind: "setStatusBar"; providerId: QuotaProviderId; visible: boolean }
   | { kind: "save"; source: AutoRefreshSettingsSource }
   | { kind: "editPreset"; name: string | null }
-  | { kind: "setModel"; section: "agents" | "categories"; name: string; model: string; variant: string | null };
+  | { kind: "setModel"; section: "agents" | "categories"; name: string; model: string; variant: string | null }
+  | { kind: "setOpencodeSetting"; setting: OpencodeSetting; value: OpencodeSettingValue }
+  | { kind: "setOmoSetting"; setting: OmoMiscSetting; value: boolean | number | null };
 
 /**
  * Validate an incoming webview message against the protocol shape. Returns
@@ -738,6 +839,24 @@ function parseMessage(raw: unknown): ParsedMessage | undefined {
         ? { kind: "setModel", section, name, model, variant }
         : undefined;
     }
+    case "opencodeSetSetting": {
+      const payload = msg.payload as { key?: unknown; value?: unknown } | undefined;
+      const found =
+        typeof payload?.key === "string" ? OPENCODE_SETTINGS.find((entry) => entry.key === payload.key) : undefined;
+      // Key must be a known descriptor and the value must pass its kind validator
+      // (same anti-arbitrary-JSONC-write gate the core write path re-checks).
+      return found !== undefined && isValidOpencodeSettingValue(found, payload?.value)
+        ? { kind: "setOpencodeSetting", setting: found, value: payload?.value as OpencodeSettingValue }
+        : undefined;
+    }
+    case "omoSetSetting": {
+      const payload = msg.payload as { key?: unknown; value?: unknown } | undefined;
+      const found =
+        typeof payload?.key === "string" ? OMO_MISC_SETTINGS.find((entry) => entry.key === payload.key) : undefined;
+      return found !== undefined && isValidOmoMiscValue(found, payload?.value)
+        ? { kind: "setOmoSetting", setting: found, value: payload?.value as boolean | number | null }
+        : undefined;
+    }
     default:
       return undefined;
   }
@@ -751,6 +870,38 @@ function isConfigSetModelTyped(raw: unknown): raw is { payload?: unknown } {
     !Array.isArray(raw) &&
     (raw as Record<string, unknown>).type === "configSetModel"
   );
+}
+
+/** Typed-but-invalid opencodeSetSetting / omoSetSetting detectors for the rejection backstop. */
+function isOpencodeSetSettingTyped(raw: unknown): raw is { payload?: unknown } {
+  return (
+    typeof raw === "object" &&
+    raw !== null &&
+    !Array.isArray(raw) &&
+    (raw as Record<string, unknown>).type === "opencodeSetSetting"
+  );
+}
+
+function isOmoSetSettingTyped(raw: unknown): raw is { payload?: unknown } {
+  return (
+    typeof raw === "object" &&
+    raw !== null &&
+    !Array.isArray(raw) &&
+    (raw as Record<string, unknown>).type === "omoSetSetting"
+  );
+}
+
+/**
+ * Best-effort key echo for the malformed-settings rejection replies: a parseable
+ * string key echoes verbatim (so the page clears the right pending row), anything
+ * else falls back to "" — the configSetModelEcho analog.
+ */
+function settingKeyEcho(raw: { payload?: unknown }): { key: string } {
+  const payload =
+    typeof raw.payload === "object" && raw.payload !== null && !Array.isArray(raw.payload)
+      ? (raw.payload as { key?: unknown })
+      : undefined;
+  return { key: typeof payload?.key === "string" ? payload.key : "" };
 }
 
 /**

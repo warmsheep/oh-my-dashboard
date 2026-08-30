@@ -26,8 +26,10 @@ import { readAutoRefreshSettings, writeAutoRefreshSettings } from "./ui/settings
 import { createStatusBar } from "./ui/statusbar";
 import {
   buildConfigInitPayload,
+  buildOpencodeInitPayload,
   notifyManagerPanelConfigChanged,
   notifyManagerPanelModelsChanged,
+  notifyManagerPanelOpencodeChanged,
   notifyManagerPanelPresetsChanged,
   openPresetEditorTab,
   postMessageToManagerPanel,
@@ -136,6 +138,10 @@ export function activate(ctx: vscode.ExtensionContext): void {
           notifyManagerPanelConfigChanged(() =>
             buildConfigInitPayload(managerDeps, skillSummaries(snapshot.discovered.skillLocations)),
           );
+          // OpenCode-tab settings ride their own channel (opencode.json changes
+          // also flow through this watcher; the OMO misc values already ride
+          // the configInit push above via the same agent-config watch).
+          notifyManagerPanelOpencodeChanged(() => buildOpencodeInitPayload(managerDeps));
         },
         (error: unknown) => {
           log(`refresh 失败: ${errorMessage(error)}`);

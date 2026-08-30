@@ -354,3 +354,130 @@ describe("manager panel 配置 tab protocol", () => {
     expect(fs.readFileSync(path.join(root, "oh-my-opencode.json"), "utf8")).toBe("{,}\n");
   });
 });
+
+describe("manager panel OpenCode/OMO 设置 protocol", () => {
+  /** Open a booted panel on the settings tab; returns it for message delivery. */
+  async function bootedPanel(deps: ManagerPanelDeps): Promise<FakePanel> {
+    await openManagerPanel(ctx, deps, { tab: "settings" });
+    const panel = createdPanels[0];
+    panel.receive({ type: "ready" });
+    return panel;
+  }
+
+  function messagesOfType(panel: FakePanel, type: string): unknown[] {
+    return panel.posted.filter((message) => (message as { type?: string }).type === type);
+  }
+
+  it("ready pushes an opencodeInit with values, configPath and models", async () => {
+    const { deps, root } = makeDeps();
+    fs.writeFileSync(path.join(root, "opencode.json"), JSON.stringify({ share: "auto", model: "zhipuai/glm-5" }));
+    const panel = await bootedPanel(deps);
+    const inits = messagesOfType(panel, "opencodeInit");
+    expect(inits.length).toBe(1);
+    const payload = (
+      inits[0] as { payload: { values: Record<string, unknown>; configPath: string; models: unknown[] } }
+    ).payload;
+    expect(payload.values.share).toBe("auto");
+    expect(payload.values.model).toBe("zhipuai/glm-5");
+    expect(payload.values.snapshot).toBeNull();
+    expect(payload.configPath).toBe(path.join(root, "opencode.json"));
+    expect(Array.isArray(payload.models)).toBe(true);
+  });
+
+  it("navigating an open booted panel to the opencode tab pushes managerNavigate + opencodeInit; skills tab pushes configInit", async () => {
+    const { deps } = makeDeps();
+    const panel = await bootedPanel(deps);
+    let before = panel.posted.length;
+    await openManagerPanel(ctx, deps, { tab: "opencode" });
+    expect(panel.posted.slice(before)).toContainEqual({ type: "managerNavigate", payload: { tab: "opencode" } });
+    expect(panel.posted.slice(before).filter((m) => (m as { type?: string }).type === "opencodeInit").length).toBe(1);
+
+    before = panel.posted.length;
+    await openManagerPanel(ctx, deps, { tab: "skills" });
+    expect(panel.posted.slice(before)).toContainEqual({ type: "managerNavigate", payload: { tab: "skills" } });
+    expect(panel.posted.slice(before).filter((m) => (m as { type?: string }).type === "configInit").length).toBe(1);
+  });
+
+  it("opencodeSetSetting writes through, replies ok, re-pushes opencodeInit and refreshes", async () => {
+    const { deps, refreshes, root } = makeDeps();
+    const panel = await bootedPanel(deps);
+    const before = panel.posted.length;
+    panel.receive({ type: "opencodeSetSetting", payload: { key: "share", value: "auto" } });
+    expect(panel.posted).toContainEqual({ type: "opencodeSettingSaved", payload: { ok: true, key: "share" } });
+    expect(panel.posted.slice(before).filter((m) => (m as { type?: string }).type === "opencodeInit").length).toBe(1);
+    expect(refreshes.length).toBe(1);
+    const written = JSON.parse(fs.readFileSync(path.join(root, "opencode.json"), "utf8")) as { share: string };
+    expect(written.share).toBe("auto");
+  });
+
+  it("omoSetSetting writes through, replies ok, re-pushes configInit with fresh omo values and refreshes", async () => {
+    const { deps, refreshes, root } = makeDeps();
+    const panel = await bootedPanel(deps);
+    const initsBefore = messagesOfType(panel, "configInit").length;
+    panel.receive({ type: "omoSetSetting", payload: { key: "teamMode", value: true } });
+    expect(panel.posted).toContainEqual({ type: "omoSettingSaved", payload: { ok: true, key: "teamMode" } });
+    const inits = messagesOfType(panel, "configInit");
+    expect(inits.length).toBe(initsBefore + 1);
+    const omo = (inits[inits.length - 1] as { payload: { omo: Record<string, unknown> } }).payload.omo;
+    expect(omo.teamMode).toBe(true);
+    expect(refreshes.length).toBe(1);
+    const written = JSON.parse(fs.readFileSync(path.join(root, "oh-my-opencode.json"), "utf8")) as {
+      team_mode?: { enabled?: boolean };
+    };
+    expect(written.team_mode?.enabled).toBe(true);
+  });
+
+  it("typed-but-invalid payloads get !ok replies with the key echo and write nothing", async () => {
+    const { deps, root } = makeDeps();
+    const panel = await bootedPanel(deps);
+    const opencodeExisted = fs.existsSync(path.join(root, "opencode.json"));
+    const bytesBefore = fs.readFileSync(path.join(root, "oh-my-opencode.json"));
+    panel.receive({ type: "opencodeSetSetting", payload: { key: "bogus", value: "x" } });
+    panel.receive({ type: "opencodeSetSetting", payload: { key: "share", value: "garbage" } });
+    panel.receive({ type: "opencodeSetSetting", payload: { key: "share" } });
+    panel.receive({ type: "opencodeSetSetting", payload: { key: 42, value: "auto" } });
+    panel.receive({ type: "omoSetSetting", payload: { key: "nope", value: true } });
+    panel.receive({ type: "omoSetSetting", payload: { key: "teamMode", value: "yes" } });
+    const replies = panel.posted.filter((message) => {
+      const type = (message as { type?: string }).type;
+      return type === "opencodeSettingSaved" || type === "omoSettingSaved";
+    });
+    expect(replies.length).toBe(6);
+    for (const reply of replies) {
+      const payload = (reply as { payload: { ok: boolean; key: string; error?: string } }).payload;
+      expect(payload.ok).toBe(false);
+      expect(payload.error).toBe("设置请求格式无法识别");
+    }
+    // Echo: parseable string keys echo verbatim; anything else falls back to "".
+    expect(replies[0]).toEqual({
+      type: "opencodeSettingSaved",
+      payload: { ok: false, key: "bogus", error: "设置请求格式无法识别" },
+    });
+    expect(replies[2]).toEqual({
+      type: "opencodeSettingSaved",
+      payload: { ok: false, key: "share", error: "设置请求格式无法识别" },
+    });
+    expect(replies[3]).toEqual({
+      type: "opencodeSettingSaved",
+      payload: { ok: false, key: "", error: "设置请求格式无法识别" },
+    });
+    expect(fs.existsSync(path.join(root, "opencode.json"))).toBe(opencodeExisted);
+    expect(fs.readFileSync(path.join(root, "oh-my-opencode.json")).equals(bytesBefore)).toBe(true);
+  });
+
+  it("a write failure (broken opencode.json) replies !ok with the friendly error, no re-push", async () => {
+    const { deps, root } = makeDeps();
+    fs.writeFileSync(path.join(root, "opencode.json"), "{,}\n");
+    const panel = await bootedPanel(deps);
+    const initsBefore = messagesOfType(panel, "opencodeInit").length;
+    panel.receive({ type: "opencodeSetSetting", payload: { key: "share", value: "auto" } });
+    const replies = messagesOfType(panel, "opencodeSettingSaved");
+    expect(replies.length).toBe(1);
+    const payload = (replies[0] as { payload: { ok: boolean; key: string; error?: string } }).payload;
+    expect(payload.ok).toBe(false);
+    expect(payload.key).toBe("share");
+    expect(typeof payload.error === "string" && payload.error.length > 0).toBe(true);
+    expect(messagesOfType(panel, "opencodeInit").length).toBe(initsBefore);
+    expect(fs.readFileSync(path.join(root, "opencode.json"), "utf8")).toBe("{,}\n");
+  });
+});
