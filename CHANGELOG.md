@@ -2,6 +2,14 @@
 
 > 版本与日期以 git 历史为准；0.8.0–0.14.0、0.16.x、0.18.0 等中间版本为本地打包、版本号未入库，相关变更归并入下一个入库版本。
 
+## 0.43.0 (2026-08-30)
+
+- **可视化配置第五批（收官批）**：探索报告剩余工作项全部闭环。设计方案见 `docs/plans/2026-08-30-visual-config-batch5-design.md`
+- **OMO 选项卡 11 项**：每智能体 `ultrawork`/`compaction` 覆写矩阵（新 kind **agentPairMap**，模型+reasoning 下拉；整值 null 永不触碰 agents 配置块、兄弟键字节级保护）、每智能体 `prompt`/`prompt_append` 编辑（新 kind **agentTextMap**，可展开文本域 ≤8000）、Claude Code 兼容层 6 开关、关键词展开 chips、目标循环、CodeGraph 4 开关、监视器、强制通知、界面语言
+- **OpenCode 选项卡**：MCP 服务器升级为完整条目编辑器（`recordEditor` 化：type 枚举必填 + remote 跨字段 URL 必填 + command 列表 + enabled 开关；替换批量二的开关列表 UI，条目级 diff、破损条目不触碰）、实验开关组（batch_tool/openTelemetry/continue_loop_on_deny/disable_paste_summary）
+- **审查修复**：remote 缺 URL 的提交闸门具名提示（「<name>」的 remote 条目必须填写 URL）、超长 prompt 跨智能体提交生存钉测、reasoning-only 手写叶保护钉测、陈旧注释与迁移自证用例
+- **清账**：设计文档宣布不做项（provider apiKey 红线、tui keybinds、per-agent permission/采样参数矩阵、mcp_env_allowlist 安全面等），探索报告任务项全部处置完毕。测试：根套件 806、webview 179、e2e 77 checks 全绿
+
 ## 0.42.0 (2026-08-30)
 
 - **可视化配置第四批（recordEditor 批）**：通用命名条目编辑器基础设施落地。设计方案见 `docs/plans/2026-08-30-visual-config-batch4-design.md`
