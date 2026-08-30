@@ -378,3 +378,156 @@ describe("shallowObject kind (runtimeFallbackParams / defaultMode)", () => {
     expect(omoMiscEdits([], setting("omoModels"), bad)).toEqual([]);
   });
 });
+
+describe("batch-3 descriptors (OMO tab)", () => {
+  it("disabledMcps (enumChips): unique entries ∈ options", () => {
+    const mcps = setting("disabledMcps");
+    expect(isValidOmoMiscValue(mcps, [])).toBe(true);
+    expect(isValidOmoMiscValue(mcps, ["websearch", "codegraph"])).toBe(true);
+    expect(isValidOmoMiscValue(mcps, ["websearch", "websearch"])).toBe(false);
+    expect(isValidOmoMiscValue(mcps, ["made-up-mcp"])).toBe(false);
+    expect(isValidOmoMiscValue(mcps, [1])).toBe(false);
+    expect(isValidOmoMiscValue(mcps, null)).toBe(true);
+  });
+
+  it("disabledCommands (enumChips): schema-strict enum options", () => {
+    const commands = setting("disabledCommands");
+    expect(isValidOmoMiscValue(commands, ["goal", "hyperplan"])).toBe(true);
+    expect(isValidOmoMiscValue(commands, ["Goal"])).toBe(false); // case-sensitive
+    expect(isValidOmoMiscValue(commands, ["bogus"])).toBe(false);
+  });
+
+  it("browserAutomation (enum): listed provider ids only; read passes strings, degrades others", () => {
+    const engine = setting("browserAutomation");
+    expect(isValidOmoMiscValue(engine, "playwright")).toBe(true);
+    expect(isValidOmoMiscValue(engine, "dev-browser")).toBe(true);
+    expect(isValidOmoMiscValue(engine, "chrome")).toBe(false);
+    expect(isValidOmoMiscValue(engine, null)).toBe(true);
+    const values = readOmoMiscValues(
+      JSON.stringify({ "[opencode]": { browser_automation_engine: { provider: "agent-browser" } } }),
+      ["[opencode]"],
+    );
+    expect(values.browserAutomation).toBe("agent-browser");
+    expect(
+      readOmoMiscValues(JSON.stringify({ browser_automation_engine: { provider: 7 } }), []).browserAutomation,
+    ).toBeNull();
+  });
+
+  it("websearchProvider (enum): exa/tavily only", () => {
+    const websearch = setting("websearchProvider");
+    expect(isValidOmoMiscValue(websearch, "exa")).toBe(true);
+    expect(isValidOmoMiscValue(websearch, "tavily")).toBe(true);
+    expect(isValidOmoMiscValue(websearch, "brave")).toBe(false);
+    expect(isValidOmoMiscValue(websearch, 42)).toBe(false);
+  });
+
+  it("enum edits land at the nested path with the section prefix and remove on null", () => {
+    const edits = omoMiscEdits(["[opencode]"], setting("browserAutomation"), "agent-browser");
+    expect(edits).toEqual([
+      { path: ["[opencode]", "browser_automation_engine", "provider"], value: "agent-browser", op: "set" },
+    ]);
+    const text = applyEdits("{}", edits);
+    expect(getValue(text, ["[opencode]", "browser_automation_engine", "provider"])).toBe("agent-browser");
+    const removed = applyEdits(text, omoMiscEdits(["[opencode]"], setting("browserAutomation"), null));
+    expect(getValue(removed, ["[opencode]", "browser_automation_engine", "provider"])).toBeUndefined();
+  });
+
+  it("gitMaster (shallowObject): boolean leaves only", () => {
+    const git = setting("gitMaster");
+    expect(isValidOmoMiscValue(git, { commit_footer: false, include_co_authored_by: null })).toBe(true);
+    expect(isValidOmoMiscValue(git, { commit_footer: "yes" })).toBe(false);
+    expect(isValidOmoMiscValue(git, { made_up: true })).toBe(false);
+    expect(isValidOmoMiscValue(git, null)).toBe(true);
+  });
+
+  it("tmuxParams (shallowObject with enum leaves): layout/isolation ∈ options, main_pane_size int 20–80", () => {
+    const tmux = setting("tmuxParams");
+    expect(isValidOmoMiscValue(tmux, { layout: "tiled", main_pane_size: 60, isolation: "window" })).toBe(true);
+    expect(isValidOmoMiscValue(tmux, { layout: "bogus" })).toBe(false);
+    expect(isValidOmoMiscValue(tmux, { isolation: "matrix" })).toBe(false);
+    expect(isValidOmoMiscValue(tmux, { layout: 42 })).toBe(false);
+    expect(isValidOmoMiscValue(tmux, { main_pane_size: 19 })).toBe(false);
+    expect(isValidOmoMiscValue(tmux, { main_pane_size: 81 })).toBe(false);
+    expect(isValidOmoMiscValue(tmux, { main_pane_size: 60.5 })).toBe(false);
+    expect(isValidOmoMiscValue(tmux, { layout: null })).toBe(true); // null leaf = unset
+  });
+
+  it("tmuxParams read: valid enum leaves pass through, invalid ones degrade to null; unknown file keys not surfaced", () => {
+    const values = readOmoMiscValues(
+      JSON.stringify({ tmux: { layout: "tiled", isolation: "bogus", main_pane_size: 50, surprise: 1 } }),
+      [],
+    );
+    expect(values.tmuxParams).toEqual({ layout: "tiled", main_pane_size: 50, isolation: null });
+  });
+
+  it("tmuxParams edits: enum leaf set + null-leaf remove preserve a sibling comment and custom key", () => {
+    const seeded = '{\n  "tmux": {\n    // user note\n    "custom": "keep",\n    "enabled": true,\n  },\n}\n';
+    const next = applyEdits(seeded, omoMiscEdits([], setting("tmuxParams"), { layout: "tiled", isolation: null }));
+    // `enabled` belongs to the batch-1 tmuxEnabled descriptor sharing the parent — per-leaf writes keep it.
+    expect(getValue(next, ["tmux"])).toEqual({ custom: "keep", enabled: true, layout: "tiled" });
+    expect(next).toContain("// user note");
+  });
+
+  it("teamModeLimits (shallowObject): integer bounds per field", () => {
+    const limits = setting("teamModeLimits");
+    expect(
+      isValidOmoMiscValue(limits, {
+        max_parallel_members: 4,
+        max_members: 8,
+        max_wall_clock_minutes: 120,
+        max_member_turns: 500,
+      }),
+    ).toBe(true);
+    expect(isValidOmoMiscValue(limits, { max_parallel_members: 0 })).toBe(false);
+    expect(isValidOmoMiscValue(limits, { max_parallel_members: 9 })).toBe(false);
+    expect(isValidOmoMiscValue(limits, { max_members: 9 })).toBe(false);
+    expect(isValidOmoMiscValue(limits, { max_wall_clock_minutes: 1440 })).toBe(true);
+    expect(isValidOmoMiscValue(limits, { max_wall_clock_minutes: 1441 })).toBe(false);
+    expect(isValidOmoMiscValue(limits, { max_member_turns: 10000 })).toBe(true);
+    expect(isValidOmoMiscValue(limits, { max_member_turns: 10001 })).toBe(false);
+  });
+
+  it("agentOrder (orderedList): 1–64 unique trimmed non-empty ≤64-char entries", () => {
+    const order = setting("agentOrder");
+    expect(isValidOmoMiscValue(order, ["atlas", "oracle"])).toBe(true);
+    expect(isValidOmoMiscValue(order, ["atlas", "atlas"])).toBe(false);
+    expect(isValidOmoMiscValue(order, ["ok", ""])).toBe(false);
+    expect(isValidOmoMiscValue(order, ["x".repeat(64)])).toBe(true);
+    expect(isValidOmoMiscValue(order, ["x".repeat(65)])).toBe(false);
+    expect(isValidOmoMiscValue(order, null)).toBe(true);
+    const names = (count: number) => Array.from({ length: count }, (_, i) => `agent-${i}`);
+    expect(isValidOmoMiscValue(order, names(64))).toBe(true);
+    expect(isValidOmoMiscValue(order, names(65))).toBe(false);
+  });
+
+  it("agentOrder read keeps the string array as-is; mixed/non-array values degrade to null", () => {
+    expect(readOmoMiscValues(JSON.stringify({ agent_order: ["atlas", "hephaestus"] }), []).agentOrder).toEqual([
+      "atlas",
+      "hephaestus",
+    ]);
+    expect(readOmoMiscValues(JSON.stringify({ agent_order: ["atlas", 3] }), []).agentOrder).toBeNull();
+    expect(readOmoMiscValues(JSON.stringify({ agent_order: "atlas" }), []).agentOrder).toBeNull();
+  });
+
+  it("agentOrder read is display-tolerant: oversized and duplicate hand-written arrays pass through AS-IS", () => {
+    // Reads never cap or dedupe (commits are validator-bounded — the orderedList matrix
+    // above already covers >64/dupes rejection), so hand-written entries stay visible.
+    const oversized = Array.from({ length: 65 }, (_, i) => `agent-${i}`);
+    expect(readOmoMiscValues(JSON.stringify({ agent_order: oversized }), []).agentOrder).toEqual(oversized);
+    const duplicated = ["atlas", "oracle", "atlas"];
+    expect(readOmoMiscValues(JSON.stringify({ agent_order: duplicated }), []).agentOrder).toEqual(duplicated);
+  });
+
+  it("agentOrder edits set/remove the whole key at the effective path", () => {
+    const seeded = JSON.stringify({ "[opencode]": { agent_order: ["oracle"] } });
+    const updated = applyEdits(seeded, omoMiscEdits(["[opencode]"], setting("agentOrder"), ["atlas", "oracle"]));
+    expect(getValue(updated, ["[opencode]", "agent_order"])).toEqual(["atlas", "oracle"]);
+    const removed = applyEdits(updated, omoMiscEdits(["[opencode]"], setting("agentOrder"), null));
+    expect(getValue(removed, ["[opencode]", "agent_order"])).toBeUndefined();
+  });
+
+  it("gitMaster round-trip: per-leaf write on the legacy target", () => {
+    const text = applyEdits("{}", omoMiscEdits([], setting("gitMaster"), { commit_footer: false }));
+    expect(getValue(text, ["git_master"])).toEqual({ commit_footer: false });
+  });
+});

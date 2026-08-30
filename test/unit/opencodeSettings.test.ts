@@ -2,14 +2,16 @@ import { describe, expect, it } from "vitest";
 
 import { applyEdits, getValue } from "../../src/core/jsoncEditor";
 import {
+  extractShallowObjectValue,
   isValidOpencodeSettingValue,
+  isValidShallowObjectLeaf,
   opencodeSettingEdits,
   readMcpServers,
   readOpencodeSettingValues,
   readPermissionState,
 } from "../../src/core/opencodeSettings";
 import { OPENCODE_PERMISSION_TOOLS, OPENCODE_SETTINGS } from "../../src/shared/protocol";
-import type { OpencodeSetting } from "../../src/shared/protocol";
+import type { OpencodeSetting, OpencodeSettingField } from "../../src/shared/protocol";
 
 /** Descriptor lookup by key; throws on typos so a bad test key fails loudly. */
 function setting(key: string): OpencodeSetting {
@@ -38,6 +40,9 @@ describe("readOpencodeSettingValues", () => {
       permission: "ask",
       instructions: [".cursor/rules", "docs/guide.md"],
       compaction: { auto: false, prune: true, tail_turns: 7, bogus: "not a descriptor field" },
+      logLevel: "WARN",
+      shell: "/bin/fish",
+      subagent_depth: 2,
     });
     expect(readOpencodeSettingValues(text)).toEqual({
       model: "zhipuai/glm-5",
@@ -60,6 +65,12 @@ describe("readOpencodeSettingValues", () => {
       agentPlanTemperature: null,
       agentGeneralModel: null,
       agentExploreModel: null,
+      logLevel: "WARN",
+      shell: "/bin/fish",
+      subagentDepth: 2,
+      toolOutput: null,
+      attachmentImage: null,
+      watcherIgnore: null,
     });
   });
 
@@ -501,5 +512,191 @@ describe("OPENCODE_PERMISSION_TOOLS canon", () => {
       "doom_loop",
     ]);
     expect(new Set(OPENCODE_PERMISSION_TOOLS).size).toBe(OPENCODE_PERMISSION_TOOLS.length);
+  });
+});
+
+describe("batch-3 descriptors (OpenCode tab: 高级 / 终端与输出)", () => {
+  it("logLevel: enum accepts DEBUG/INFO/WARN/ERROR only", () => {
+    const logLevel = setting("logLevel");
+    for (const level of ["DEBUG", "INFO", "WARN", "ERROR"]) {
+      expect(isValidOpencodeSettingValue(logLevel, level)).toBe(true);
+    }
+    expect(isValidOpencodeSettingValue(logLevel, "debug")).toBe(false); // case-sensitive
+    expect(isValidOpencodeSettingValue(logLevel, 42)).toBe(false);
+    expect(isValidOpencodeSettingValue(logLevel, null)).toBe(true);
+  });
+
+  it("shell: string 1..64 chars", () => {
+    const shell = setting("shell");
+    expect(isValidOpencodeSettingValue(shell, "/bin/zsh")).toBe(true);
+    expect(isValidOpencodeSettingValue(shell, "")).toBe(false);
+    expect(isValidOpencodeSettingValue(shell, "x".repeat(65))).toBe(false);
+    expect(isValidOpencodeSettingValue(shell, 7)).toBe(false);
+  });
+
+  it("subagentDepth: integer 0–16 only", () => {
+    const depth = setting("subagentDepth");
+    expect(isValidOpencodeSettingValue(depth, 0)).toBe(true);
+    expect(isValidOpencodeSettingValue(depth, 16)).toBe(true);
+    expect(isValidOpencodeSettingValue(depth, -1)).toBe(false);
+    expect(isValidOpencodeSettingValue(depth, 17)).toBe(false);
+    expect(isValidOpencodeSettingValue(depth, 2.5)).toBe(false); // integer enforced
+    expect(isValidOpencodeSettingValue(depth, "3")).toBe(false);
+  });
+
+  it("toolOutput: integer leaves; null leaf = unset; unknown field rejected", () => {
+    const toolOutput = setting("toolOutput");
+    expect(isValidOpencodeSettingValue(toolOutput, { max_lines: 2000, max_bytes: 51200 })).toBe(true);
+    expect(isValidOpencodeSettingValue(toolOutput, { max_lines: null })).toBe(true);
+    expect(isValidOpencodeSettingValue(toolOutput, { max_lines: 10.5 })).toBe(false); // integer enforced
+    expect(isValidOpencodeSettingValue(toolOutput, { max_lines: "2000" })).toBe(false);
+    expect(isValidOpencodeSettingValue(toolOutput, { unknown: 1 })).toBe(false);
+  });
+
+  it("attachmentImage: auto_resize bool + integer size leaves", () => {
+    const image = setting("attachmentImage");
+    expect(
+      isValidOpencodeSettingValue(image, {
+        auto_resize: true,
+        max_width: 2000,
+        max_height: 2000,
+        max_base64_bytes: 5242880,
+      }),
+    ).toBe(true);
+    expect(isValidOpencodeSettingValue(image, { auto_resize: "yes" })).toBe(false);
+    expect(isValidOpencodeSettingValue(image, { max_width: 1.5 })).toBe(false);
+    expect(isValidOpencodeSettingValue(image, { made_up: 1 })).toBe(false);
+  });
+
+  it("watcherIgnore: shared stringList rules (1–16 unique trimmed non-empty ≤256)", () => {
+    const watcherIgnore = setting("watcherIgnore");
+    expect(isValidOpencodeSettingValue(watcherIgnore, ["node_modules", "*.log"])).toBe(true);
+    expect(isValidOpencodeSettingValue(watcherIgnore, ["a", "a"])).toBe(false);
+    expect(isValidOpencodeSettingValue(watcherIgnore, [])).toBe(false);
+  });
+
+  it("reads the batch-3 keys and degrades wrong shapes to null", () => {
+    const values = readOpencodeSettingValues(
+      JSON.stringify({
+        logLevel: "WARN",
+        shell: "/bin/bash",
+        subagent_depth: 3,
+        tool_output: { max_lines: 500, surprise: "hi" },
+        attachment: { image: { auto_resize: false, max_width: 100 } },
+        watcher: { ignore: ["*.log"] },
+      }),
+    );
+    expect(values.logLevel).toBe("WARN");
+    expect(values.shell).toBe("/bin/bash");
+    expect(values.subagentDepth).toBe(3);
+    expect(values.toolOutput).toEqual({ max_lines: 500, max_bytes: null });
+    expect(values.attachmentImage).toEqual({
+      auto_resize: false,
+      max_width: 100,
+      max_height: null,
+      max_base64_bytes: null,
+    });
+    expect(values.watcherIgnore).toEqual(["*.log"]);
+
+    const bad = readOpencodeSettingValues(
+      JSON.stringify({ logLevel: 42, shell: 7, subagent_depth: "3", tool_output: "nope", watcher: { ignore: "x" } }),
+    );
+    expect(bad.logLevel).toBeNull();
+    expect(bad.shell).toBeNull();
+    expect(bad.subagentDepth).toBeNull();
+    expect(bad.toolOutput).toBeNull();
+    expect(bad.watcherIgnore).toBeNull();
+  });
+
+  it("edits: logLevel and watcherIgnore whole-key writes round-trip through jsoncEditor", () => {
+    const seeded = '{\n  "model": "a/b", // keep\n}\n';
+    const set = applyEdits(seeded, opencodeSettingEdits(setting("logLevel"), "WARN"));
+    expect(getValue(set, ["logLevel"])).toBe("WARN");
+    const removed = applyEdits(set, opencodeSettingEdits(setting("logLevel"), null));
+    expect(getValue(removed, ["logLevel"])).toBeUndefined();
+    const nested = applyEdits(seeded, opencodeSettingEdits(setting("watcherIgnore"), ["*.log"]));
+    expect(getValue(nested, ["watcher", "ignore"])).toEqual(["*.log"]);
+  });
+
+  it("toolOutput per-leaf edits preserve sibling keys and comments inside the parent object", () => {
+    const seeded = '{\n  "tool_output": {\n    // user note\n    "custom": "keep",\n    "max_lines": 100,\n  },\n}\n';
+    const next = applyEdits(seeded, opencodeSettingEdits(setting("toolOutput"), { max_lines: 500, max_bytes: null }));
+    expect(getValue(next, ["tool_output"])).toEqual({ custom: "keep", max_lines: 500 });
+    expect(next).toContain("// user note");
+  });
+});
+
+describe("shallowObject enum leaves", () => {
+  const enumLeafDescriptor: OpencodeSetting = {
+    ...setting("compaction"),
+    fields: [
+      { key: "mode", kind: "enum", label: "模式", options: ["a", "b"] },
+      { key: "flag", kind: "boolean", label: "开关" },
+    ],
+  };
+
+  it("validator accepts listed options only (∉ options rejected, null leaf = unset)", () => {
+    expect(isValidOpencodeSettingValue(enumLeafDescriptor, { mode: "a" })).toBe(true);
+    expect(isValidOpencodeSettingValue(enumLeafDescriptor, { mode: "z" })).toBe(false);
+    expect(isValidOpencodeSettingValue(enumLeafDescriptor, { mode: 42 })).toBe(false);
+    expect(isValidOpencodeSettingValue(enumLeafDescriptor, { mode: null })).toBe(true);
+  });
+
+  it("extractShallowObjectValue passes valid enum leaves through and degrades invalid ones to null", () => {
+    expect(extractShallowObjectValue(enumLeafDescriptor.fields ?? [], { mode: "b" })).toEqual({
+      mode: "b",
+      flag: null,
+    });
+    expect(extractShallowObjectValue(enumLeafDescriptor.fields ?? [], { mode: "zzz" })).toEqual({
+      mode: null,
+      flag: null,
+    });
+    expect(extractShallowObjectValue(enumLeafDescriptor.fields ?? [], { mode: 7 })).toEqual({ mode: null, flag: null });
+  });
+
+  it("an options-less enum field rejects every value (options ?? [] fallback)", () => {
+    const bare: OpencodeSettingField = { key: "mode", kind: "enum", label: "模式" };
+    expect(isValidShallowObjectLeaf(bare, "a")).toBe(false);
+  });
+
+  it("enum leaf edits set the string / remove on null like every other leaf", () => {
+    expect(opencodeSettingEdits(enumLeafDescriptor, { mode: "a", flag: true })).toEqual([
+      { path: ["compaction", "mode"], value: "a", op: "set" },
+      { path: ["compaction", "flag"], value: true, op: "set" },
+    ]);
+    expect(opencodeSettingEdits(enumLeafDescriptor, { mode: null, flag: false })).toEqual([
+      { path: ["compaction", "mode"], value: undefined, op: "remove" },
+      { path: ["compaction", "flag"], value: false, op: "set" },
+    ]);
+  });
+});
+
+describe("orderedList kind", () => {
+  // No shipped OpenCode descriptor uses orderedList yet — probe the kind with a
+  // synthetic descriptor (the shipped OMO agentOrder rides the same read/edit/validate paths).
+  const ordered: OpencodeSetting = { ...setting("instructions"), kind: "orderedList" };
+  const names = (count: number) => Array.from({ length: count }, (_, i) => `agent-${i}`);
+
+  it("validator: 1–64 unique trimmed non-empty entries of ≤64 chars", () => {
+    expect(isValidOpencodeSettingValue(ordered, ["atlas", "oracle"])).toBe(true);
+    expect(isValidOpencodeSettingValue(ordered, names(64))).toBe(true);
+    expect(isValidOpencodeSettingValue(ordered, names(65))).toBe(false);
+    expect(isValidOpencodeSettingValue(ordered, ["ok", ""])).toBe(false); // empty entry
+    expect(isValidOpencodeSettingValue(ordered, ["ok", "   "])).toBe(false); // blank entry
+    expect(isValidOpencodeSettingValue(ordered, ["x".repeat(64)])).toBe(true);
+    expect(isValidOpencodeSettingValue(ordered, ["x".repeat(65)])).toBe(false);
+    expect(isValidOpencodeSettingValue(ordered, ["a", "a"])).toBe(false); // dupes
+    expect(isValidOpencodeSettingValue(ordered, ["a", " a "])).toBe(false); // trimmed dupes
+    expect(isValidOpencodeSettingValue(ordered, [])).toBe(false);
+    expect(isValidOpencodeSettingValue(ordered, ["a", 3])).toBe(false);
+    expect(isValidOpencodeSettingValue(ordered, "atlas")).toBe(false);
+    expect(isValidOpencodeSettingValue(ordered, null)).toBe(true);
+  });
+
+  it("whole-key edit: set writes the array as-is, null removes the key", () => {
+    expect(opencodeSettingEdits(ordered, ["a", "b"])).toEqual([
+      { path: ["instructions"], value: ["a", "b"], op: "set" },
+    ]);
+    expect(opencodeSettingEdits(ordered, null)).toEqual([{ path: ["instructions"], value: undefined, op: "remove" }]);
   });
 });

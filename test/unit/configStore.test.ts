@@ -1221,6 +1221,36 @@ describe("ConfigStore.setOpencodeSetting / opencodeSettingValues", () => {
     expect(store.permissionState()).toEqual({ shorthand: null, tools: {}, advancedTools: [] });
     expect(store.mcpServers()).toEqual([]);
   });
+
+  it("round-trips logLevel (enum) and watcherIgnore (stringList) including the null remove", () => {
+    const dir = seedConfigDir();
+    const store = new ConfigStore({ configDirOverride: dir, homeDir: sandbox() });
+
+    store.setOpencodeSetting("logLevel", "WARN");
+    store.setOpencodeSetting("watcherIgnore", ["node_modules", "*.log"]);
+
+    const file = path.join(dir, "opencode.json");
+    expect(getValue(readFileSync(file, "utf8"), ["logLevel"])).toBe("WARN");
+    expect(getValue(readFileSync(file, "utf8"), ["watcher", "ignore"])).toEqual(["node_modules", "*.log"]);
+    expect(store.opencodeSettingValues()).toMatchObject({ logLevel: "WARN", watcherIgnore: ["node_modules", "*.log"] });
+
+    store.setOpencodeSetting("logLevel", null);
+    store.setOpencodeSetting("watcherIgnore", null);
+
+    expect(getValue(readFileSync(file, "utf8"), ["logLevel"])).toBeUndefined();
+    // Accepted residue (same as permissionTools): removing the last leaf key leaves the
+    // empty `watcher: {}` container behind, which every read tolerates as "unset".
+    expect(getValue(readFileSync(file, "utf8"), ["watcher"])).toEqual({});
+  });
+
+  it("throws OPENCODE_SETTING_INVALID for invalid batch-3 values", () => {
+    const dir = sandbox();
+    const store = new ConfigStore({ configDirOverride: dir, homeDir: sandbox() });
+    expect(() => store.setOpencodeSetting("logLevel", "debug")).toThrow("OPENCODE_SETTING_INVALID");
+    expect(() => store.setOpencodeSetting("subagentDepth", 2.5)).toThrow("OPENCODE_SETTING_INVALID");
+    expect(() => store.setOpencodeSetting("toolOutput", { max_lines: 1.5 })).toThrow("OPENCODE_SETTING_INVALID");
+    expect(() => store.setOpencodeSetting("attachmentImage", { max_width: 1.5 })).toThrow("OPENCODE_SETTING_INVALID");
+  });
 });
 
 describe("ConfigStore tui.json face (tuiConfigPath / tuiTheme / setTuiTheme)", () => {
@@ -1489,6 +1519,85 @@ describe("ConfigStore.setOmoMiscSetting / omoMiscValues", () => {
     expect(() => store.setOmoMiscSetting("runtimeFallbackParams", { max_fallback_attempts: 21 })).toThrow(
       "OMO_SETTING_INVALID",
     );
+  });
+
+  it("round-trips tmuxParams with enum leaves on the legacy target, preserving a pre-seeded sibling custom key", () => {
+    const dir = sandbox();
+    writeFileSync(
+      path.join(dir, "oh-my-opencode.json"),
+      '{\n  "tmux": {\n    // custom user key\n    "custom": "keep",\n    "enabled": true,\n  },\n}\n',
+    );
+    const store = new ConfigStore({ configDirOverride: dir, homeDir: sandbox() });
+
+    store.setOmoMiscSetting("tmuxParams", { layout: "tiled", main_pane_size: 50, isolation: "window" });
+
+    const file = path.join(dir, "oh-my-opencode.json");
+    const text = readFileSync(file, "utf8");
+    expect(validate(text)).toEqual([]);
+    expect(text).toContain("// custom user key");
+    expect(getValue(text, ["tmux"])).toEqual({
+      custom: "keep",
+      enabled: true,
+      layout: "tiled",
+      main_pane_size: 50,
+      isolation: "window",
+    });
+    expect(store.omoMiscValues()).toMatchObject({
+      tmuxParams: { layout: "tiled", main_pane_size: 50, isolation: "window" },
+    });
+
+    expect(() => store.setOmoMiscSetting("tmuxParams", { layout: "bogus" })).toThrow("OMO_SETTING_INVALID");
+
+    // A map with a non-null leaf does per-leaf ops: layout is removed, siblings survive
+    // (an all-null map would remove the whole `tmux` key by design).
+    store.setOmoMiscSetting("tmuxParams", { layout: null, main_pane_size: 50 });
+
+    expect(getValue(readFileSync(file, "utf8"), ["tmux"])).toEqual({
+      custom: "keep",
+      enabled: true,
+      main_pane_size: 50,
+      isolation: "window",
+    });
+  });
+
+  it("round-trips agentOrder (orderedList) on the legacy target", () => {
+    const dir = seedConfigDir({ ohMy: true });
+    const store = new ConfigStore({ configDirOverride: dir, homeDir: sandbox() });
+
+    store.setOmoMiscSetting("agentOrder", ["atlas", "oracle", "hephaestus"]);
+
+    const file = path.join(dir, "oh-my-opencode.json");
+    expect(getValue(readFileSync(file, "utf8"), ["agent_order"])).toEqual(["atlas", "oracle", "hephaestus"]);
+    expect(store.omoMiscValues().agentOrder).toEqual(["atlas", "oracle", "hephaestus"]);
+
+    store.setOmoMiscSetting("agentOrder", null);
+
+    expect(getValue(readFileSync(file, "utf8"), ["agent_order"])).toBeUndefined();
+    expect(store.omoMiscValues().agentOrder).toBeNull();
+
+    expect(() => store.setOmoMiscSetting("agentOrder", ["atlas", "atlas"])).toThrow("OMO_SETTING_INVALID");
+  });
+
+  it("round-trips agentOrder under [opencode] on the omo target", () => {
+    const dir = sandbox();
+    const home = sandbox();
+    mkdirSync(path.join(home, ".omo"), { recursive: true });
+    writeFileSync(path.join(home, ".omo", "omo.jsonc"), '{ "[opencode]": {} }\n');
+    const store = new ConfigStore({ configDirOverride: dir, homeDir: home });
+
+    store.setOmoMiscSetting("agentOrder", ["atlas", "oracle"]);
+
+    const file = path.join(home, ".omo", "omo.jsonc");
+    const text = readFileSync(file, "utf8");
+    expect(validate(text)).toEqual([]);
+    expect(getValue(text, ["[opencode]", "agent_order"])).toEqual(["atlas", "oracle"]);
+    expect(getValue(text, ["agent_order"])).toBeUndefined();
+    expect(store.omoMiscValues().agentOrder).toEqual(["atlas", "oracle"]);
+
+    store.setOmoMiscSetting("agentOrder", null);
+
+    expect(getValue(readFileSync(file, "utf8"), ["[opencode]", "agent_order"])).toBeUndefined();
+    expect(store.omoMiscValues().agentOrder).toBeNull();
   });
 });
 

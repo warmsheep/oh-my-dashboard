@@ -6,6 +6,7 @@ import type { JsoncEdit } from "./jsoncEditor";
 import {
   extractShallowObjectValue,
   isRecord,
+  isValidOrderedStringListValue,
   isValidShallowObjectLeaf,
   isValidStringListValue,
   shallowObjectEdits,
@@ -38,7 +39,10 @@ function coerceOmoValue(setting: OmoMiscSetting, value: unknown): OmoSettingValu
       return typeof value === "boolean" ? value : null;
     case "number":
       return typeof value === "number" && Number.isFinite(value) ? value : null;
+    case "enum":
+      return typeof value === "string" ? value : null;
     case "stringList":
+    case "orderedList":
     case "enumChips":
       return Array.isArray(value) && value.every((entry) => typeof entry === "string") ? value : null;
     case "shallowObject":
@@ -110,7 +114,9 @@ export function omoMiscEdits(sectionPath: JsonPath, setting: OmoMiscSetting, val
   switch (setting.kind) {
     case "boolean":
     case "number":
+    case "enum":
     case "stringList":
+    case "orderedList":
     case "enumChips":
       return [
         value === null ? { path: fullPath, value: undefined, op: "remove" } : { path: fullPath, value, op: "set" },
@@ -147,11 +153,12 @@ export function omoMiscEdits(sectionPath: JsonPath, setting: OmoMiscSetting, val
 /**
  * Host-side value validator (guards the protocol write path): boolean kind accepts
  * booleans, number kind accepts integers within the descriptor bounds (min ?? 0,
- * max ?? 100), enumChips entries must be unique members of the descriptor options
- * (≤32), stringList follows the shared entry rules, shallowObject leaves must match
- * their field schemas (null leaf = field unset), modelCatalog bounds the alias
- * charset/count and the model/reasoning shapes (null entry = delete marker). null
- * (remove op / 恢复默认) is always valid.
+ * max ?? 100), enum kind accepts listed options only, enumChips entries must be unique
+ * members of the descriptor options (≤32), stringList follows the shared entry rules,
+ * orderedList follows the ordered entry rules (1–64 unique trimmed non-empty ≤64-char
+ * entries), shallowObject leaves must match their field schemas (null leaf = field
+ * unset), modelCatalog bounds the alias charset/count and the model/reasoning shapes
+ * (null entry = delete marker). null (remove op / 恢复默认) is always valid.
  */
 export function isValidOmoMiscValue(setting: OmoMiscSetting, value: unknown): boolean {
   if (value === null) {
@@ -165,6 +172,8 @@ export function isValidOmoMiscValue(setting: OmoMiscSetting, value: unknown): bo
       const max = setting.max ?? 100;
       return typeof value === "number" && Number.isInteger(value) && value >= min && value <= max;
     }
+    case "enum":
+      return typeof value === "string" && (setting.options ?? []).includes(value);
     case "enumChips": {
       if (!Array.isArray(value) || value.length > ENUM_CHIPS_MAX_ENTRIES) {
         return false;
@@ -181,6 +190,8 @@ export function isValidOmoMiscValue(setting: OmoMiscSetting, value: unknown): bo
     }
     case "stringList":
       return isValidStringListValue(value);
+    case "orderedList":
+      return isValidOrderedStringListValue(value);
     case "shallowObject": {
       if (!isRecord(value)) {
         return false;

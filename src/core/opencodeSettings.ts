@@ -21,6 +21,9 @@ const DISABLED_PROVIDERS_MAX_ENTRIES = 64;
 /** Bounds of the stringList kind (design: 1–16 entries, each trimmed non-empty ≤256 chars). */
 const STRING_LIST_MAX_ENTRIES = 16;
 const STRING_LIST_ENTRY_MAX_LENGTH = 256;
+/** Bounds of the orderedList kind (design: 1–64 entries, each trimmed non-empty ≤64 chars, dupes rejected). */
+const ORDERED_LIST_MAX_ENTRIES = 64;
+const ORDERED_LIST_ENTRY_MAX_LENGTH = 64;
 /** Bounds of the mcpServers kind: server names share the provider-id charset, capped at 32 entries. */
 const MCP_NAME_PATTERN = /^[A-Za-z0-9._-]+$/;
 const MCP_NAME_MAX_LENGTH = 64;
@@ -70,8 +73,8 @@ function coerceReadValue(setting: OpencodeSetting, value: unknown): OpencodeSett
     case "number":
       return typeof value === "number" && Number.isFinite(value) ? value : null;
     case "providers":
-      return Array.isArray(value) && value.every((entry) => typeof entry === "string") ? value : null;
     case "stringList":
+    case "orderedList":
       return Array.isArray(value) && value.every((entry) => typeof entry === "string") ? value : null;
     case "shallowObject":
       return extractShallowObjectValue(setting.fields ?? [], value);
@@ -237,8 +240,9 @@ export function opencodeSettingEdits(setting: OpencodeSetting, value: OpencodeSe
  * injection): model ids must be provider/model, enums must be listed options, tristate
  * is true|false|"notify", booleans are booleans, strings are 1..OPENCODE_STRING_VALUE_MAX_LENGTH
  * chars (file:"tui" strings use isValidTuiTheme instead), numbers are finite and within
- * the descriptor bounds (decimals allowed — no integer flag at this level), providers are
- * ≤64 unique well-formed ids, stringList is 1–16 unique trimmed non-empty ≤256-char
+ * the descriptor bounds (integers only when the descriptor is integer-flagged; decimals
+ * allowed otherwise), providers are ≤64 unique well-formed ids, stringList is 1–16 unique
+ * trimmed non-empty ≤256-char entries, orderedList is 1–64 unique trimmed non-empty ≤64-char
  * entries, shallowObject leaves must match their field schemas (null leaf = field
  * unset), permissionTools keys must
  * be known tools with allow/ask/deny (or null), mcpServers is ≤32 well-formed names
@@ -265,6 +269,9 @@ export function isValidOpencodeSettingValue(setting: OpencodeSetting, value: unk
       if (typeof value !== "number" || !Number.isFinite(value)) {
         return false;
       }
+      if (setting.integer === true && !Number.isInteger(value)) {
+        return false;
+      }
       return value >= (setting.min ?? Number.NEGATIVE_INFINITY) && value <= (setting.max ?? Number.POSITIVE_INFINITY);
     }
     case "providers": {
@@ -285,6 +292,8 @@ export function isValidOpencodeSettingValue(setting: OpencodeSetting, value: unk
     }
     case "stringList":
       return isValidStringListValue(value);
+    case "orderedList":
+      return isValidOrderedStringListValue(value);
     case "shallowObject": {
       if (!isRecord(value)) {
         return false;
@@ -334,10 +343,16 @@ export function isValidOpencodeSettingValue(setting: OpencodeSetting, value: unk
   }
 }
 
-/** One shallowObject leaf against its field schema: bool, or a finite number within bounds (integer-only when flagged). */
+/**
+ * One shallowObject leaf against its field schema: bool, a listed enum option, or a
+ * finite number within bounds (integer-only when flagged).
+ */
 export function isValidShallowObjectLeaf(field: OpencodeSettingField, value: unknown): boolean {
   if (field.kind === "boolean") {
     return typeof value === "boolean";
+  }
+  if (field.kind === "enum") {
+    return typeof value === "string" && (field.options ?? []).includes(value);
   }
   if (typeof value !== "number" || !Number.isFinite(value)) {
     return false;
@@ -351,9 +366,9 @@ export function isValidShallowObjectLeaf(field: OpencodeSettingField, value: unk
 /**
  * Extract the descriptor fields of a shallowObject raw value (shared by the OpenCode and
  * OMO read paths): non-objects → null; ONLY the descriptor fields are surfaced, and leaves
- * failing their field schema (kind, bounds, integer flag) degrade to null — reads stay
- * round-trippable through the write validator, so the UI never shows a value it cannot
- * commit back.
+ * failing their field schema (kind, options membership, bounds, integer flag) degrade to
+ * null — reads stay round-trippable through the write validator, so the UI never shows a
+ * value it cannot commit back.
  */
 export function extractShallowObjectValue(
   fields: readonly OpencodeSettingField[],
@@ -365,14 +380,17 @@ export function extractShallowObjectValue(
   const out: ShallowObjectValue = {};
   for (const field of fields) {
     const leaf = value[field.key];
-    out[field.key] = isValidShallowObjectLeaf(field, leaf) ? (leaf as boolean | number) : null;
+    out[field.key] = isValidShallowObjectLeaf(field, leaf) ? (leaf as boolean | number | string) : null;
   }
   return out;
 }
 
-/** Shared stringList entry rules (opencode instructions + OMO stringList kind): 1–16 unique trimmed non-empty ≤256-char entries. */
-export function isValidStringListValue(value: unknown): boolean {
-  if (!Array.isArray(value) || value.length < 1 || value.length > STRING_LIST_MAX_ENTRIES) {
+/**
+ * Shared entry rules of the list kinds: 1..maxEntries unique trimmed non-empty entries
+ * of ≤maxEntryLength chars (stringList and orderedList differ ONLY in these bounds).
+ */
+function isValidUniqueStringEntries(value: unknown, maxEntries: number, maxEntryLength: number): boolean {
+  if (!Array.isArray(value) || value.length < 1 || value.length > maxEntries) {
     return false;
   }
   const seen = new Set<string>();
@@ -381,7 +399,7 @@ export function isValidStringListValue(value: unknown): boolean {
       return false;
     }
     const trimmed = entry.trim();
-    if (trimmed.length === 0 || trimmed.length > STRING_LIST_ENTRY_MAX_LENGTH) {
+    if (trimmed.length === 0 || trimmed.length > maxEntryLength) {
       return false;
     }
     if (seen.has(trimmed)) {
@@ -390,4 +408,14 @@ export function isValidStringListValue(value: unknown): boolean {
     seen.add(trimmed);
   }
   return true;
+}
+
+/** Shared stringList entry rules (opencode instructions + OMO stringList kind): 1–16 unique trimmed non-empty ≤256-char entries. */
+export function isValidStringListValue(value: unknown): boolean {
+  return isValidUniqueStringEntries(value, STRING_LIST_MAX_ENTRIES, STRING_LIST_ENTRY_MAX_LENGTH);
+}
+
+/** orderedList entry rules (OMO agent_order): 1–64 unique trimmed non-empty ≤64-char entries — order carries meaning, dupes rejected. */
+export function isValidOrderedStringListValue(value: unknown): boolean {
+  return isValidUniqueStringEntries(value, ORDERED_LIST_MAX_ENTRIES, ORDERED_LIST_ENTRY_MAX_LENGTH);
 }
