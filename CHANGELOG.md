@@ -2,6 +2,13 @@
 
 > 版本与日期以 git 历史为准；0.8.0–0.14.0、0.16.x、0.18.0 等中间版本为本地打包、版本号未入库，相关变更归并入下一个入库版本。
 
+## 0.40.0 (2026-08-30)
+
+- **可视化配置第二批（P0 批次 + tui.json）**：OpenCode/OMO 选项卡新增 11 项配置与 5 个新描述符 kind（stringList/enumChips/shallowObject/permissionTools/modelCatalog）、6 个可复用控件（`webview-ui/src/controls/`）。设计方案见 `docs/plans/2026-08-30-visual-config-batch2-design.md`
+- **OpenCode 选项卡**：权限（全局简写 + 15 工具枚举，pattern 对象字节级保护与互斥禁用）、规则文件 `instructions` 列表编辑、MCP 服务器启用开关（快照 diff，仅切换 `enabled` 键、绝不整键删除）、上下文压缩 `compaction`、智能体扩展（build/plan 禁用与温度、general/explore 模型）、**TUI 主题（独立 tui.json 编辑面，opencode.json 零触碰）**
+- **OMO 选项卡**：智能体开关 `disabled_agents`（KNOWN_AGENTS chips）、模型别名目录 `models`（共享顶层键，omo/legacy 双目标顶层路由）、回退细参 `runtime_fallback` 5 字段、默认模式 `default_mode`、实验三件套（`disable_omo_env`/`aggressive_truncation`/`truncate_all_tool_outputs`）
+- **审查修复**：shallowObject 改按叶子 set/remove（修复编辑回退参数会静默删除同对象 `enabled` 键的数据丢失缺陷，并保留对象内注释与未知同类键）、`tui.json` 补入监视白名单（外部编辑可重推面板）、TUI 主题长度常量收口 `shared/protocol.ts`。测试：根套件 700、webview 134、e2e 62 checks 全绿
+
 ## 0.39.0 (2026-08-30)
 
 - **管理面板选项卡重构：四选项卡 → 六选项卡（OMO · OpenCode · 额度 · 设置 · 模板 · 技能）**。设计方案见 `docs/plans/2026-08-30-manager-tabs-omo-opencode-skills-design.md`（基于 oh-my-openagent `omo.schema.json` 与 opencode 官方 `config.json` schema 的配置项调研）
