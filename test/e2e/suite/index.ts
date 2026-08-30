@@ -547,8 +547,14 @@ interface OpencodeInitMessage {
   permission?: { shorthand?: unknown; tools?: Record<string, unknown>; advancedTools?: unknown[] };
   /** 终端界面 group face (batch 2): current tui.json theme + the tui.json path. */
   tui?: { theme?: unknown; path?: unknown };
-  /** 命令/格式化/LSP/MCP group read aggregates (batch 4 + the batch-5 mcp migration): one per recordEditor path root. */
-  records?: { command?: RecordAggregate; formatter?: RecordAggregate; lsp?: RecordAggregate; mcp?: RecordAggregate };
+  /** 命令/格式化/LSP/MCP/供应商/参考仓库 group read aggregates (batch 4 + batch-5 per-leaf migration): one per recordEditor path root; provider and references ride through unasserted. */
+  records?: {
+    command?: RecordAggregate;
+    formatter?: RecordAggregate;
+    lsp?: RecordAggregate;
+    mcp?: RecordAggregate;
+    provider?: RecordAggregate;
+  };
 }
 
 function opencodeInits(bridge: PanelBridge): OpencodeInitMessage[] {
@@ -1510,13 +1516,22 @@ function tests(): TestCase[] {
         // mcpEntries migration of the old mcpServers kind) are EXCLUDED from the
         // scalar values map — their data rides the payload's dedicated
         // tui/records fields (next test + the batch-4 section at the chain end).
-        const expected: Record<string, null> = {};
+        const expected: Record<string, unknown> = {};
         for (const setting of OPENCODE_SETTINGS) {
           if (setting.file !== undefined || setting.kind === "recordEditor" || setting.kind === "recordMaster") {
             continue;
           }
           expected[setting.key] = null;
         }
+        // Batch-6 exception: the fixture pre-seeds a `plugin` array for the tree-view
+        // plugin tests (test/fixtures/opencode.jsonc), so pluginEntries — a scalar-map
+        // kind since batch 6 — reads it through on boot. The exact array below mirrors
+        // the fixture; asserting it here also proves the pluginList read surfaces
+        // string entries (incl. the ~ path form) in the real boot path.
+        expected.pluginEntries = [
+          "~/.config/opencode/node_modules/oh-my-opencode/dist/index.js",
+          "@happycastle/opencode-openmemory@latest",
+        ];
         assert.deepEqual(boot.values, expected, "every OPENCODE_SETTINGS key must be present and null");
         // Batch 3: the six new descriptors are all scalar-map kinds (no file target,
         // no dedicated payload face), so the deepEqual above already pins them null —
@@ -1559,9 +1574,10 @@ function tests(): TestCase[] {
         );
         // Batch-5 migration: the batch-2 mcpServers toggle list is GONE — the mcp face
         // now rides the payload's records.mcp aggregate (mode/entries from the fixture
-        // seed). The read surfaces only the descriptor fields (type/url/command/enabled):
-        // the fixture's advanced `headers` object stays disk-only (write-side
-        // preservation pinned by the mcpEntries write-through test below).
+        // seed). The read surfaces only the descriptor fields — since batch 4 that
+        // includes the fixture's `headers` string map (a flat KEY→string leaf passes
+        // the stringMap kind), while other advanced keys would stay disk-only
+        // (write-side preservation pinned by the mcpEntries write-through test below).
         assert.deepEqual(
           boot.records?.mcp,
           {
@@ -1572,10 +1588,11 @@ function tests(): TestCase[] {
                 type: "remote",
                 url: "https://mcp.example.internal:8787/mcp",
                 enabled: true,
+                headers: { "x-api-key": "REDACTED-LOCAL-DEV" },
               },
             },
           },
-          "boot records.mcp must mirror the fixture's openmemory entry with descriptor fields only",
+          "boot records.mcp must mirror the fixture's openmemory entry with descriptor fields",
         );
         assert.equal(
           "mcp" in boot,
@@ -1707,10 +1724,11 @@ function tests(): TestCase[] {
         assert.ok(managerBridge, "manager panel must still be open from the previous step");
         const bridge = managerBridge;
         const opencodeJson = path.join(configDir, "opencode.json");
-        // The fixture's openmemory entry carries an advanced `headers` object — a key
-        // outside the descriptor fields. Every write below only touches names present
-        // in the posted value, so the whole openmemory block (headers included) must
-        // survive byte-identically (same protection contract as the lsp priority leaf).
+        // The fixture's openmemory entry carries a `headers` string map (a descriptor
+        // field since batch 4, but absent from every value posted below). Writes only
+        // touch names present in the posted value, so the whole openmemory block
+        // (headers included) must survive byte-identically (same protection contract
+        // as the lsp priority leaf).
         const snippetOf = (text: string): string => /"x-api-key"\s*:\s*"REDACTED-LOCAL-DEV"/.exec(text)?.[0] ?? "";
         const snippetBefore = snippetOf(fs.readFileSync(opencodeJson, "utf8"));
         assert.ok(snippetBefore.length > 0, "the fixture's openmemory headers leaf must be present before the writes");
