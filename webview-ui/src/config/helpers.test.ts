@@ -30,6 +30,25 @@ describe("groupOmoMiscSettings", () => {
     expect(keys).toHaveLength(OMO_MISC_SETTINGS.length);
     expect(new Set(keys).size).toBe(OMO_MISC_SETTINGS.length);
   });
+
+  it("pins the group-label sequence of the real OMO_MISC_SETTINGS in first-appearance order", () => {
+    // Late descriptors merge into earlier groups (团队模式/智能体开关), so the batch-3
+    // groups MCP 与命令/引擎后端/Git appear once at their first-appearance position.
+    const groups = groupOmoMiscSettings(OMO_MISC_SETTINGS);
+    expect(groups.map((g) => g.label)).toEqual([
+      "遥测",
+      "团队模式",
+      "实验特性",
+      "编排",
+      "稳定性",
+      "智能体开关",
+      "模型目录",
+      "默认模式",
+      "MCP 与命令",
+      "引擎后端",
+      "Git",
+    ]);
+  });
 });
 
 describe("effectiveOmoValue", () => {

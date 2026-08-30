@@ -14,6 +14,7 @@ import { SECTIONS, VARIANT_ORDER } from "../constants";
 import ChipsEditor from "../controls/ChipsEditor";
 import { isWideSettingKind } from "../controls/helpers";
 import ModelCatalogEditor from "../controls/ModelCatalogEditor";
+import OrderedListEditor from "../controls/OrderedListEditor";
 import ShallowObjectFields from "../controls/ShallowObjectFields";
 import StringListEditor from "../controls/StringListEditor";
 import { countConfigured, groupModelsByProvider, isKnownVariant, mergeRows, type ModelOption } from "../helpers";
@@ -183,8 +184,9 @@ function toModelCatalogValue(value: OmoSettingValue | undefined): ModelCatalogVa
 
 /**
  * One 功能设置 row: boolean → switch, number → draft-text input committing on
- * blur/Enter, composite kinds → the shared controls/ editors (every change commits
- * the whole descriptor value immediately through onApplyValue).
+ * blur/Enter, enum → 未设置+options select, composite kinds → the shared
+ * controls/ editors (every change commits the whole descriptor value immediately
+ * through onApplyValue).
  */
 function OmoSettingRow({
   setting,
@@ -261,6 +263,46 @@ function OmoSettingRow({
           disabled={pending}
           onChange={(next) => onApplyValue(setting, next, current ?? null)}
         />
+      );
+    }
+    if (setting.kind === "orderedList") {
+      const current = toStringListValue(value);
+      return (
+        <OrderedListEditor
+          value={current}
+          disabled={pending}
+          onChange={(next) => onApplyValue(setting, next, current ?? null)}
+        />
+      );
+    }
+    if (setting.kind === "enum") {
+      return (
+        <select
+          className="ctl"
+          aria-label={setting.label}
+          disabled={pending}
+          value={typeof value === "string" ? value : ""}
+          onChange={(e) => {
+            // Normalize both sides so choosing 未设置 on an already-unset key is a no-op.
+            const next = e.target.value;
+            const normalized = next === "" ? null : next;
+            if (normalized === (value ?? null)) {
+              return;
+            }
+            onApplyValue(setting, normalized, value ?? null);
+          }}
+        >
+          <option value="">未设置</option>
+          {(setting.options ?? []).map((option) => (
+            <option key={option} value={option}>
+              {option}
+            </option>
+          ))}
+          {/* A hand-edited value outside the documented options stays visible. */}
+          {typeof value === "string" && value !== "" && !(setting.options ?? []).includes(value) && (
+            <option value={value}>{value}</option>
+          )}
+        </select>
       );
     }
     if (setting.kind === "enumChips") {

@@ -13,6 +13,7 @@ import ChipsEditor from "../controls/ChipsEditor";
 import { isWideSettingKind, mcpToggleEdit, parseNumberFieldInput, permissionToolEdit } from "../controls/helpers";
 import type { PermissionAction } from "../controls/helpers";
 import McpToggleList from "../controls/McpToggleList";
+import OrderedListEditor from "../controls/OrderedListEditor";
 import PermissionEditor from "../controls/PermissionEditor";
 import ShallowObjectFields from "../controls/ShallowObjectFields";
 import StringListEditor from "../controls/StringListEditor";
@@ -240,13 +241,14 @@ export default function OpenCodeApp() {
   );
 
   /**
-   * Commit a number-kind draft (agent temperatures): decimals allowed, empty → null,
-   * out-of-bounds keeps the draft with the descriptor-bounds error.
+   * Commit a number-kind draft (agent temperatures, subagent depth): decimals allowed
+   * unless the descriptor sets integer, empty → null, out-of-bounds keeps the draft
+   * with the descriptor-bounds error.
    */
   const commitNumber = useCallback(
     (setting: OpencodeSetting, raw: string, prev: number | null) => {
       focusedKeyRef.current = null;
-      const parsed = parseNumberFieldInput(raw, { min: setting.min, max: setting.max });
+      const parsed = parseNumberFieldInput(raw, { min: setting.min, max: setting.max, integer: setting.integer });
       if (parsed.kind === "invalid") {
         setError(parsed.error);
         return;
@@ -554,6 +556,18 @@ export default function OpenCodeApp() {
         const current = toStringList(value);
         return (
           <StringListEditor
+            value={current}
+            disabled={isPending}
+            onChange={(next) => applySetting(setting, next, current ?? null)}
+          />
+        );
+      }
+      case "orderedList": {
+        // No OpenCode descriptor uses this kind yet (OMO agent_order does) — the kind
+        // union is shared, so the renderer stays complete for future descriptors.
+        const current = toStringList(value);
+        return (
+          <OrderedListEditor
             value={current}
             disabled={isPending}
             onChange={(next) => applySetting(setting, next, current ?? null)}

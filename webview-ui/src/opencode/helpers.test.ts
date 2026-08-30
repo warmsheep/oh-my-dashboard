@@ -34,6 +34,8 @@ describe("groupOpencodeSettings", () => {
       "上下文",
       "智能体",
       "终端界面",
+      "高级",
+      "终端与输出",
     ]);
     expect(groups[0]?.settings.map((s) => s.key)).toEqual(["model", "smallModel", "agentBuildModel", "agentPlanModel"]);
     expect(groups[1]?.settings.map((s) => s.key)).toEqual(["defaultAgent", "share", "autoupdate", "snapshot"]);
@@ -47,6 +49,8 @@ describe("groupOpencodeSettings", () => {
       "agentGeneralModel",
       "agentExploreModel",
     ]);
+    expect(groups[9]?.settings.map((s) => s.key)).toEqual(["logLevel", "shell", "subagentDepth", "watcherIgnore"]);
+    expect(groups[10]?.settings.map((s) => s.key)).toEqual(["toolOutput", "attachmentImage"]);
   });
 
   it("covers every OPENCODE_SETTINGS descriptor exactly once", () => {
