@@ -130,7 +130,13 @@ export type ExtToWebview =
   | {
       type: "configModelSaved";
       payload: { ok: boolean; section: "agents" | "categories"; name: string; error?: string };
-    };
+    }
+  /** OpenCode tab boot payload AND external-change push (boot + watcher-driven re-sync + post-write re-push). */
+  | { type: "opencodeInit"; payload: OpencodeSettingsPayload }
+  /** Reply to opencodeSetSetting: ok echoes the key, !ok carries the friendly Chinese message. */
+  | { type: "opencodeSettingSaved"; payload: { ok: boolean; key: string; error?: string } }
+  /** Reply to omoSetSetting: ok echoes the key, !ok carries the friendly Chinese message. */
+  | { type: "omoSettingSaved"; payload: { ok: boolean; key: string; error?: string } };
 
 export type WebviewToExt =
   | { type: "ready" }
@@ -152,7 +158,11 @@ export type WebviewToExt =
   | {
       type: "configSetModel";
       payload: { section: "agents" | "categories"; name: string; model: string; variant: string | null };
-    };
+    }
+  /** OpenCode tab in-page edit: write (null = remove the key) one OPENCODE_SETTINGS entry into opencode.json[c]. */
+  | { type: "opencodeSetSetting"; payload: { key: string; value: OpencodeSettingValue } }
+  /** OMO tab feature-settings edit: write (null = remove the key) one OMO_MISC_SETTINGS entry into the agent config. */
+  | { type: "omoSetSetting"; payload: { key: string; value: boolean | number | null } };
 
 // ---------------------------------------------------------------------------
 // Quota view contract — data shapes consumed by BOTH the extension host
@@ -205,8 +215,12 @@ export const QUOTA_PROVIDER_IDS: readonly QuotaProviderId[] = ["kimi", "glm", "m
  */
 export type QuotaVisibility = Record<QuotaProviderId, boolean>;
 
-/** Manager page tabs — the config view, preset editor, quota view, and settings view live in one panel. */
-export type ManagerTab = "config" | "preset" | "quota" | "settings";
+/**
+ * Manager page tabs (display order: OMO · OpenCode · 额度 · 设置 · 模板 · 技能). The "config"
+ * id KEEPS its historical name — persisted webview state and e2e assertions depend on it;
+ * only its display label changes to OMO. "skills" data rides configInit (no own channel).
+ */
+export type ManagerTab = "config" | "opencode" | "quota" | "settings" | "preset" | "skills";
 
 /** Switch the manager page to a tab; focusProvider scrolls one quota group into view. */
 export interface ManagerNavigatePayload {
@@ -427,4 +441,269 @@ export interface ConfigInitPayload {
   models: ModelOption[];
   skills: SkillSummary[];
   target: { kind: "omo" | "legacy"; path: string };
+  /** Current OMO misc feature values (null = not set in file); powers the OMO tab's 功能设置 section. */
+  omo: OmoMiscValues;
+}
+
+// ---------------------------------------------------------------------------
+// OMO misc feature settings + OpenCode settings contracts — data-driven
+// descriptor tables shared by the webview renderers (OMO/OpenCode tabs) and the
+// host-side validators, so the key set, kinds and bounds can never drift
+// between the two halves. Same dual-consumer pattern as the quota shapes above.
+// ---------------------------------------------------------------------------
+
+/** One oh-my-openagent misc feature setting (OMO tab 功能设置 section). */
+export interface OmoMiscSetting {
+  key: string;
+  /** Key path inside the agent config, relative to the target's sectionPath prefix. */
+  path: string[];
+  kind: "boolean" | "number";
+  label: string;
+  hint?: string;
+  /** Chinese section label used to group rows in the OMO tab. */
+  group: string;
+  /** Inclusive integer bounds of the number kind (defaults: 0..100); single source for the host validator AND the webview pre-check. */
+  min?: number;
+  max?: number;
+  /** Runtime default shown when the file does not set the key (null in {@link OmoMiscValues}). */
+  default: boolean | number;
+}
+
+/**
+ * High-frequency oh-my-openagent feature toggles (paths are the SAME keys for the
+ * omo 5 `[opencode]` block and the legacy 4.x top level; only the sectionPath
+ * prefix differs — see core/omoSettings.ts).
+ */
+export const OMO_MISC_SETTINGS: readonly OmoMiscSetting[] = [
+  {
+    key: "telemetry",
+    path: ["telemetry"],
+    kind: "boolean",
+    label: "启用遥测",
+    hint: "关闭后不再上报匿名使用数据",
+    group: "遥测",
+    default: true,
+  },
+  {
+    key: "teamMode",
+    path: ["team_mode", "enabled"],
+    kind: "boolean",
+    label: "团队模式",
+    hint: "启用 oh-my-openagent 的 agent team 协作",
+    group: "团队模式",
+    default: false,
+  },
+  {
+    key: "teamTmuxVisualization",
+    path: ["team_mode", "tmux_visualization"],
+    kind: "boolean",
+    label: "团队模式可视化",
+    hint: "以 tmux 窗格展示 team 成员（需先安装 tmux）",
+    group: "团队模式",
+    default: false,
+  },
+  {
+    key: "tmuxEnabled",
+    path: ["tmux", "enabled"],
+    kind: "boolean",
+    label: "tmux 集成",
+    group: "团队模式",
+    default: false,
+  },
+  {
+    key: "hashlineEdit",
+    path: ["hashline_edit"],
+    kind: "boolean",
+    label: "行内编辑（hashline）",
+    group: "实验特性",
+    default: false,
+  },
+  {
+    key: "taskSystem",
+    path: ["experimental", "task_system"],
+    kind: "boolean",
+    label: "任务系统",
+    group: "实验特性",
+    default: false,
+  },
+  {
+    key: "sisyphusDisabled",
+    path: ["sisyphus_agent", "disabled"],
+    kind: "boolean",
+    label: "禁用 Sisyphus 编排",
+    group: "编排",
+    default: false,
+  },
+  {
+    key: "sisyphusPlanner",
+    path: ["sisyphus_agent", "planner_enabled"],
+    kind: "boolean",
+    label: "Sisyphus 规划器",
+    group: "编排",
+    default: true,
+  },
+  {
+    key: "sisyphusDefaultBuilder",
+    path: ["sisyphus_agent", "default_builder_enabled"],
+    kind: "boolean",
+    label: "Sisyphus 默认构建器",
+    group: "编排",
+    default: false,
+  },
+  {
+    key: "sisyphusReplacePlan",
+    path: ["sisyphus_agent", "replace_plan"],
+    kind: "boolean",
+    label: "Sisyphus 替换计划",
+    group: "编排",
+    default: true,
+  },
+  {
+    key: "sisyphusTdd",
+    path: ["sisyphus_agent", "tdd"],
+    kind: "boolean",
+    label: "Sisyphus 强制 TDD",
+    group: "编排",
+    default: true,
+  },
+  {
+    key: "runtimeFallback",
+    path: ["runtime_fallback", "enabled"],
+    kind: "boolean",
+    label: "运行时回退",
+    group: "稳定性",
+    default: false,
+  },
+  {
+    key: "backgroundConcurrency",
+    path: ["background_task", "defaultConcurrency"],
+    kind: "number",
+    label: "后台任务并发数",
+    hint: "0 = 不限",
+    group: "编排",
+    min: 0,
+    max: 100,
+    default: 5,
+  },
+];
+
+/** Current OMO misc values; null = the file does not set the key (UI shows the descriptor default). */
+export type OmoMiscValues = Record<string, boolean | number | null>;
+
+/** Max length of free-text opencode string settings (username); single source for the host validator AND the webview pre-check. */
+export const OPENCODE_STRING_VALUE_MAX_LENGTH = 64;
+
+/** One opencode.json setting visualized in the OpenCode tab. */
+export interface OpencodeSetting {
+  key: string;
+  /** Key path inside opencode.json[c]. */
+  path: string[];
+  kind: "model" | "enum" | "tristate" | "boolean" | "string" | "providers";
+  label: string;
+  hint?: string;
+  /** Selectable values for the enum kind. */
+  options?: string[];
+  /** Chinese section label used to group rows in the OpenCode tab (模型 / 行为 / 其他). */
+  group: string;
+  /** Documented default shown as a hint when the file does not set the key. */
+  default?: boolean | string;
+}
+
+/**
+ * High-frequency opencode.json keys (issue traffic + doc coverage). Deprecated keys
+ * (theme/keybinds/tui/layout/mode/autoshare) are deliberately absent — opencode
+ * silently drops them on load, so writing them is a no-op (design-doc red line).
+ */
+export const OPENCODE_SETTINGS: readonly OpencodeSetting[] = [
+  {
+    key: "model",
+    path: ["model"],
+    kind: "model",
+    label: "默认模型",
+    hint: "未单独指定模型时使用的全局模型",
+    group: "模型",
+  },
+  {
+    key: "smallModel",
+    path: ["small_model"],
+    kind: "model",
+    label: "小模型",
+    hint: "轻量后台任务（如标题生成）使用的模型",
+    group: "模型",
+  },
+  {
+    key: "defaultAgent",
+    path: ["default_agent"],
+    kind: "enum",
+    label: "默认智能体",
+    options: ["build", "plan"],
+    hint: "仅列内置 primary agent；自定义 primary agent 需在配置文件中手动填写",
+    group: "行为",
+  },
+  {
+    key: "share",
+    path: ["share"],
+    kind: "enum",
+    label: "会话分享",
+    options: ["manual", "auto", "disabled"],
+    group: "行为",
+  },
+  {
+    key: "autoupdate",
+    path: ["autoupdate"],
+    kind: "tristate",
+    label: "自动更新",
+    hint: "true=自动安装更新，false=关闭，notify=仅提醒",
+    group: "行为",
+  },
+  {
+    key: "snapshot",
+    path: ["snapshot"],
+    kind: "boolean",
+    label: "文件快照",
+    hint: "关闭后将无法撤销文件变更",
+    group: "行为",
+    default: true,
+  },
+  {
+    key: "username",
+    path: ["username"],
+    kind: "string",
+    label: "用户名",
+    group: "其他",
+  },
+  {
+    key: "disabledProviders",
+    path: ["disabled_providers"],
+    kind: "providers",
+    label: "禁用的供应商",
+    hint: "被禁用的供应商不再出现在模型选择中（优先于启用列表）",
+    group: "其他",
+  },
+  {
+    key: "agentBuildModel",
+    path: ["agent", "build", "model"],
+    kind: "model",
+    label: "build 智能体模型",
+    hint: "opencode 原生智能体覆写，与 OMO 的智能体配置是两套体系",
+    group: "模型",
+  },
+  {
+    key: "agentPlanModel",
+    path: ["agent", "plan", "model"],
+    kind: "model",
+    label: "plan 智能体模型",
+    hint: "opencode 原生智能体覆写，与 OMO 的智能体配置是两套体系",
+    group: "模型",
+  },
+];
+
+/** One OpenCode setting value; null = key absent (「未设置」→ remove edit). */
+export type OpencodeSettingValue = string | boolean | number | string[] | null;
+
+/** Boot/refresh payload of the OpenCode tab: current values + the config file path + model options. */
+export interface OpencodeSettingsPayload {
+  values: Record<string, OpencodeSettingValue>;
+  configPath: string;
+  models: ModelOption[];
 }
