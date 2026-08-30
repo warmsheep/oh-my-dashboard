@@ -25,9 +25,11 @@ import * as vscode from "vscode";
 import { CMD, TEST_BRIDGE } from "../../../src/constants";
 import { BackupService } from "../../../src/core/backupService";
 import { ConfigStore } from "../../../src/core/configStore";
-import { validate } from "../../../src/core/jsoncEditor";
+import { parseSafe, validate } from "../../../src/core/jsoncEditor";
 import { PresetService } from "../../../src/core/presetService";
 import type { JsoncError, Preset } from "../../../src/core/types";
+import { OPENCODE_SETTINGS } from "../../../src/shared/protocol";
+import type { ManagerTab } from "../../../src/shared/protocol";
 import { buildConfigTree, CURRENT_PRESET_BADGE } from "../../../src/tree/nodes";
 import type { BaseNode } from "../../../src/tree/nodes";
 
@@ -41,6 +43,13 @@ const WV_PRESET_RENAMED = "e2e-webview-r";
 
 /** Every command contributed in package.json (source of truth: src/constants.ts). */
 const COMMAND_IDS: readonly string[] = Object.values(CMD);
+
+/**
+ * The manager page's six tab ids — a value mirror of webview-ui's MANAGER_TABS
+ * (webview sources are not importable from this extension-host bundle), typed
+ * against the shared ManagerTab union so id drift fails compilation here too.
+ */
+const MANAGER_TAB_IDS: readonly ManagerTab[] = ["config", "opencode", "quota", "settings", "preset", "skills"];
 
 interface TestCase {
   name: string;
@@ -520,6 +529,53 @@ function settingsSavedReplies(bridge: PanelBridge): { ok: boolean }[] {
         typeof message.payload === "object" &&
         message.payload !== null &&
         typeof (message.payload as { ok?: unknown }).ok === "boolean",
+    )
+    .map((message) => message.payload);
+}
+
+// ---------------------------------------------------------------------------
+// OpenCode/OMO tab assertions — the two write-through setting channels ride the
+// SAME manager panel bridge (opencodeInit boot pushes + per-key saved replies).
+// ---------------------------------------------------------------------------
+
+/** Boot/refresh payload of the OpenCode tab (values keyed by OPENCODE_SETTINGS keys). */
+interface OpencodeInitMessage {
+  values: Record<string, unknown>;
+  configPath: string;
+  models: unknown[];
+}
+
+function opencodeInits(bridge: PanelBridge): OpencodeInitMessage[] {
+  return bridge.outbound
+    .filter(
+      (message): message is PanelMessage & { payload: OpencodeInitMessage } =>
+        message.type === "opencodeInit" &&
+        typeof message.payload === "object" &&
+        message.payload !== null &&
+        typeof (message.payload as OpencodeInitMessage).configPath === "string" &&
+        typeof (message.payload as OpencodeInitMessage).values === "object",
+    )
+    .map((message) => message.payload);
+}
+
+/** Saved-reply shape shared by opencodeSettingSaved / omoSettingSaved (key echo on !ok). */
+interface SettingSavedReply {
+  ok: boolean;
+  key?: string;
+  error?: string;
+}
+
+function settingSavedReplies(
+  bridge: PanelBridge,
+  type: "opencodeSettingSaved" | "omoSettingSaved",
+): SettingSavedReply[] {
+  return bridge.outbound
+    .filter(
+      (message): message is PanelMessage & { payload: SettingSavedReply } =>
+        message.type === type &&
+        typeof message.payload === "object" &&
+        message.payload !== null &&
+        typeof (message.payload as SettingSavedReply).ok === "boolean",
     )
     .map((message) => message.payload);
 }
@@ -1377,6 +1433,214 @@ function tests(): TestCase[] {
         );
       },
     },
+
+    // ---- Section 4c: OpenCode/OMO tab protocol (same manager panel bridge) ----
+    {
+      name: "OpenCode tab: boot opencodeInit carries all-null fresh values, the sandbox configPath and models",
+      fn: async () => {
+        assert.ok(managerBridge, "manager panel must still be open from the previous step");
+        const bridge = managerBridge;
+        // Boot push (ready handler): the always-mounted OpenCode tab body receives
+        // its channel regardless of the entry tab (this panel booted via editPreset).
+        await pollUntil(() => opencodeInits(bridge).length > 0, 20_000, "boot must push opencodeInit");
+        const boot = opencodeInits(bridge)[0];
+        // Fresh sandbox: the seeded fixture opencode.json sets none of the descriptors.
+        const expected: Record<string, null> = {};
+        for (const setting of OPENCODE_SETTINGS) {
+          expected[setting.key] = null;
+        }
+        assert.deepEqual(boot.values, expected, "every OPENCODE_SETTINGS key must be present and null");
+        assert.equal(
+          boot.configPath,
+          path.join(configDir, "opencode.json"),
+          "configPath must point into the sandbox config dir",
+        );
+        assert.ok(Array.isArray(boot.models) && boot.models.length > 0, "models must be a non-empty options array");
+      },
+    },
+    {
+      name: "opencodeSetSetting writes share:disabled, replies ok, re-pushes opencodeInit, disk follows",
+      fn: async () => {
+        assert.ok(managerBridge, "manager panel must still be open from the previous step");
+        const bridge = managerBridge;
+        const opencodeJson = path.join(configDir, "opencode.json");
+        const initsBefore = opencodeInits(bridge).length;
+
+        bridge.deliver({ type: "opencodeSetSetting", payload: { key: "share", value: "disabled" } });
+        await pollUntil(
+          () => settingSavedReplies(bridge, "opencodeSettingSaved").some((reply) => reply.ok && reply.key === "share"),
+          10_000,
+          "opencodeSetSetting(share) must produce an opencodeSettingSaved(ok:true) reply",
+        );
+        await pollUntil(
+          () =>
+            opencodeInits(bridge)
+              .slice(initsBefore)
+              .some((init) => init.values.share === "disabled"),
+          10_000,
+          "a refreshed opencodeInit carrying share:disabled must follow the write",
+        );
+
+        // The seeded fixture is REAL JSONC (trailing commas + tabs) — parse with the
+        // product's tolerance and prove the edit kept it parseable + preserved $schema.
+        assertNoJsoncErrors(opencodeJson);
+        const parsed = parseSafe<Record<string, unknown>>(fs.readFileSync(opencodeJson, "utf8")).value;
+        assert.ok(parsed !== null && !Array.isArray(parsed), "opencode.json must parse to an object");
+        assert.equal(parsed.share, "disabled", 'on-disk opencode.json must contain "share": "disabled"');
+        assert.equal(parsed.$schema, "https://opencode.ai/config.json", "the JSONC edit must preserve $schema");
+      },
+    },
+    {
+      name: "opencodeSetSetting null write removes the share key (恢复默认)",
+      fn: async () => {
+        assert.ok(managerBridge, "manager panel must still be open from the previous step");
+        const bridge = managerBridge;
+        const opencodeJson = path.join(configDir, "opencode.json");
+        const repliesBefore = settingSavedReplies(bridge, "opencodeSettingSaved").length;
+        const initsBefore = opencodeInits(bridge).length;
+
+        bridge.deliver({ type: "opencodeSetSetting", payload: { key: "share", value: null } });
+        await pollUntil(
+          () =>
+            settingSavedReplies(bridge, "opencodeSettingSaved")
+              .slice(repliesBefore)
+              .some((reply) => reply.ok && reply.key === "share"),
+          10_000,
+          "the null write must produce its own opencodeSettingSaved(ok:true) reply",
+        );
+        await pollUntil(
+          () =>
+            opencodeInits(bridge)
+              .slice(initsBefore)
+              .some((init) => init.values.share === null),
+          10_000,
+          "a refreshed opencodeInit carrying share:null must follow the removal",
+        );
+
+        assertNoJsoncErrors(opencodeJson);
+        const parsed = parseSafe<Record<string, unknown>>(fs.readFileSync(opencodeJson, "utf8")).value;
+        assert.ok(parsed !== null && !Array.isArray(parsed), "opencode.json must parse to an object");
+        assert.equal("share" in parsed, false, "the null write must remove the share key from disk");
+      },
+    },
+    {
+      name: "omoSetSetting writes teamMode:true to the legacy target, configInit re-push carries omo values",
+      fn: async () => {
+        assert.ok(managerBridge, "manager panel must still be open from the previous step");
+        const bridge = managerBridge;
+        const agentConfig = path.join(configDir, "oh-my-opencode.json");
+        const configInitsBefore = bridge.outbound.filter((message) => message.type === "configInit").length;
+
+        bridge.deliver({ type: "omoSetSetting", payload: { key: "teamMode", value: true } });
+        await pollUntil(
+          () => settingSavedReplies(bridge, "omoSettingSaved").some((reply) => reply.ok && reply.key === "teamMode"),
+          10_000,
+          "omoSetSetting(teamMode) must produce an omoSettingSaved(ok:true) reply",
+        );
+        await pollUntil(
+          () =>
+            bridge.outbound
+              .slice(configInitsBefore)
+              .some(
+                (message) =>
+                  message.type === "configInit" &&
+                  (message.payload as { omo?: { teamMode?: unknown } } | undefined)?.omo?.teamMode === true,
+              ),
+          10_000,
+          "a refreshed configInit carrying omo.teamMode:true must follow the write",
+        );
+
+        // Legacy target (the sandbox state the config-tab tests above also pin): the
+        // value lands at TOP-LEVEL team_mode.enabled — the omo [opencode]-block scope
+        // is covered by the omoSettings unit tests.
+        assertNoJsoncErrors(agentConfig);
+        const agent = JSON.parse(fs.readFileSync(agentConfig, "utf8")) as { team_mode?: { enabled?: unknown } };
+        assert.equal(
+          agent.team_mode?.enabled,
+          true,
+          "legacy oh-my-opencode.json must carry top-level team_mode.enabled",
+        );
+      },
+    },
+    {
+      name: "typed-but-invalid opencodeSetSetting/omoSetSetting get !ok key echoes, nothing written",
+      fn: async () => {
+        assert.ok(managerBridge, "manager panel must still be open from the previous step");
+        const bridge = managerBridge;
+        const opencodeJson = path.join(configDir, "opencode.json");
+        const agentConfig = path.join(configDir, "oh-my-opencode.json");
+        const opencodeBytesBefore = fs.readFileSync(opencodeJson);
+        const agentBytesBefore = fs.readFileSync(agentConfig);
+        const opencodeRepliesBefore = settingSavedReplies(bridge, "opencodeSettingSaved").length;
+        const omoRepliesBefore = settingSavedReplies(bridge, "omoSettingSaved").length;
+
+        bridge.deliver({ type: "opencodeSetSetting", payload: { key: "notAKey", value: "x" } });
+        bridge.deliver({ type: "omoSetSetting", payload: { key: "teamMode", value: "bogus" } });
+        await pollUntil(
+          () =>
+            settingSavedReplies(bridge, "opencodeSettingSaved")
+              .slice(opencodeRepliesBefore)
+              .some(
+                (reply) =>
+                  reply.ok === false && reply.key === "notAKey" && (reply.error ?? "").includes("格式无法识别"),
+              ),
+          10_000,
+          "unknown opencodeSetSetting key must produce a !ok reply echoing the key",
+        );
+        await pollUntil(
+          () =>
+            settingSavedReplies(bridge, "omoSettingSaved")
+              .slice(omoRepliesBefore)
+              .some(
+                (reply) =>
+                  reply.ok === false && reply.key === "teamMode" && (reply.error ?? "").includes("格式无法识别"),
+              ),
+          10_000,
+          "wrong-typed omoSetSetting value must produce a !ok reply echoing the key",
+        );
+        assert.ok(
+          fs.readFileSync(opencodeJson).equals(opencodeBytesBefore),
+          "a rejected opencodeSetSetting must not write opencode.json",
+        );
+        assert.ok(
+          fs.readFileSync(agentConfig).equals(agentBytesBefore),
+          "a rejected omoSetSetting must not write the agent config",
+        );
+      },
+    },
+    {
+      name: "tab navigation contract: navigate pushes stay within the six ids; boot feeds both new tab bodies",
+      fn: async () => {
+        assert.ok(managerBridge, "manager panel must still be open from the previous step");
+        const bridge = managerBridge;
+        // The opencode/skills tabs have NO command entry point (in-page tab bar only),
+        // so their managerNavigate path cannot be captured from the host side — the
+        // page-side acceptance of the two new ids is pinned by the webview-ui
+        // normalizeManagerTab unit tests. Host-side, this suite pins: every navigate
+        // push stays within the six-id union, and both new always-mounted tab bodies
+        // received their data channels at boot (opencodeInit / configInit.skills).
+        const navigateTabs = bridge.outbound
+          .filter((message) => message.type === "managerNavigate")
+          .map((message) => (message.payload as { tab?: unknown } | undefined)?.tab);
+        assert.ok(navigateTabs.length > 0, "the captured stream must contain managerNavigate pushes");
+        for (const tab of navigateTabs) {
+          assert.ok(
+            typeof tab === "string" && (MANAGER_TAB_IDS as readonly string[]).includes(tab),
+            `managerNavigate tab must stay within the six known ids, got: ${String(tab)}`,
+          );
+        }
+        assert.ok(opencodeInits(bridge).length > 0, "boot must have pushed opencodeInit for the OpenCode tab body");
+        const skillsFed = bridge.outbound.some((message) => {
+          if (message.type !== "configInit" || typeof message.payload !== "object" || message.payload === null) {
+            return false;
+          }
+          const skills = (message.payload as { skills?: { name?: unknown }[] }).skills;
+          return Array.isArray(skills) && skills.some((skill) => skill?.name === "e2e-skill");
+        });
+        assert.ok(skillsFed, "boot must have pushed configInit carrying the skills list for the 技能 tab body");
+      },
+    },
+
     {
       name: "webview cancel clears the preset session but keeps the manager panel open",
       fn: async () => {
