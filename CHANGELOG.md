@@ -2,6 +2,14 @@
 
 > 版本与日期以 git 历史为准；0.8.0–0.14.0、0.16.x、0.18.0 等中间版本为本地打包、版本号未入库，相关变更归并入下一个入库版本。
 
+## 0.45.0 (2026-08-30)
+
+- **自定义供应商 `models` 模型块可视化编辑**（取代 0.44.0 的「明示手写」不做项）：recordEditor 字段类型新增 **record**（一级嵌套 recordEditor，`RecordSchema` 名称规则与描述符根共用），供应商条目内可直接增删改模型定义——模型 id → 名称 / 上下文窗口 / 输出上限（整数 ≥1，条目上限 64）；`env`、`options.timeout` 与模型级高级叶子（`options`、`tool_call` 等）仍保持手写契约
+- **递归逐叶写入安全契约**：`recordEditorEdits` 增加字段 schema 分发，嵌套层沿用逐叶编辑——快照外的手写模型、被触碰模型内的手写高级叶子、未知字段键在 UI 编辑后一律幸存；null 子条目删单个模型、null 字段删整个 models 块、空对象零编辑
+- **读侧校验器对齐降级（评审修复）**：名称不合字符集的子条目（openrouter 风格 `vendor/model` 斜杠 id）与超上限条目从读取形态剔除，恢复模块「读取形态重发必过写校验」的往返契约——否则一个手写斜杠 id 会让整个供应商编辑器的任何提交被宿主以「设置请求格式无法识别」拒绝并回滚
+- **类型与判别收口**：`RecordEntryValue` 改为索引签名 interface 断开递归别名循环；`isValidRecordEditorShape` 抽取为类型谓词（宿主消息解析 + ConfigStore 双闸门自动覆盖嵌套值）；webview 侧 `isStringMapLeaf`/`isRecordEditorLeaf` 对称判别式收口 helpers.ts（联合类型加宽后消除强转）
+- 测试：根套件 935、webview 211 全绿（新增嵌套写入路径/往返幂等/手写幸存/读降级/斜杠 id 回归/65 上限/判别式等 13 用例）；QA 子代理全量审查（安全不变量全过、1 major + 3 minor 均闭环）
+
 ## 0.44.0 (2026-08-30)
 
 - **设置补齐批（官方文档对账）**：对照 oh-my-openagent GitHub 文档（dev 分支 schema `87e1e9e`）与 opencode.ai 官方 config schema，把两页设置中缺失的高频+中频配置全部补齐；8 个子批次均经「开发 → Oracle 审查 → 测试 → 修复」闭环。
