@@ -790,7 +790,7 @@ export function isPermissionToolsLocked(state: OpencodePermissionState): boolean
 }
 
 // ---------------------------------------------------------------------------
-// agentPairMap / agentTextMap kinds (OMO 覆写矩阵 / 提示词)
+// agentPairMap / agentTextMap kinds (OMO 智能体与提示词)
 // ---------------------------------------------------------------------------
 
 /** Live entry of one agentPairMap row (the value-side shape of AgentPairMapValue). */
@@ -891,7 +891,7 @@ export function parseAgentTextInput(
 }
 
 // ---------------------------------------------------------------------------
-// numberMap kind (OMO 编排 / 覆写矩阵)
+// numberMap kind (OMO 编排与后台任务 / 智能体与提示词)
 // ---------------------------------------------------------------------------
 
 /** Live row of a numberMap editor (null entries are deletion markers, not rows). */

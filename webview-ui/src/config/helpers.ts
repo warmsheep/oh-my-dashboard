@@ -1,4 +1,4 @@
-import type { OmoMiscSetting, PresetRow } from "@shared/protocol";
+import { OMO_SETTING_GROUP_ORDER, type OmoMiscSetting, type PresetRow } from "@shared/protocol";
 
 /** One 功能设置 sub-block: OMO_MISC_SETTINGS rows sharing the same group label. */
 export interface OmoSettingGroup {
@@ -6,20 +6,33 @@ export interface OmoSettingGroup {
   settings: OmoMiscSetting[];
 }
 
-/** Group OMO_MISC_SETTINGS by their group field, preserving first-appearance order. */
-export function groupOmoMiscSettings(settings: readonly OmoMiscSetting[]): OmoSettingGroup[] {
-  const groups: OmoSettingGroup[] = [];
+/**
+ * Group settings by their group field: listed groups follow the canonical
+ * groupOrder, unlisted groups trail after them in first-appearance order.
+ */
+export function groupOmoMiscSettings(
+  settings: readonly OmoMiscSetting[],
+  groupOrder: readonly string[] = OMO_SETTING_GROUP_ORDER,
+): OmoSettingGroup[] {
   const byLabel = new Map<string, OmoSettingGroup>();
   for (const setting of settings) {
-    let group = byLabel.get(setting.group);
+    const label = setting.group;
+    let group = byLabel.get(label);
     if (!group) {
-      group = { label: setting.group, settings: [] };
-      byLabel.set(setting.group, group);
-      groups.push(group);
+      group = { label, settings: [] };
+      byLabel.set(label, group);
     }
     group.settings.push(setting);
   }
-  return groups;
+  const ordered: OmoSettingGroup[] = [];
+  for (const label of groupOrder) {
+    const group = byLabel.get(label);
+    if (group) {
+      ordered.push(group);
+      byLabel.delete(label);
+    }
+  }
+  return [...ordered, ...byLabel.values()];
 }
 
 /**

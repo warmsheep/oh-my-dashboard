@@ -13,6 +13,7 @@ import type {
 import {
   AGENT_TEXT_MAX_LENGTH,
   isSharedShallowObjectParent,
+  KNOWN_AGENTS,
   OMO_MISC_SETTINGS,
   OPENCODE_MULTILINE_VALUE_MAX_LENGTH,
   OPENCODE_PERMISSION_TOOLS,
@@ -342,7 +343,7 @@ describe("permission partial-map semantics", () => {
 });
 
 // ---------------------------------------------------------------------------
-// agentPairMap / agentTextMap kinds (OMO 覆写矩阵 / 提示词)
+// agentPairMap / agentTextMap kinds (OMO 智能体与提示词)
 // ---------------------------------------------------------------------------
 
 describe("agentPairMap row ops", () => {
@@ -389,19 +390,7 @@ describe("agentPairMap row ops", () => {
     for (const key of ["agentUltrawork", "agentCompaction"]) {
       const found = OMO_MISC_SETTINGS.find((setting) => setting.key === key);
       expect(found?.kind).toBe("agentPairMap");
-      expect(found?.options).toEqual([
-        "hephaestus",
-        "oracle",
-        "librarian",
-        "explore",
-        "multimodal-looker",
-        "prometheus",
-        "metis",
-        "momus",
-        "atlas",
-        "sisyphus",
-        "sisyphus-junior",
-      ]);
+      expect(found?.options).toEqual([...KNOWN_AGENTS]);
       expect(found?.agents?.leafKey).toBe(key === "agentUltrawork" ? "ultrawork" : "compaction");
     }
   });
@@ -442,14 +431,14 @@ describe("agentTextMap row ops", () => {
     for (const key of ["agentPrompt", "agentPromptAppend"]) {
       const found = OMO_MISC_SETTINGS.find((setting) => setting.key === key);
       expect(found?.kind).toBe("agentTextMap");
-      expect(found?.options).toHaveLength(11);
+      expect(found?.options).toHaveLength(KNOWN_AGENTS.length);
       expect(found?.agents?.leafKey).toBe(key === "agentPrompt" ? "prompt" : "prompt_append");
     }
   });
 });
 
 // ---------------------------------------------------------------------------
-// numberMap kind + free-key map add-rows (OMO 编排 / 覆写矩阵 / 提示词)
+// numberMap kind + free-key map add-rows (OMO 编排与后台任务 / 智能体与提示词)
 // ---------------------------------------------------------------------------
 
 describe("identifierKeyError (free-key add-row validation)", () => {

@@ -23,39 +23,36 @@ function model(id: string, provider: string): ModelOption {
 }
 
 describe("groupOpencodeSettings", () => {
-  it("groups by the descriptor group field in first-appearance order", () => {
+  it("groups by the descriptor group field in the canonical group order", () => {
     const groups = groupOpencodeSettings(OPENCODE_SETTINGS);
     expect(groups.map((g) => g.label)).toEqual([
-      "模型",
-      "供应商",
+      "模型与供应商",
+      "智能体",
       "行为",
-      "其他",
       "权限",
       "规则文件",
-      "MCP 服务器",
-      "上下文",
-      "智能体",
-      "终端界面",
-      "高级",
+      "扩展与集成",
       "终端与输出",
-      "命令",
-      "插件",
-      "格式化",
-      "LSP",
-      "技能",
+      "高级",
       "实验特性",
     ]);
-    expect(groups[0]?.settings.map((s) => s.key)).toEqual(["model", "smallModel", "agentBuildModel", "agentPlanModel"]);
-    expect(groups[1]?.settings.map((s) => s.key)).toEqual(["providerEntries"]);
-    expect(groups[2]?.settings.map((s) => s.key)).toEqual(["defaultAgent", "share", "autoupdate", "snapshot"]);
-    expect(groups[3]?.settings.map((s) => s.key)).toEqual(["username", "disabledProviders", "enabledProviders"]);
-    expect(groups[4]?.settings.map((s) => s.key)).toEqual(["permissionShorthand", "permissionTools"]);
-    expect(groups[5]?.settings.map((s) => s.key)).toEqual(["instructions", "referenceEntries"]);
-    expect(groups[8]?.settings.map((s) => s.key)).toEqual([
+    expect(groups[0]?.settings.map((s) => s.key)).toEqual([
+      "model",
+      "smallModel",
+      "agentTitleModel",
+      "agentSummaryModel",
+      "agentCompactionModel",
+      "providerEntries",
+      "disabledProviders",
+      "enabledProviders",
+    ]);
+    expect(groups[1]?.settings.map((s) => s.key)).toEqual([
+      "agentBuildModel",
       "agentBuildDisable",
       "agentBuildTemperature",
       "agentBuildSteps",
       "agentBuildExtras",
+      "agentPlanModel",
       "agentPlanDisable",
       "agentPlanTemperature",
       "agentPlanSteps",
@@ -71,20 +68,36 @@ describe("groupOpencodeSettings", () => {
       "agentExploreDisable",
       "agentExploreExtras",
     ]);
-    expect(groups[10]?.settings.map((s) => s.key)).toEqual([
+    expect(groups[2]?.settings.map((s) => s.key)).toEqual([
+      "defaultAgent",
+      "share",
+      "autoupdate",
+      "snapshot",
+      "username",
+      "compaction",
+    ]);
+    expect(groups[3]?.settings.map((s) => s.key)).toEqual(["permissionShorthand", "permissionTools"]);
+    expect(groups[4]?.settings.map((s) => s.key)).toEqual(["instructions", "referenceEntries"]);
+    expect(groups[5]?.settings.map((s) => s.key)).toEqual([
+      "mcpEntries",
+      "command",
+      "pluginEntries",
+      "formatterMaster",
+      "formatterEntries",
+      "lspMaster",
+      "lspEntries",
+      "skillsPaths",
+      "skillsUrls",
+    ]);
+    expect(groups[6]?.settings.map((s) => s.key)).toEqual(["tuiTheme", "toolOutput", "attachmentImage"]);
+    expect(groups[7]?.settings.map((s) => s.key)).toEqual([
       "logLevel",
       "shell",
       "subagentDepth",
       "watcherIgnore",
       "serverConfig",
     ]);
-    expect(groups[11]?.settings.map((s) => s.key)).toEqual(["toolOutput", "attachmentImage"]);
-    expect(groups[12]?.settings.map((s) => s.key)).toEqual(["command"]);
-    expect(groups[13]?.settings.map((s) => s.key)).toEqual(["pluginEntries"]);
-    expect(groups[14]?.settings.map((s) => s.key)).toEqual(["formatterMaster", "formatterEntries"]);
-    expect(groups[15]?.settings.map((s) => s.key)).toEqual(["lspMaster", "lspEntries"]);
-    expect(groups[16]?.settings.map((s) => s.key)).toEqual(["skillsPaths", "skillsUrls"]);
-    expect(groups[17]?.settings.map((s) => s.key)).toEqual([
+    expect(groups[8]?.settings.map((s) => s.key)).toEqual([
       "expBatchTool",
       "expOpenTelemetry",
       "expDisablePasteSummary",

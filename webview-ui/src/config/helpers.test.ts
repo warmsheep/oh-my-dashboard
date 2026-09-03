@@ -9,19 +9,18 @@ function booleanSetting(key: string, group: string): OmoMiscSetting {
 }
 
 describe("groupOmoMiscSettings", () => {
-  it("groups by the group field preserving first-appearance order", () => {
-    const groups = groupOmoMiscSettings([
-      booleanSetting("a", "团队模式"),
-      booleanSetting("b", "遥测"),
-      booleanSetting("c", "团队模式"),
-    ]);
+  it("groups by the group field, preserving first-appearance order when no canonical order matches", () => {
+    const groups = groupOmoMiscSettings(
+      [booleanSetting("a", "团队模式"), booleanSetting("b", "遥测"), booleanSetting("c", "团队模式")],
+      [],
+    );
     expect(groups.map((g) => g.label)).toEqual(["团队模式", "遥测"]);
     expect(groups[0]?.settings.map((s) => s.key)).toEqual(["a", "c"]);
     expect(groups[1]?.settings.map((s) => s.key)).toEqual(["b"]);
   });
 
   it("returns an empty array for no settings", () => {
-    expect(groupOmoMiscSettings([])).toEqual([]);
+    expect(groupOmoMiscSettings([], [])).toEqual([]);
   });
 
   it("covers every OMO_MISC_SETTINGS descriptor exactly once", () => {
@@ -31,48 +30,47 @@ describe("groupOmoMiscSettings", () => {
     expect(new Set(keys).size).toBe(OMO_MISC_SETTINGS.length);
   });
 
-  it("pins the group-label sequence of the real OMO_MISC_SETTINGS in first-appearance order", () => {
-    // Late descriptors merge into earlier groups (团队模式/智能体开关), so the batch-3
-    // groups MCP 与命令/引擎后端/Git, the batch-5 groups 覆写矩阵/提示词/兼容层/
-    // 关键词/目标循环/工具链/通知, and the new-plan batch-1 group 记忆 appear once
-    // at their first-appearance position.
+  it("pins the group-label sequence of the real OMO_MISC_SETTINGS in the canonical group order", () => {
+    // The 2026-09 regroup collapsed 19 fragmented sections into 9 themed ones;
+    // unlisted groups (none today) would trail after 实验特性 in first-appearance order.
     const groups = groupOmoMiscSettings(OMO_MISC_SETTINGS);
     expect(groups.map((g) => g.label)).toEqual([
-      "遥测",
+      "模型与供应商",
+      "智能体与提示词",
+      "编排与后台任务",
+      "模式与目标",
       "团队模式",
+      "停用内置资源",
+      "工具与集成",
+      "稳定性与更新",
       "实验特性",
-      "编排",
-      "稳定性",
-      "智能体开关",
-      "模型目录",
-      "记忆",
-      "默认模式",
-      "MCP 与命令",
-      "引擎后端",
-      "Git",
-      "覆写矩阵",
-      "提示词",
-      "兼容层",
-      "关键词",
-      "目标循环",
-      "工具链",
-      "通知",
     ]);
   });
 
-  it("derives the batch-5 groups purely from descriptor data (kinds + row counts)", () => {
+  it("derives every group purely from descriptor data (kinds + row counts)", () => {
     const groups = groupOmoMiscSettings(OMO_MISC_SETTINGS);
-    const overrides = groups.find((g) => g.label === "覆写矩阵");
-    expect(overrides?.settings.map((s) => s.kind)).toEqual(["agentPairMap", "agentPairMap", "numberMap", "numberMap"]);
-    const prompts = groups.find((g) => g.label === "提示词");
-    expect(prompts?.settings.map((s) => s.kind)).toEqual(["agentTextMap", "agentTextMap", "agentTextMap"]);
+    const agentsAndPrompts = groups.find((g) => g.label === "智能体与提示词");
+    expect(agentsAndPrompts?.settings.map((s) => s.kind)).toEqual([
+      "enumChips",
+      "orderedList",
+      "agentPairMap",
+      "agentPairMap",
+      "numberMap",
+      "numberMap",
+      "agentTextMap",
+      "agentTextMap",
+      "agentTextMap",
+    ]);
     const expectedCounts: Record<string, number> = {
-      兼容层: 1,
-      关键词: 1,
-      目标循环: 1,
-      工具链: 4, // codegraph + monitorParams + i18nLocale + openclawEnabled (batch-2a)
-      通知: 1,
-      编排: 10, // 5 sisyphus booleans + backgroundConcurrency + defaultRunAgent + babysittingTimeout + the two numberMap concurrency maps
+      模型与供应商: 3,
+      智能体与提示词: 9,
+      编排与后台任务: 10, // 5 sisyphus booleans + backgroundConcurrency + defaultRunAgent + babysittingTimeout + the two numberMap concurrency maps
+      模式与目标: 3,
+      团队模式: 5,
+      停用内置资源: 6,
+      工具与集成: 10, // codegraph + monitorParams + i18nLocale + openclaw + claudeCode + memory + browser + websearch + gitMaster + ulwExecute
+      稳定性与更新: 6,
+      实验特性: 8,
     };
     for (const [label, count] of Object.entries(expectedCounts)) {
       expect(groups.find((g) => g.label === label)?.settings).toHaveLength(count);

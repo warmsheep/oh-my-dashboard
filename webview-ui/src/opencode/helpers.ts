@@ -1,5 +1,5 @@
 import type { ModelOption, OpencodeSetting, OpencodeSettingValue } from "@shared/protocol";
-import { OPENCODE_STRING_VALUE_MAX_LENGTH, TUI_THEME_MAX_LENGTH } from "@shared/protocol";
+import { OPENCODE_SETTING_GROUP_ORDER, OPENCODE_STRING_VALUE_MAX_LENGTH, TUI_THEME_MAX_LENGTH } from "@shared/protocol";
 
 import { parseBoundedStringInput } from "../controls/helpers";
 
@@ -16,11 +16,14 @@ export interface OpencodeSettingGroup {
 const FALLBACK_GROUP_LABEL = "其他";
 
 /**
- * Group OPENCODE_SETTINGS rows by their descriptor group field, preserving
- * first-appearance order (same derivation as the OMO tab's groupOmoMiscSettings).
+ * Group settings by their descriptor group field: listed groups follow the
+ * canonical groupOrder, unlisted (or unlabeled) groups trail after them in
+ * first-appearance order.
  */
-export function groupOpencodeSettings(settings: readonly OpencodeSetting[]): OpencodeSettingGroup[] {
-  const groups: OpencodeSettingGroup[] = [];
+export function groupOpencodeSettings(
+  settings: readonly OpencodeSetting[],
+  groupOrder: readonly string[] = OPENCODE_SETTING_GROUP_ORDER,
+): OpencodeSettingGroup[] {
   const byLabel = new Map<string, OpencodeSettingGroup>();
   for (const setting of settings) {
     const label = setting.group || FALLBACK_GROUP_LABEL;
@@ -28,11 +31,18 @@ export function groupOpencodeSettings(settings: readonly OpencodeSetting[]): Ope
     if (!group) {
       group = { label, settings: [] };
       byLabel.set(label, group);
-      groups.push(group);
     }
     group.settings.push(setting);
   }
-  return groups;
+  const ordered: OpencodeSettingGroup[] = [];
+  for (const label of groupOrder) {
+    const group = byLabel.get(label);
+    if (group) {
+      ordered.push(group);
+      byLabel.delete(label);
+    }
+  }
+  return [...ordered, ...byLabel.values()];
 }
 
 /** Selectable tristate options (select values are strings; "" means 未设置). */
