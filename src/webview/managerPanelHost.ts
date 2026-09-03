@@ -205,8 +205,8 @@ export function buildConfigInitPayload(deps: ManagerPanelDeps, skills?: SkillSum
 /**
  * Build the OpenCode tab boot payload: current settings values, the opencode.json[c]
  * path (displayed at the top of the tab), merged model options for the model
- * pickers, plus the read aggregates of the 权限 / 命令/格式化/LSP/MCP 服务器 groups
- * and the tui.json face (theme + path) powering the 终端界面 group. Exported so the
+ * pickers, plus the read aggregates of the 权限 / 扩展与集成/规则文件 groups
+ * and the tui.json face (theme + path) powering the 终端与输出 group. Exported so the
  * extension can feed {@link notifyManagerPanelOpencodeChanged} with a lazy provider.
  */
 export function buildOpencodeInitPayload(deps: ManagerPanelDeps): OpencodeSettingsPayload {
