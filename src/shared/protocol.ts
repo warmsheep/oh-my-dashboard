@@ -37,6 +37,8 @@ export const KNOWN_AGENTS: readonly string[] = [
   "atlas",
   "sisyphus",
   "sisyphus-junior",
+  // Official omo 5 agent list (oh-my-opencode-config.ts) also ships OpenCode-Builder.
+  "OpenCode-Builder",
 ];
 
 /** Canonical oh-my-openagent category names, in display order (see KNOWN_AGENTS). */
@@ -527,7 +529,7 @@ export const OMO_MISC_SETTINGS: readonly OmoMiscSetting[] = [
     kind: "boolean",
     label: "启用遥测",
     hint: "关闭后不再上报匿名使用数据",
-    group: "遥测",
+    group: "稳定性与更新",
     default: true,
   },
   {
@@ -577,7 +579,7 @@ export const OMO_MISC_SETTINGS: readonly OmoMiscSetting[] = [
     path: ["sisyphus_agent", "disabled"],
     kind: "boolean",
     label: "禁用 Sisyphus 编排",
-    group: "编排",
+    group: "编排与后台任务",
     default: false,
   },
   {
@@ -585,7 +587,7 @@ export const OMO_MISC_SETTINGS: readonly OmoMiscSetting[] = [
     path: ["sisyphus_agent", "planner_enabled"],
     kind: "boolean",
     label: "Sisyphus 规划器",
-    group: "编排",
+    group: "编排与后台任务",
     default: true,
   },
   {
@@ -593,7 +595,7 @@ export const OMO_MISC_SETTINGS: readonly OmoMiscSetting[] = [
     path: ["sisyphus_agent", "default_builder_enabled"],
     kind: "boolean",
     label: "Sisyphus 默认构建器",
-    group: "编排",
+    group: "编排与后台任务",
     default: false,
   },
   {
@@ -601,7 +603,7 @@ export const OMO_MISC_SETTINGS: readonly OmoMiscSetting[] = [
     path: ["sisyphus_agent", "replace_plan"],
     kind: "boolean",
     label: "Sisyphus 替换计划",
-    group: "编排",
+    group: "编排与后台任务",
     default: true,
   },
   {
@@ -609,7 +611,7 @@ export const OMO_MISC_SETTINGS: readonly OmoMiscSetting[] = [
     path: ["sisyphus_agent", "tdd"],
     kind: "boolean",
     label: "Sisyphus 强制 TDD",
-    group: "编排",
+    group: "编排与后台任务",
     default: true,
   },
   {
@@ -617,7 +619,7 @@ export const OMO_MISC_SETTINGS: readonly OmoMiscSetting[] = [
     path: ["runtime_fallback", "enabled"],
     kind: "boolean",
     label: "运行时回退",
-    group: "稳定性",
+    group: "稳定性与更新",
     default: false,
   },
   {
@@ -625,7 +627,7 @@ export const OMO_MISC_SETTINGS: readonly OmoMiscSetting[] = [
     path: ["runtime_fallback"],
     kind: "shallowObject",
     label: "回退细参",
-    group: "稳定性",
+    group: "稳定性与更新",
     fields: [
       { key: "max_fallback_attempts", kind: "number", label: "最大回退次数", min: 1, max: 20, integer: true },
       { key: "cooldown_seconds", kind: "number", label: "冷却秒数", min: 1, max: 3600, integer: true },
@@ -640,7 +642,7 @@ export const OMO_MISC_SETTINGS: readonly OmoMiscSetting[] = [
     kind: "boolean",
     label: "OMO 自动更新",
     hint: "关闭后不再自动检查 oh-my-openagent 更新",
-    group: "稳定性",
+    group: "稳定性与更新",
     default: true,
   },
   {
@@ -649,7 +651,7 @@ export const OMO_MISC_SETTINGS: readonly OmoMiscSetting[] = [
     kind: "boolean",
     label: "模型回退链",
     hint: "启用内置模型回退链（与运行时回退互补）",
-    group: "稳定性",
+    group: "稳定性与更新",
   },
   {
     key: "disabledAgents",
@@ -660,7 +662,7 @@ export const OMO_MISC_SETTINGS: readonly OmoMiscSetting[] = [
     options: [...KNOWN_AGENTS],
     label: "停用智能体",
     hint: "勾选的智能体将被停用",
-    group: "智能体开关",
+    group: "智能体与提示词",
   },
   {
     key: "omoModels",
@@ -669,7 +671,7 @@ export const OMO_MISC_SETTINGS: readonly OmoMiscSetting[] = [
     scope: "shared",
     label: "模型别名目录",
     hint: "别名可在智能体模型中直接引用（如 kimi-max）",
-    group: "模型目录",
+    group: "模型与供应商",
   },
   {
     key: "omoDisabledProviders",
@@ -677,7 +679,7 @@ export const OMO_MISC_SETTINGS: readonly OmoMiscSetting[] = [
     kind: "stringList",
     label: "停用供应商",
     hint: "从 oh-my-openagent 模型解析中剔除的供应商（区别于 opencode.json 侧同名键）",
-    group: "模型目录",
+    group: "模型与供应商",
   },
   {
     key: "modelCapabilities",
@@ -685,7 +687,7 @@ export const OMO_MISC_SETTINGS: readonly OmoMiscSetting[] = [
     kind: "shallowObject",
     label: "模型能力缓存",
     hint: "models.dev 能力数据的缓存与刷新",
-    group: "模型目录",
+    group: "模型与供应商",
     // Schema source_url (uri string) deliberately unexposed: shallowObject has no
     // plain-string FIELD kind — hand-write it in the config file.
     fields: [
@@ -706,7 +708,7 @@ export const OMO_MISC_SETTINGS: readonly OmoMiscSetting[] = [
     kind: "shallowObject",
     scope: "shared",
     label: "记忆系统",
-    group: "记忆",
+    group: "工具与集成",
     // Schema nested reflection/dream/etc. deliberately NOT exposed: shallowObject
     // only supports flat leaves.
     fields: [
@@ -719,7 +721,7 @@ export const OMO_MISC_SETTINGS: readonly OmoMiscSetting[] = [
     path: ["default_mode"],
     kind: "shallowObject",
     label: "默认模式",
-    group: "默认模式",
+    group: "模式与目标",
     fields: [
       { key: "ultrawork", kind: "boolean", label: "超级工作模式" },
       { key: "goal", kind: "boolean", label: "目标循环" },
@@ -787,7 +789,7 @@ export const OMO_MISC_SETTINGS: readonly OmoMiscSetting[] = [
     kind: "number",
     label: "后台任务并发数",
     hint: "0 = 不限",
-    group: "编排",
+    group: "编排与后台任务",
     min: 0,
     max: 100,
     default: 5,
@@ -799,7 +801,7 @@ export const OMO_MISC_SETTINGS: readonly OmoMiscSetting[] = [
     maxLen: 64,
     label: "默认 Run 智能体",
     hint: "run 命令默认使用的智能体名",
-    group: "编排",
+    group: "编排与后台任务",
   },
   {
     key: "babysittingTimeout",
@@ -807,7 +809,7 @@ export const OMO_MISC_SETTINGS: readonly OmoMiscSetting[] = [
     kind: "number",
     label: "保姆超时（毫秒）",
     hint: "不稳定智能体的监护超时",
-    group: "编排",
+    group: "编排与后台任务",
     // Schema carries no bounds (only default 120000); the number-kind validator
     // defaults to 0–100, so these ms bounds are a deliberate UI contract.
     min: 1000,
@@ -819,7 +821,7 @@ export const OMO_MISC_SETTINGS: readonly OmoMiscSetting[] = [
     path: ["background_task", "providerConcurrency"],
     kind: "numberMap",
     min: 0,
-    group: "编排",
+    group: "编排与后台任务",
     label: "供应商并发上限",
     hint: "按供应商名的并发限制（0 = 不限）",
   },
@@ -828,7 +830,7 @@ export const OMO_MISC_SETTINGS: readonly OmoMiscSetting[] = [
     path: ["background_task", "modelConcurrency"],
     kind: "numberMap",
     min: 0,
-    group: "编排",
+    group: "编排与后台任务",
     label: "模型并发上限",
     hint: "按模型名的并发限制（优先于供应商限制）",
   },
@@ -838,7 +840,7 @@ export const OMO_MISC_SETTINGS: readonly OmoMiscSetting[] = [
     kind: "enumChips",
     options: ["websearch", "context7", "grep_app", "lsp", "codegraph"],
     label: "停用内置 MCP",
-    group: "MCP 与命令",
+    group: "停用内置资源",
   },
   {
     key: "disabledCommands",
@@ -847,7 +849,7 @@ export const OMO_MISC_SETTINGS: readonly OmoMiscSetting[] = [
     options: ["goal", "refactor", "ulw-execute", "stop-continuation", "remove-ai-slops", "hyperplan"],
     label: "停用内置命令",
     hint: "命令名受 schema 严格枚举校验",
-    group: "MCP 与命令",
+    group: "停用内置资源",
   },
   {
     key: "disabledSkills",
@@ -855,7 +857,7 @@ export const OMO_MISC_SETTINGS: readonly OmoMiscSetting[] = [
     kind: "stringList",
     label: "停用技能",
     hint: "技能名列表",
-    group: "MCP 与命令",
+    group: "停用内置资源",
   },
   {
     key: "disabledHooks",
@@ -863,7 +865,7 @@ export const OMO_MISC_SETTINGS: readonly OmoMiscSetting[] = [
     kind: "stringList",
     label: "停用钩子",
     hint: "如 comment-checker、auto-update-checker 等",
-    group: "MCP 与命令",
+    group: "停用内置资源",
   },
   {
     key: "disabledTools",
@@ -871,7 +873,7 @@ export const OMO_MISC_SETTINGS: readonly OmoMiscSetting[] = [
     kind: "stringList",
     label: "停用工具",
     hint: "插件注册的工具名",
-    group: "MCP 与命令",
+    group: "停用内置资源",
   },
   {
     key: "mcpEnvAllowlist",
@@ -879,7 +881,7 @@ export const OMO_MISC_SETTINGS: readonly OmoMiscSetting[] = [
     kind: "stringList",
     label: "MCP 环境变量白名单",
     hint: "允许 MCP 收到的环境变量名（仅用户层配置生效）",
-    group: "MCP 与命令",
+    group: "停用内置资源",
   },
   {
     key: "browserAutomation",
@@ -887,7 +889,7 @@ export const OMO_MISC_SETTINGS: readonly OmoMiscSetting[] = [
     kind: "enum",
     options: ["playwright", "agent-browser", "dev-browser", "playwright-cli"],
     label: "浏览器自动化引擎",
-    group: "引擎后端",
+    group: "工具与集成",
   },
   {
     key: "websearchProvider",
@@ -895,33 +897,27 @@ export const OMO_MISC_SETTINGS: readonly OmoMiscSetting[] = [
     kind: "enum",
     options: ["exa", "tavily"],
     label: "网页搜索后端",
-    group: "引擎后端",
+    group: "工具与集成",
   },
   {
     key: "gitMaster",
     path: ["git_master"],
     kind: "shallowObject",
     label: "Git 提交署名",
-    group: "Git",
+    group: "工具与集成",
     fields: [
       { key: "commit_footer", kind: "boolean", label: "提交脚注", default: true },
       { key: "include_co_authored_by", kind: "boolean", label: "共同作者署名", default: true },
     ],
   },
   {
+    // Official schema (omo 5, oh-my-opencode-config.ts): start_work is DEPRECATED in
+    // favor of ulw_execute — only the ulwExecute row above is exposed.
     key: "ulwAutoCommit",
     path: ["ulw_execute", "auto_commit"],
     kind: "boolean",
     label: "ulw-execute 自动提交",
-    group: "Git",
-    default: true,
-  },
-  {
-    key: "startWorkAutoCommit",
-    path: ["start_work", "auto_commit"],
-    kind: "boolean",
-    label: "start-work 自动提交",
-    group: "Git",
+    group: "工具与集成",
     default: true,
   },
   {
@@ -993,7 +989,7 @@ export const OMO_MISC_SETTINGS: readonly OmoMiscSetting[] = [
     kind: "orderedList",
     label: "智能体顺序",
     hint: "未识别名称运行时忽略",
-    group: "智能体开关",
+    group: "智能体与提示词",
   },
   {
     key: "agentUltrawork",
@@ -1004,7 +1000,7 @@ export const OMO_MISC_SETTINGS: readonly OmoMiscSetting[] = [
     options: [...KNOWN_AGENTS],
     label: "超级工作覆写",
     hint: "按智能体覆写 ultrawork 模式的模型与推理强度",
-    group: "覆写矩阵",
+    group: "智能体与提示词",
   },
   {
     key: "agentCompaction",
@@ -1014,7 +1010,7 @@ export const OMO_MISC_SETTINGS: readonly OmoMiscSetting[] = [
     options: [...KNOWN_AGENTS],
     label: "压缩覆写",
     hint: "按智能体覆写压缩任务的模型与推理强度",
-    group: "覆写矩阵",
+    group: "智能体与提示词",
   },
   {
     key: "agentTemperature",
@@ -1025,7 +1021,7 @@ export const OMO_MISC_SETTINGS: readonly OmoMiscSetting[] = [
     options: [...KNOWN_AGENTS],
     min: 0,
     max: 2,
-    group: "覆写矩阵",
+    group: "智能体与提示词",
     label: "温度覆写",
     hint: "按智能体覆写采样温度（0–2，支持小数）",
   },
@@ -1036,7 +1032,7 @@ export const OMO_MISC_SETTINGS: readonly OmoMiscSetting[] = [
     agents: { leafKey: "temperature" },
     min: 0,
     max: 2,
-    group: "覆写矩阵",
+    group: "智能体与提示词",
     label: "分类温度",
     hint: "按分类覆写采样温度（0–2，支持小数；分类名为自由输入）",
   },
@@ -1048,7 +1044,7 @@ export const OMO_MISC_SETTINGS: readonly OmoMiscSetting[] = [
     options: [...KNOWN_AGENTS],
     label: "系统提示词",
     hint: "每智能体系统提示词（≤8000 字符）；file:// 引用请在文件中手写",
-    group: "提示词",
+    group: "智能体与提示词",
   },
   {
     key: "agentPromptAppend",
@@ -1058,7 +1054,7 @@ export const OMO_MISC_SETTINGS: readonly OmoMiscSetting[] = [
     options: [...KNOWN_AGENTS],
     label: "提示词追加",
     hint: "追加到系统提示词末尾的文本（≤8000 字符）",
-    group: "提示词",
+    group: "智能体与提示词",
   },
   {
     key: "categoryPromptAppend",
@@ -1067,7 +1063,7 @@ export const OMO_MISC_SETTINGS: readonly OmoMiscSetting[] = [
     agents: { leafKey: "prompt_append" },
     label: "分类提示词追加",
     hint: "追加到分类系统提示词末尾的文本（≤8000 字符；分类名为自由输入）",
-    group: "提示词",
+    group: "智能体与提示词",
   },
   {
     key: "claudeCode",
@@ -1075,7 +1071,7 @@ export const OMO_MISC_SETTINGS: readonly OmoMiscSetting[] = [
     kind: "shallowObject",
     label: "Claude Code 兼容层",
     hint: "关闭对应的 Claude Code 兼容层",
-    group: "兼容层",
+    group: "工具与集成",
     fields: [
       { key: "mcp", kind: "boolean", label: "MCP", default: true },
       { key: "commands", kind: "boolean", label: "命令", default: true },
@@ -1092,14 +1088,14 @@ export const OMO_MISC_SETTINGS: readonly OmoMiscSetting[] = [
     options: ["ultrawork", "team", "hyperplan", "hyperplan-ultrawork"],
     label: "关键词展开",
     hint: "勾选的关键词会在会话中被展开",
-    group: "关键词",
+    group: "模式与目标",
   },
   {
     key: "goalParams",
     path: ["goal"],
     kind: "shallowObject",
     label: "目标循环",
-    group: "目标循环",
+    group: "模式与目标",
     fields: [
       { key: "enabled", kind: "boolean", label: "启用" },
       { key: "auto_start", kind: "boolean", label: "自动开始" },
@@ -1119,7 +1115,7 @@ export const OMO_MISC_SETTINGS: readonly OmoMiscSetting[] = [
     path: ["codegraph"],
     kind: "shallowObject",
     label: "CodeGraph",
-    group: "工具链",
+    group: "工具与集成",
     fields: [
       { key: "auto_init", kind: "boolean", label: "自动初始化", default: true },
       { key: "auto_provision", kind: "boolean", label: "自动安装", default: true },
@@ -1132,7 +1128,7 @@ export const OMO_MISC_SETTINGS: readonly OmoMiscSetting[] = [
     path: ["monitor"],
     kind: "shallowObject",
     label: "监视器",
-    group: "工具链",
+    group: "工具与集成",
     // Other schema leaves (batch_*/ring/line/pattern) stay unexposed.
     fields: [
       { key: "enabled", kind: "boolean", label: "启用", default: false },
@@ -1164,7 +1160,7 @@ export const OMO_MISC_SETTINGS: readonly OmoMiscSetting[] = [
     maxLen: 16,
     label: "界面语言",
     hint: "如 en/zh，≤16 字符",
-    group: "工具链",
+    group: "工具与集成",
   },
   {
     key: "openclawEnabled",
@@ -1173,7 +1169,7 @@ export const OMO_MISC_SETTINGS: readonly OmoMiscSetting[] = [
     default: false,
     label: "OpenClaw 接入",
     hint: "启用外部网关接入（网关明细需在配置文件中手写）",
-    group: "工具链",
+    group: "工具与集成",
     // Schema gateways/hooks/replyListener are deep nested objects — deliberately
     // unexposed (shallowObject only supports flat leaves); edit them in the file.
   },
@@ -1183,13 +1179,30 @@ export const OMO_MISC_SETTINGS: readonly OmoMiscSetting[] = [
     kind: "boolean",
     label: "强制通知",
     hint: "无视运行环境强制启用通知",
-    group: "通知",
+    group: "稳定性与更新",
     default: false,
   },
 ];
 
 /** Current OMO misc values; null = the file does not set the key (UI shows the descriptor default). */
 export type OmoMiscValues = Record<string, OmoSettingValue>;
+
+/**
+ * Canonical section order of the OMO tab's 功能设置 groups (the 2026-09 regroup:
+ * 19 fragmented groups → 9 themed ones). Descriptors whose group is not listed
+ * trail after the listed groups in first-appearance order.
+ */
+export const OMO_SETTING_GROUP_ORDER: readonly string[] = [
+  "模型与供应商",
+  "智能体与提示词",
+  "编排与后台任务",
+  "模式与目标",
+  "团队模式",
+  "停用内置资源",
+  "工具与集成",
+  "稳定性与更新",
+  "实验特性",
+];
 
 /** Max length of free-text opencode string settings (username); single source for the host validator AND the webview pre-check. */
 export const OPENCODE_STRING_VALUE_MAX_LENGTH = 64;
@@ -1497,7 +1510,7 @@ export const OPENCODE_SETTINGS: readonly OpencodeSetting[] = [
     kind: "model",
     label: "默认模型",
     hint: "未单独指定模型时使用的全局模型",
-    group: "模型",
+    group: "模型与供应商",
   },
   {
     key: "smallModel",
@@ -1505,7 +1518,31 @@ export const OPENCODE_SETTINGS: readonly OpencodeSetting[] = [
     kind: "model",
     label: "小模型",
     hint: "轻量后台任务（如标题生成）使用的模型",
-    group: "模型",
+    group: "模型与供应商",
+  },
+  {
+    key: "agentTitleModel",
+    path: ["agent", "title", "model"],
+    kind: "model",
+    label: "标题生成模型",
+    hint: "会话标题生成智能体（官方内置）的模型覆写",
+    group: "模型与供应商",
+  },
+  {
+    key: "agentSummaryModel",
+    path: ["agent", "summary", "model"],
+    kind: "model",
+    label: "摘要生成模型",
+    hint: "会话摘要智能体（官方内置）的模型覆写",
+    group: "模型与供应商",
+  },
+  {
+    key: "agentCompactionModel",
+    path: ["agent", "compaction", "model"],
+    kind: "model",
+    label: "上下文压缩模型",
+    hint: "上下文压缩智能体（官方内置）的模型覆写",
+    group: "模型与供应商",
   },
   {
     key: "providerEntries",
@@ -1513,7 +1550,7 @@ export const OPENCODE_SETTINGS: readonly OpencodeSetting[] = [
     kind: "recordEditor",
     label: "自定义供应商",
     hint: "models 模型块已可视化（名称/限额）；env、options.timeout 与模型级高级字段仍需手写",
-    group: "供应商",
+    group: "模型与供应商",
     record: {
       fields: [
         { key: "name", kind: "text", label: "名称", hint: "展示名" },
@@ -1568,7 +1605,7 @@ export const OPENCODE_SETTINGS: readonly OpencodeSetting[] = [
     kind: "string",
     label: "默认智能体",
     maxLen: 64,
-    hint: "任意 primary 智能体名（如 build、plan 或自定义）；无效时回退 build",
+    hint: "primary 智能体名；OMO 环境用 sisyphus（build/plan 会被降级为 subagent 不可选）；原生环境如 build；无效时回退 build",
     group: "行为",
   },
   {
@@ -1601,7 +1638,7 @@ export const OPENCODE_SETTINGS: readonly OpencodeSetting[] = [
     path: ["username"],
     kind: "string",
     label: "用户名",
-    group: "其他",
+    group: "行为",
   },
   {
     key: "disabledProviders",
@@ -1609,7 +1646,7 @@ export const OPENCODE_SETTINGS: readonly OpencodeSetting[] = [
     kind: "providers",
     label: "禁用的供应商",
     hint: "被禁用的供应商不再出现在模型选择中（优先于启用列表）",
-    group: "其他",
+    group: "模型与供应商",
   },
   {
     key: "enabledProviders",
@@ -1617,23 +1654,7 @@ export const OPENCODE_SETTINGS: readonly OpencodeSetting[] = [
     kind: "providers",
     label: "启用的供应商",
     hint: "白名单：设置后仅这些供应商可用（与禁用列表互斥时以禁用为准）",
-    group: "其他",
-  },
-  {
-    key: "agentBuildModel",
-    path: ["agent", "build", "model"],
-    kind: "model",
-    label: "build 智能体模型",
-    hint: "opencode 原生智能体覆写，与 OMO 的智能体配置是两套体系",
-    group: "模型",
-  },
-  {
-    key: "agentPlanModel",
-    path: ["agent", "plan", "model"],
-    kind: "model",
-    label: "plan 智能体模型",
-    hint: "opencode 原生智能体覆写，与 OMO 的智能体配置是两套体系",
-    group: "模型",
+    group: "模型与供应商",
   },
   {
     key: "permissionShorthand",
@@ -1687,7 +1708,7 @@ export const OPENCODE_SETTINGS: readonly OpencodeSetting[] = [
     path: ["mcp"],
     kind: "recordEditor",
     label: "MCP 服务器",
-    group: "MCP 服务器",
+    group: "扩展与集成",
     record: {
       fields: [
         { key: "type", kind: "enum", label: "类型", options: ["local", "remote"], required: true },
@@ -1708,7 +1729,7 @@ export const OPENCODE_SETTINGS: readonly OpencodeSetting[] = [
     path: ["compaction"],
     kind: "shallowObject",
     label: "上下文压缩",
-    group: "上下文",
+    group: "行为",
     fields: [
       { key: "auto", kind: "boolean", label: "自动压缩", default: true },
       { key: "prune", kind: "boolean", label: "修剪旧消息", default: false },
@@ -1716,6 +1737,14 @@ export const OPENCODE_SETTINGS: readonly OpencodeSetting[] = [
       { key: "preserve_recent_tokens", kind: "number", label: "保留近期 Token", min: 0, integer: true },
       { key: "reserved", kind: "number", label: "压缩缓冲 Token", min: 0, integer: true },
     ],
+  },
+  {
+    key: "agentBuildModel",
+    path: ["agent", "build", "model"],
+    kind: "model",
+    label: "build 智能体模型",
+    hint: "opencode 原生智能体覆写，与 OMO 的智能体配置是两套体系",
+    group: "智能体",
   },
   {
     key: "agentBuildDisable",
@@ -1745,6 +1774,14 @@ export const OPENCODE_SETTINGS: readonly OpencodeSetting[] = [
     group: "智能体",
   },
   agentExtrasDescriptor("agentBuildExtras", "build"),
+  {
+    key: "agentPlanModel",
+    path: ["agent", "plan", "model"],
+    kind: "model",
+    label: "plan 智能体模型",
+    hint: "opencode 原生智能体覆写，与 OMO 的智能体配置是两套体系",
+    group: "智能体",
+  },
   {
     key: "agentPlanDisable",
     path: ["agent", "plan", "disable"],
@@ -1852,7 +1889,7 @@ export const OPENCODE_SETTINGS: readonly OpencodeSetting[] = [
     file: "tui",
     label: "TUI 主题",
     hint: "示例：opencode、catppuccin、tokyo-night；写入 tui.json",
-    group: "终端界面",
+    group: "终端与输出",
   },
   {
     key: "logLevel",
@@ -1933,7 +1970,7 @@ export const OPENCODE_SETTINGS: readonly OpencodeSetting[] = [
     path: ["command"],
     kind: "recordEditor",
     label: "自定义命令",
-    group: "命令",
+    group: "扩展与集成",
     record: {
       fields: [
         {
@@ -1944,7 +1981,9 @@ export const OPENCODE_SETTINGS: readonly OpencodeSetting[] = [
           hint: "支持 $ARGUMENTS 等模板变量",
         },
         { key: "description", kind: "text", label: "描述" },
-        { key: "agent", kind: "enum", label: "智能体", options: ["build", "plan", "general", "explore"] },
+        // Official schema: agent is a FREE string (any agent name incl. custom ones),
+        // so text — not the build/plan/general/explore enum the earlier version pinned.
+        { key: "agent", kind: "text", label: "智能体", hint: "如 build、plan 或自定义智能体名" },
         { key: "model", kind: "model", label: "模型" },
         { key: "subtask", kind: "boolean", label: "子代理任务", hint: "作为子代理任务运行" },
       ],
@@ -1956,7 +1995,7 @@ export const OPENCODE_SETTINGS: readonly OpencodeSetting[] = [
     kind: "pluginList",
     label: "插件列表",
     hint: "npm 包名，可带 @版本，支持本地路径（~/、file:// 前缀）；元组形式请在文件中手写",
-    group: "插件",
+    group: "扩展与集成",
   },
   {
     key: "formatterMaster",
@@ -1964,14 +2003,14 @@ export const OPENCODE_SETTINGS: readonly OpencodeSetting[] = [
     kind: "recordMaster",
     label: "内置格式化器",
     hint: "true=启用内置 false=全部关闭",
-    group: "格式化",
+    group: "扩展与集成",
   },
   {
     key: "formatterEntries",
     path: ["formatter"],
     kind: "recordEditor",
     label: "格式化器",
-    group: "格式化",
+    group: "扩展与集成",
     record: {
       fields: [
         { key: "disabled", kind: "boolean", label: "停用" },
@@ -1986,14 +2025,14 @@ export const OPENCODE_SETTINGS: readonly OpencodeSetting[] = [
     kind: "recordMaster",
     label: "内置语言服务器",
     hint: "true=启用内置 false=全部关闭",
-    group: "LSP",
+    group: "扩展与集成",
   },
   {
     key: "lspEntries",
     path: ["lsp"],
     kind: "recordEditor",
     label: "语言服务器",
-    group: "LSP",
+    group: "扩展与集成",
     record: {
       fields: [
         { key: "disabled", kind: "boolean", label: "停用" },
@@ -2008,7 +2047,7 @@ export const OPENCODE_SETTINGS: readonly OpencodeSetting[] = [
     kind: "stringList",
     label: "技能目录",
     hint: "额外的技能文件夹路径",
-    group: "技能",
+    group: "扩展与集成",
   },
   {
     key: "skillsUrls",
@@ -2016,7 +2055,7 @@ export const OPENCODE_SETTINGS: readonly OpencodeSetting[] = [
     kind: "stringList",
     label: "技能 URL",
     hint: "从 .well-known/skills/ 拉取技能的 URL",
-    group: "技能",
+    group: "扩展与集成",
   },
   // experimental.policies (array of policy objects) is deliberately NOT exposed:
   // no representable descriptor kind exists for object arrays; hand-edit the file instead.
@@ -2087,6 +2126,23 @@ export function isSharedShallowObjectParent(setting: OpencodeSetting): boolean {
   );
 }
 
+/**
+ * Canonical section order of the OpenCode tab's groups (the 2026-09 regroup:
+ * 18 fragmented groups → 9 themed ones). Same trailing rule as
+ * {@link OMO_SETTING_GROUP_ORDER}.
+ */
+export const OPENCODE_SETTING_GROUP_ORDER: readonly string[] = [
+  "模型与供应商",
+  "智能体",
+  "行为",
+  "权限",
+  "规则文件",
+  "扩展与集成",
+  "终端与输出",
+  "高级",
+  "实验特性",
+];
+
 /** One OpenCode setting value; null = key absent (「未设置」→ remove edit). */
 export type OpencodeSettingValue =
   string | boolean | number | null | StringListValue | ShallowObjectValue | PermissionToolsValue | RecordEditorValue;
@@ -2144,9 +2200,9 @@ export interface OpencodeSettingsPayload {
   models: ModelOption[];
   /** Permission aggregate (read path of the 权限 group; writes go through permissionTools/shorthand keys). */
   permission: OpencodePermissionState;
-  /** The standalone tui.json face: current theme + file path shown in the 终端界面 group. */
+  /** The standalone tui.json face: current theme + file path shown in the 终端与输出 group. */
   tui: { theme: string | null; path: string };
-  /** Record aggregates (read path of the 命令/格式化/LSP/MCP 服务器/参考仓库 groups; writes go through the record descriptors). */
+  /** Record aggregates (read path of the 扩展与集成/规则文件 groups; writes go through the record descriptors). */
   records: OpencodeRecordStates;
   /**
    * True when the raw `plugin` array holds entries the UI cannot express —

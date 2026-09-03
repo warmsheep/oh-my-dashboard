@@ -2,7 +2,12 @@ import { describe, expect, it } from "vitest";
 
 import { applyEdits, getValue } from "../../src/core/jsoncEditor";
 import { isValidOmoMiscValue, omoMiscEdits, readOmoMiscValues } from "../../src/core/omoSettings";
-import { KNOWN_AGENTS, OMO_MISC_SETTINGS, OMO_REASONING_LEVELS } from "../../src/shared/protocol";
+import {
+  KNOWN_AGENTS,
+  OMO_MISC_SETTINGS,
+  OMO_REASONING_LEVELS,
+  OMO_SETTING_GROUP_ORDER,
+} from "../../src/shared/protocol";
 import type { ModelCatalogValue, OmoMiscSetting, OmoSettingValue } from "../../src/shared/protocol";
 
 /** Descriptor lookup by key; throws on typos so a bad test key fails loudly. */
@@ -806,19 +811,13 @@ describe("batch-5 scalar/shallow descriptors (claude_code / keyword / goal / cod
     expect(getValue(removed, ["i18n", "locale"])).toBeUndefined();
   });
 
-  it("batch-5 group order is stable on first appearance (覆写矩阵 → 提示词 → 兼容层 → 关键词 → 目标循环 → 工具链 → 通知)", () => {
-    const groups: string[] = [];
-    for (const entry of OMO_MISC_SETTINGS) {
-      if (!groups.includes(entry.group)) {
-        groups.push(entry.group);
-      }
-    }
-    const batch5 = ["覆写矩阵", "提示词", "兼容层", "关键词", "目标循环", "工具链", "通知"];
-    expect(groups.slice(-batch5.length)).toEqual(batch5);
+  it("every descriptor group belongs to the canonical OMO_SETTING_GROUP_ORDER", () => {
+    const groups = new Set(OMO_MISC_SETTINGS.map((entry) => entry.group));
+    expect([...groups].sort()).toEqual([...OMO_SETTING_GROUP_ORDER].sort());
   });
 });
 
-describe("new-plan batch-1 scalars (稳定性 / 编排 / 实验特性 / Git)", () => {
+describe("new-plan batch-1 scalars (稳定性与更新 / 编排与后台任务 / 实验特性 / 工具与集成)", () => {
   it("autoUpdate / modelFallback (boolean): read present/absent/wrong-shape; edits set/remove at the plugin path", () => {
     const values = readOmoMiscValues(JSON.stringify({ "[opencode]": { auto_update: false, model_fallback: true } }), [
       "[opencode]",
@@ -968,28 +967,24 @@ describe("new-plan batch-1 scalars (稳定性 / 编排 / 实验特性 / Git)", (
     expect(getValue(emptied, ["[opencode]", "experimental", "task_system"])).toBe(true);
   });
 
-  it("ulwAutoCommit / startWorkAutoCommit: nested containers created on set; null removes the leaf", () => {
-    for (const [key, parent] of [
-      ["ulwAutoCommit", "ulw_execute"],
-      ["startWorkAutoCommit", "start_work"],
-    ] as const) {
-      const descriptor = setting(key);
-      expect(descriptor.path).toEqual([parent, "auto_commit"]);
-      expect(descriptor.kind).toBe("boolean");
-      expect(descriptor.default).toBe(true);
-      const values = readOmoMiscValues(JSON.stringify({ [parent]: { auto_commit: false } }), []);
-      expect(values[key]).toBe(false);
-      expect(readOmoMiscValues(JSON.stringify({ [parent]: { auto_commit: "no" } }), [])[key]).toBeNull();
-      expect(readOmoMiscValues("{}", [])[key]).toBeNull();
-      expect(isValidOmoMiscValue(descriptor, false)).toBe(true);
-      expect(isValidOmoMiscValue(descriptor, 0)).toBe(false);
+  it("ulwAutoCommit: nested containers created on set; null removes the leaf (deprecated start_work stays unexposed)", () => {
+    const descriptor = setting("ulwAutoCommit");
+    expect(descriptor.path).toEqual(["ulw_execute", "auto_commit"]);
+    expect(descriptor.kind).toBe("boolean");
+    expect(descriptor.default).toBe(true);
+    expect(OMO_MISC_SETTINGS.some((entry) => entry.key.includes("startWork"))).toBe(false);
+    const values = readOmoMiscValues(JSON.stringify({ ulw_execute: { auto_commit: false } }), []);
+    expect(values.ulwAutoCommit).toBe(false);
+    expect(readOmoMiscValues(JSON.stringify({ ulw_execute: { auto_commit: "no" } }), []).ulwAutoCommit).toBeNull();
+    expect(readOmoMiscValues("{}", []).ulwAutoCommit).toBeNull();
+    expect(isValidOmoMiscValue(descriptor, false)).toBe(true);
+    expect(isValidOmoMiscValue(descriptor, 0)).toBe(false);
 
-      const seeded = applyEdits("{}", omoMiscEdits(["[opencode]"], descriptor, false));
-      expect(getValue(seeded, ["[opencode]", parent, "auto_commit"])).toBe(false);
-      const removed = applyEdits(seeded, omoMiscEdits(["[opencode]"], descriptor, null));
-      expect(getValue(removed, ["[opencode]", parent, "auto_commit"])).toBeUndefined();
-      expect(getValue(removed, ["[opencode]", parent])).toEqual({});
-    }
+    const seeded = applyEdits("{}", omoMiscEdits(["[opencode]"], descriptor, false));
+    expect(getValue(seeded, ["[opencode]", "ulw_execute", "auto_commit"])).toBe(false);
+    const removed = applyEdits(seeded, omoMiscEdits(["[opencode]"], descriptor, null));
+    expect(getValue(removed, ["[opencode]", "ulw_execute", "auto_commit"])).toBeUndefined();
+    expect(getValue(removed, ["[opencode]", "ulw_execute"])).toEqual({});
   });
 });
 
@@ -1047,11 +1042,11 @@ describe("new-plan batch-1 memory (shared scope — top level for BOTH targets)"
 describe("new-plan batch-1 stringList descriptors (disabled_* / mcp_env_allowlist)", () => {
   it("metadata: five stringList descriptors at their plugin paths", () => {
     const expected = [
-      ["omoDisabledProviders", ["disabled_providers"], "模型目录"],
-      ["disabledSkills", ["disabled_skills"], "MCP 与命令"],
-      ["disabledHooks", ["disabled_hooks"], "MCP 与命令"],
-      ["disabledTools", ["disabled_tools"], "MCP 与命令"],
-      ["mcpEnvAllowlist", ["mcp_env_allowlist"], "MCP 与命令"],
+      ["omoDisabledProviders", ["disabled_providers"], "模型与供应商"],
+      ["disabledSkills", ["disabled_skills"], "停用内置资源"],
+      ["disabledHooks", ["disabled_hooks"], "停用内置资源"],
+      ["disabledTools", ["disabled_tools"], "停用内置资源"],
+      ["mcpEnvAllowlist", ["mcp_env_allowlist"], "停用内置资源"],
     ] as const;
     for (const [key, path, group] of expected) {
       const descriptor = setting(key);
@@ -1122,7 +1117,7 @@ describe("new-plan batch-2a (模型能力缓存 / 保姆超时 / OpenClaw / moni
     const descriptor = setting("modelCapabilities");
     expect(descriptor.path).toEqual(["model_capabilities"]);
     expect(descriptor.kind).toBe("shallowObject");
-    expect(descriptor.group).toBe("模型目录");
+    expect(descriptor.group).toBe("模型与供应商");
     expect(descriptor.scope).toBeUndefined();
     // Boolean defaults mirror the runtime gates (model-capabilities-status.ts):
     // both features only stop on an explicit `=== false`, so absence = active.
@@ -1204,7 +1199,7 @@ describe("new-plan batch-2a (模型能力缓存 / 保姆超时 / OpenClaw / moni
     const descriptor = setting("babysittingTimeout");
     expect(descriptor.path).toEqual(["babysitting", "timeout_ms"]);
     expect(descriptor.kind).toBe("number");
-    expect(descriptor.group).toBe("编排");
+    expect(descriptor.group).toBe("编排与后台任务");
     expect(descriptor.default).toBe(120000);
     expect(descriptor.min).toBe(1000);
     expect(descriptor.max).toBe(3600000);
@@ -1244,7 +1239,7 @@ describe("new-plan batch-2a (模型能力缓存 / 保姆超时 / OpenClaw / moni
     const descriptor = setting("openclawEnabled");
     expect(descriptor.path).toEqual(["openclaw", "enabled"]);
     expect(descriptor.kind).toBe("boolean");
-    expect(descriptor.group).toBe("工具链");
+    expect(descriptor.group).toBe("工具与集成");
     expect(descriptor.default).toBe(false);
     expect(readOmoMiscValues(JSON.stringify({ openclaw: { enabled: true } }), []).openclawEnabled).toBe(true);
     expect(readOmoMiscValues(JSON.stringify({ openclaw: { enabled: 1 } }), []).openclawEnabled).toBeNull();
@@ -1349,14 +1344,14 @@ describe("batch-2b numberMap kind (并发上限 / 温度覆写)", () => {
     expect(provider.min).toBe(0);
     expect(provider.max).toBeUndefined();
     expect(provider.agents).toBeUndefined();
-    expect(provider.group).toBe("编排");
+    expect(provider.group).toBe("编排与后台任务");
     expect(provider.label).toBe("供应商并发上限");
 
     const model = setting("modelConcurrency");
     expect(model.path).toEqual(["background_task", "modelConcurrency"]);
     expect(model.kind).toBe("numberMap");
     expect(model.min).toBe(0);
-    expect(model.group).toBe("编排");
+    expect(model.group).toBe("编排与后台任务");
 
     const agentTemp = setting("agentTemperature");
     expect(agentTemp.path).toEqual(["agents"]);
@@ -1365,7 +1360,7 @@ describe("batch-2b numberMap kind (并发上限 / 温度覆写)", () => {
     expect(agentTemp.options).toEqual([...KNOWN_AGENTS]);
     expect(agentTemp.min).toBe(0);
     expect(agentTemp.max).toBe(2);
-    expect(agentTemp.group).toBe("覆写矩阵");
+    expect(agentTemp.group).toBe("智能体与提示词");
 
     const categoryTemp = setting("categoryTemperature");
     expect(categoryTemp.path).toEqual(["categories"]);
@@ -1374,7 +1369,7 @@ describe("batch-2b numberMap kind (并发上限 / 温度覆写)", () => {
     expect(categoryTemp.options).toBeUndefined();
     expect(categoryTemp.min).toBe(0);
     expect(categoryTemp.max).toBe(2);
-    expect(categoryTemp.group).toBe("覆写矩阵");
+    expect(categoryTemp.group).toBe("智能体与提示词");
   });
 
   it("flat read: finite in-range numbers surface (decimals ok); non-numeric and out-of-range entries are skipped", () => {
@@ -1552,7 +1547,7 @@ describe("batch-2b categoryPromptAppend (free-key agentTextMap)", () => {
     expect(descriptor.path).toEqual(["categories"]);
     expect(descriptor.agents).toEqual({ leafKey: "prompt_append" });
     expect(descriptor.options).toBeUndefined();
-    expect(descriptor.group).toBe("提示词");
+    expect(descriptor.group).toBe("智能体与提示词");
     expect(descriptor.label).toBe("分类提示词追加");
   });
 

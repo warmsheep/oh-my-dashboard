@@ -111,6 +111,9 @@ describe("readOpencodeSettingValues", () => {
       enabledProviders: ["zhipuai"],
       agentBuildModel: "a/b",
       agentPlanModel: "c/d",
+      agentTitleModel: null,
+      agentSummaryModel: null,
+      agentCompactionModel: null,
       permissionShorthand: "ask",
       permissionTools: null, // string form → the payload permission aggregate carries it
       instructions: [".cursor/rules", "docs/guide.md"],
@@ -797,13 +800,13 @@ describe("batch-4 record kinds (readRecordState / readRecordStates)", () => {
     expect(state.entries.repair).toEqual({ description: "no template yet" });
   });
 
-  it("enum leaf outside the options and wrong-shaped stringList leaves are omitted on read", () => {
+  it("free-text agent leaf survives read (official schema allows any agent name); wrong-shaped stringList leaves are omitted", () => {
     const state = readRecordState(
-      JSON.stringify({ command: { x: { template: "t", agent: "bogus" } } }),
+      JSON.stringify({ command: { x: { template: "t", agent: "my-custom-agent" } } }),
       ["command"],
       commandFields,
     );
-    expect(state.entries.x).toEqual({ template: "t" });
+    expect(state.entries.x).toEqual({ template: "t", agent: "my-custom-agent" });
 
     const formatter = readRecordState(
       JSON.stringify({ formatter: { prettier: { command: ["npx", "prettier"], extensions: "ts", disabled: 1 } } }),
@@ -1014,9 +1017,10 @@ describe("recordEditor / recordMaster validation", () => {
     expect(isValidOpencodeSettingValue(command, { fix: { template: "t", description: "x".repeat(257) } })).toBe(false);
   });
 
-  it("recordEditor: enum ∈ options, model id shape, boolean leaves, unknown field keys rejected", () => {
+  it("recordEditor: text agent accepts any name, model id shape, boolean leaves, unknown field keys rejected", () => {
     expect(isValidOpencodeSettingValue(command, { fix: { template: "t", agent: "explore" } })).toBe(true);
-    expect(isValidOpencodeSettingValue(command, { fix: { template: "t", agent: "bogus" } })).toBe(false);
+    expect(isValidOpencodeSettingValue(command, { fix: { template: "t", agent: "my-custom-agent" } })).toBe(true);
+    expect(isValidOpencodeSettingValue(command, { fix: { template: "t", agent: 42 } })).toBe(false);
     expect(isValidOpencodeSettingValue(command, { fix: { template: "t", model: "zhipuai/glm-5" } })).toBe(true);
     expect(isValidOpencodeSettingValue(command, { fix: { template: "t", model: "bad" } })).toBe(false);
     expect(isValidOpencodeSettingValue(command, { fix: { template: "t", subtask: false } })).toBe(true);
@@ -2014,10 +2018,12 @@ describe("agent extras descriptors (智能体 per-agent customization)", () => {
   it("extras sit in the 智能体 group adjacent to their agent's rows (no reordering of existing rows)", () => {
     const group = OPENCODE_SETTINGS.filter((entry) => entry.group === "智能体").map((entry) => entry.key);
     expect(group).toEqual([
+      "agentBuildModel",
       "agentBuildDisable",
       "agentBuildTemperature",
       "agentBuildSteps",
       "agentBuildExtras",
+      "agentPlanModel",
       "agentPlanDisable",
       "agentPlanTemperature",
       "agentPlanSteps",
@@ -2033,6 +2039,28 @@ describe("agent extras descriptors (智能体 per-agent customization)", () => {
       "agentExploreDisable",
       "agentExploreExtras",
     ]);
+  });
+
+  it("title/summary/compaction: builtin background agents read and edit at agent.<name>.model", () => {
+    const rows = [
+      ["agentTitleModel", "title"],
+      ["agentSummaryModel", "summary"],
+      ["agentCompactionModel", "compaction"],
+    ] as const;
+    const values = readOpencodeSettingValues(JSON.stringify({ agent: { title: { model: "a/b" } } }));
+    expect(values.agentTitleModel).toBe("a/b");
+    expect(values.agentSummaryModel).toBeNull();
+    expect(values.agentCompactionModel).toBeNull();
+    for (const [key, name] of rows) {
+      const descriptor = setting(key);
+      expect(descriptor.path).toEqual(["agent", name, "model"]);
+      expect(isValidOpencodeSettingValue(descriptor, "a/b")).toBe(true);
+      expect(isValidOpencodeSettingValue(descriptor, "bad")).toBe(false);
+      const seeded = applyEdits("{}", opencodeSettingEdits(descriptor, "a/b"));
+      expect(JSON.parse(seeded)).toEqual({ agent: { [name]: { model: "a/b" } } });
+      const removed = applyEdits(seeded, opencodeSettingEdits(descriptor, null));
+      expect(JSON.parse(removed)).toEqual({ agent: { [name]: {} } });
+    }
   });
 });
 
@@ -2206,7 +2234,7 @@ describe("batch-8 providerEntries recordEditor (自定义供应商)", () => {
   it("descriptor pins the provider field vocabulary incl. the nested models record", () => {
     expect(descriptor.kind).toBe("recordEditor");
     expect(descriptor.path).toEqual(["provider"]);
-    expect(descriptor.group).toBe("供应商");
+    expect(descriptor.group).toBe("模型与供应商");
     expect(descriptor.label).toBe("自定义供应商");
     expect(descriptor.hint).toContain("models");
     expect(descriptor.record?.fields.map((field) => [field.key, field.kind])).toEqual([
@@ -2435,7 +2463,7 @@ describe("batch-6 pluginList (插件列表)", () => {
   it("descriptor pins the plugin row vocabulary", () => {
     expect(descriptor.kind).toBe("pluginList");
     expect(descriptor.path).toEqual(["plugin"]);
-    expect(descriptor.group).toBe("插件");
+    expect(descriptor.group).toBe("扩展与集成");
     expect(descriptor.label).toBe("插件列表");
     expect(descriptor.hint).toContain("@版本");
     expect(descriptor.hint).toContain("元组");
