@@ -2,6 +2,17 @@
 
 > 版本与日期以 git 历史为准；0.8.0–0.14.0、0.16.x、0.18.0 等中间版本为本地打包、版本号未入库，相关变更归并入下一个入库版本。
 
+## 0.46.1 (2026-09-01)
+
+- **「默认智能体」提示文案修正**：原 hint 举例 `build、plan`，但 oh-my-openagent（Sisyphus 启用）会把原生 build/plan 降级为 `mode: "subagent"`，此时把 `default_agent` 设为 build 会让 opencode 在每次内部 prompt 解析默认智能体时抛 `default agent "build" is a subagent`。新 hint 明确 OMO 环境应填 `sisyphus`、原生环境才用 `build`。
+
+## 0.46.0 (2026-09-01)
+
+- **设置页重排（描述符分组收敛）**：OMO 选项卡功能设置区 19 个碎片分组收敛为 9 个主题组（模型与供应商 → 智能体与提示词 → 编排与后台任务 → 模式与目标 → 团队模式 → 停用内置资源 → 工具与集成 → 稳定性与更新 → 实验特性），7 个单行组（遥测/记忆/默认模式/兼容层/关键词/目标循环/通知）就近归并；OpenCode 选项卡 18 组收敛为 9 组（模型与供应商 → 智能体 → 行为 → 权限 → 规则文件 → 扩展与集成 → 终端与输出 → 高级 → 实验特性），消除「其他」「终端界面」「命令/插件/MCP/格式化/LSP/技能」等碎片组。新增 `OMO_SETTING_GROUP_ORDER`/`OPENCODE_SETTING_GROUP_ORDER` 规范组序常量，`groupOmoMiscSettings`/`groupOpencodeSettings` 按其排序（未列出组按首现序垫后），零渲染协议改动；build/plan 智能体模型行物理搬至各自参数行旁，四个内置智能体的行序一致（模型/温度/步数/停用/扩展连续排列）。
+- **官方 schema 对账修正 4 处**（opencode.ai/config.json 与 oh-my-openagent dev 分支 omo.schema.json 逐键核对）：`command` 条目 `agent` 字段由 4 值枚举改为自由文本（官方为任意智能体名的 string，枚举会拒绝合法值）；`KNOWN_AGENTS` 补官方内置 `OpenCode-Builder`（omo5 官方 14 内置中唯一缺失）；删除已弃用的 `start_work.auto_commit` 行（官方弃用 → `ulw_execute`，与既有 ulw 行重复暴露）；新增 `agent.title/summary/compaction.model` 三个后台任务模型选择行（官方 7 内置智能体此前仅暴露 4 个）。
+- **核对结论**：两表 ~120 个暴露项的键名/类型/枚举/默认值与官方一致（share/autoupdate/compaction/experimental 全部子键、OMO disabled_commands/tmux.layout/browser_automation_engine/websearch 枚举、OMO_REASONING_LEVELS 词表等逐字吻合）；官方有而 UI 保持手写契约的项（`agent.variant`、顶层 `tools` 映射、`enterprise`、mcp oauth、`experimental.policies`、OMO `agent_definitions`/`comment_checker`/`memory.reflection` 深层等）与弃用键（`autoshare`/`mode`/`layout`/`reference`/`ralph_loop` 等）维持不暴露。
+- 测试：根套件 936、webview 211、e2e 77 checks 全绿；Oracle 实现后审查 7 关注面 Approve（分组机制/描述符驱动读写/自由文本字段/大写智能体名兼容/删除项无残留/分组一致性/文档）
+
 ## 0.45.0 (2026-08-30)
 
 - **自定义供应商 `models` 模型块可视化编辑**（取代 0.44.0 的「明示手写」不做项）：recordEditor 字段类型新增 **record**（一级嵌套 recordEditor，`RecordSchema` 名称规则与描述符根共用），供应商条目内可直接增删改模型定义——模型 id → 名称 / 上下文窗口 / 输出上限（整数 ≥1，条目上限 64）；`env`、`options.timeout` 与模型级高级叶子（`options`、`tool_call` 等）仍保持手写契约
