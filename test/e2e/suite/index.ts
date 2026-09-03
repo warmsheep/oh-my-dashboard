@@ -545,9 +545,9 @@ interface OpencodeInitMessage {
   models: unknown[];
   /** 权限 group read aggregate (batch 2): string shorthand + per-tool actions + pattern-object tools. */
   permission?: { shorthand?: unknown; tools?: Record<string, unknown>; advancedTools?: unknown[] };
-  /** 终端界面 group face (batch 2): current tui.json theme + the tui.json path. */
+  /** 终端与输出 group face: current tui.json theme + the tui.json path. */
   tui?: { theme?: unknown; path?: unknown };
-  /** 命令/格式化/LSP/MCP/供应商/参考仓库 group read aggregates (batch 4 + batch-5 per-leaf migration): one per recordEditor path root; provider and references ride through unasserted. */
+  /** recordEditor group read aggregates (扩展与集成/模型与供应商/规则文件) (batch 4 + batch-5 per-leaf migration): one per recordEditor path root; provider and references ride through unasserted. */
   records?: {
     command?: RecordAggregate;
     formatter?: RecordAggregate;
