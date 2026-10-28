@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
+  defaultOpencodeServicePaths,
   deriveRemainingPercent,
   formatQuotaBar,
   mergeProviderSnapshot,
@@ -592,6 +593,358 @@ describe("QuotaService.fetchAll — DeepSeek", () => {
   });
 });
 
+describe("QuotaService.fetchAll — OpenCode Go", () => {
+  const GO_USAGE = {
+    usage: {
+      rolling: { status: "ok", percent: 12.5, resetsAt: "2026-08-22T06:08:21Z" },
+      weekly: { status: "ok", percent: 40, resetsAt: "2026-08-25T00:00:00Z" },
+      monthly: { status: "rate-limited", percent: 100, resetsAt: 1787400622272 },
+    },
+  };
+
+  function opencodeEnv(
+    key: string | undefined,
+    response: () => Response = () => jsonRes(GO_USAGE),
+    entryId = "opencode",
+  ): { svc: QuotaService; calls: () => { url: string; headers: Record<string, string> }[] } {
+    const dir = tmpDir();
+    const auth: Record<string, { type: string; key?: string }> = {};
+    if (key !== undefined) {
+      auth[entryId] = { type: "api", key };
+    }
+    fs.writeFileSync(path.join(dir, "auth.json"), JSON.stringify(auth));
+    const calls: { url: string; headers: Record<string, string> }[] = [];
+    const fetchFn = async (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      calls.push({ url: String(url), headers: init?.headers as Record<string, string> });
+      return response();
+    };
+    return {
+      svc: new QuotaService({
+        authFilePath: path.join(dir, "auth.json"),
+        quotaConfigPath: path.join(dir, "quota.json"),
+        fetchFn,
+      }),
+      calls: () => calls,
+    };
+  }
+
+  it("maps the three Go meters to 5h/weekly/monthly windows as used percent", async () => {
+    const { svc, calls } = opencodeEnv("oc_sk_test");
+
+    const snap = await svc.fetchAll();
+    const oc = snap.providers.find((p) => p.providerId === "opencode")!;
+
+    expect(calls()).toHaveLength(1);
+    expect(calls()[0].url).toBe("https://opencode.ai/zen/go/v1/usage");
+    expect(calls()[0].headers.Authorization).toBe("Bearer oc_sk_test");
+    expect(oc.configured).toBe(true);
+    expect(oc.error).toBeNull();
+    expect(oc.plan).toBeNull();
+    expect(oc.balances).toBeNull();
+    expect(oc.windows.map((w) => [w.kind, w.usedPercent, w.remainingPercent])).toEqual([
+      ["5h", 12.5, 87.5],
+      ["weekly", 40, 60],
+      ["monthly", 100, 0],
+    ]);
+    expect(oc.windows.map((w) => w.resetAt)).toEqual([
+      "2026-08-22T06:08:21.000Z",
+      "2026-08-25T00:00:00.000Z",
+      "2026-08-22T12:10:22.272Z",
+    ]);
+  });
+
+  it("also accepts a credential filed under the opencode-go provider id", async () => {
+    const { svc } = opencodeEnv("oc_sk_go", undefined, "opencode-go");
+
+    const snap = await svc.fetchAll();
+    const oc = snap.providers.find((p) => p.providerId === "opencode")!;
+    expect(oc.configured).toBe(true);
+    expect(oc.windows).toHaveLength(3);
+  });
+
+  it("keeps a windowless payload (e.g. only weekly) renderable and skips missing meters", async () => {
+    const { svc } = opencodeEnv("oc_sk_test", () =>
+      jsonRes({ usage: { weekly: { status: "ok", percent: 7, resetsAt: "2026-08-25T00:00:00Z" } } }),
+    );
+
+    const snap = await svc.fetchAll();
+    const oc = snap.providers.find((p) => p.providerId === "opencode")!;
+    expect(oc.error).toBeNull();
+    expect(oc.windows.map((w) => w.kind)).toEqual(["weekly"]);
+    expect(oc.windows[0].remainingPercent).toBe(93);
+  });
+
+  it("treats 403 as a credential without a Go subscription: configured, no windows, no error", async () => {
+    const { svc } = opencodeEnv("oc_sk_nogo", () => jsonRes({ type: "error" }, 403));
+
+    const snap = await svc.fetchAll();
+    const oc = snap.providers.find((p) => p.providerId === "opencode")!;
+    expect(oc.configured).toBe(true);
+    expect(oc.error).toBeNull();
+    expect(oc.windows).toEqual([]);
+    expect(providerHasDisplayData(oc)).toBe(false);
+  });
+
+  it("surfaces HTTP failures (401 revoked key)", async () => {
+    const { svc } = opencodeEnv("oc_sk_bad", () => jsonRes({ type: "error" }, 401));
+
+    const snap = await svc.fetchAll();
+    const oc = snap.providers.find((p) => p.providerId === "opencode")!;
+    expect(oc.configured).toBe(true);
+    expect(oc.error).toBe("接口返回 HTTP 401");
+  });
+
+  it("is not configured when auth.json has no opencode key (no request sent)", async () => {
+    const { svc, calls } = opencodeEnv(undefined);
+
+    const snap = await svc.fetchAll();
+    const oc = snap.providers.find((p) => p.providerId === "opencode")!;
+    expect(oc.configured).toBe(false);
+    expect(calls()).toEqual([]);
+  });
+
+  it("falls back to the key pinned in this machine's opencode.jsonc (JSONC: comments + trailing commas)", async () => {
+    const dir = tmpDir();
+    fs.writeFileSync(path.join(dir, "auth.json"), JSON.stringify({}));
+    fs.writeFileSync(
+      path.join(dir, "opencode.jsonc"),
+      '// local config\n{\n  "provider": {\n    "opencode-go": { "options": { "apiKey": "oc_sk_cfg", }, },\n  },\n}\n',
+    );
+    const headers: Record<string, string>[] = [];
+    const svc = new QuotaService({
+      authFilePath: path.join(dir, "auth.json"),
+      quotaConfigPath: path.join(dir, "quota.json"),
+      opencodeConfigPath: path.join(dir, "opencode.jsonc"),
+      fetchFn: async (_url, init) => {
+        headers.push(init?.headers as Record<string, string>);
+        return jsonRes(GO_USAGE);
+      },
+    });
+
+    const snap = await svc.fetchAll();
+    const oc = snap.providers.find((p) => p.providerId === "opencode")!;
+    expect(headers).toHaveLength(1);
+    expect(headers[0].Authorization).toBe("Bearer oc_sk_cfg");
+    expect(oc.configured).toBe(true);
+    expect(oc.windows).toHaveLength(3);
+  });
+
+  it("prefers the auth.json key over a config-declared one", async () => {
+    const dir = tmpDir();
+    fs.writeFileSync(path.join(dir, "auth.json"), JSON.stringify({ opencode: { type: "api", key: "oc_sk_auth" } }));
+    fs.writeFileSync(
+      path.join(dir, "opencode.json"),
+      JSON.stringify({ provider: { opencode: { options: { apiKey: "oc_sk_cfg" } } } }),
+    );
+    const headers: Record<string, string>[] = [];
+    const svc = new QuotaService({
+      authFilePath: path.join(dir, "auth.json"),
+      quotaConfigPath: path.join(dir, "quota.json"),
+      opencodeConfigPath: path.join(dir, "opencode.json"),
+      fetchFn: async (_url, init) => {
+        headers.push(init?.headers as Record<string, string>);
+        return jsonRes(GO_USAGE);
+      },
+    });
+
+    await svc.fetchAll();
+    expect(headers[0].Authorization).toBe("Bearer oc_sk_auth");
+  });
+
+  it("stays unconfigured without a request when neither auth.json nor a readable config carries a key", async () => {
+    for (const configSeed of [undefined, "{ not valid jsonc", JSON.stringify({ provider: { opencode: {} } })]) {
+      const dir = tmpDir();
+      fs.writeFileSync(path.join(dir, "auth.json"), JSON.stringify({}));
+      if (configSeed !== undefined) {
+        fs.writeFileSync(path.join(dir, "opencode.json"), configSeed);
+      }
+      let calls = 0;
+      const svc = new QuotaService({
+        authFilePath: path.join(dir, "auth.json"),
+        quotaConfigPath: path.join(dir, "quota.json"),
+        opencodeConfigPath: path.join(dir, "opencode.json"),
+        fetchFn: async () => {
+          calls += 1;
+          return jsonRes(GO_USAGE);
+        },
+      });
+
+      const oc = (await svc.fetchAll()).providers.find((p) => p.providerId === "opencode")!;
+      expect(oc.configured).toBe(false);
+      expect(calls).toBe(0);
+    }
+  });
+
+  /** A local opencode service descriptor plus a fetch stub that answers both of its routes. */
+  function serviceEnv(
+    credentials: (url: string) => unknown,
+    options: { url?: string; password?: string; usageResponse?: () => Response } = {},
+  ): {
+    svc: QuotaService;
+    calls: () => { url: string; headers: Record<string, string> }[];
+  } {
+    const dir = tmpDir();
+    fs.writeFileSync(path.join(dir, "auth.json"), JSON.stringify({}));
+    fs.writeFileSync(
+      path.join(dir, "service.json"),
+      JSON.stringify({ url: options.url ?? "http://127.0.0.1:49374", password: options.password ?? "pw" }),
+    );
+    const calls: { url: string; headers: Record<string, string> }[] = [];
+    const fetchFn = async (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      const request = { url: String(url), headers: init?.headers as Record<string, string> };
+      calls.push(request);
+      if (request.url.endsWith("/api/credential")) {
+        return jsonRes({ data: credentials(request.url) });
+      }
+      return (options.usageResponse ?? (() => jsonRes(GO_USAGE)))();
+    };
+    return {
+      svc: new QuotaService({
+        authFilePath: path.join(dir, "auth.json"),
+        quotaConfigPath: path.join(dir, "quota.json"),
+        opencodeServicePaths: [path.join(dir, "service.json")],
+        fetchFn,
+      }),
+      calls: () => calls,
+    };
+  }
+
+  const SERVICE_CREDS = [
+    {
+      integrationID: "opencode",
+      label: "OpenCode Console",
+      active: true,
+      value: { type: "key", key: "oc_sk_console" },
+    },
+    { integrationID: "opencode-go", label: "OpenCode Go", active: true, value: { type: "key", key: "oc_sk_go" } },
+  ];
+
+  it("reads the Go key from the local opencode service when auth.json and the config have none", async () => {
+    const { svc, calls } = serviceEnv(() => SERVICE_CREDS);
+
+    const snap = await svc.fetchAll();
+    const oc = snap.providers.find((p) => p.providerId === "opencode")!;
+
+    expect(calls().map((call) => call.url)).toEqual([
+      "http://127.0.0.1:49374/api/credential",
+      "https://opencode.ai/zen/go/v1/usage",
+    ]);
+    expect(calls()[0].headers.Authorization).toBe(`Basic ${Buffer.from("opencode:pw").toString("base64")}`);
+    // "opencode-go" (the Go subscription) wins over the plain Console credential.
+    expect(calls()[1].headers.Authorization).toBe("Bearer oc_sk_go");
+    expect(oc.configured).toBe(true);
+    expect(oc.windows).toHaveLength(3);
+  });
+
+  it("ignores inactive / non-key / keyless service credentials instead of querying with garbage", async () => {
+    const { svc, calls } = serviceEnv(() => [
+      { integrationID: "opencode-go", active: false, value: { type: "key", key: "oc_sk_stale" } },
+      { integrationID: "opencode-go", active: true, value: { type: "oauth", access: "at" } },
+      { integrationID: "opencode", active: true, value: { type: "key", key: "" } },
+      { integrationID: "deepseek", active: true, value: { type: "key", key: "sk-ds" } },
+    ]);
+
+    const oc = (await svc.fetchAll()).providers.find((p) => p.providerId === "opencode")!;
+    expect(oc.configured).toBe(false);
+    expect(calls()).toHaveLength(1);
+  });
+
+  it("refuses a non-loopback service URL (the descriptor carries a password)", async () => {
+    const { svc, calls } = serviceEnv(() => SERVICE_CREDS, { url: "http://example.com:49374" });
+
+    const oc = (await svc.fetchAll()).providers.find((p) => p.providerId === "opencode")!;
+    expect(oc.configured).toBe(false);
+    expect(calls()).toEqual([]);
+  });
+
+  it("treats a stopped/unreachable opencode service as 'no key', never as a quota error", async () => {
+    const dir = tmpDir();
+    fs.writeFileSync(path.join(dir, "auth.json"), JSON.stringify({}));
+    fs.writeFileSync(path.join(dir, "service.json"), JSON.stringify({ url: "http://127.0.0.1:49374", password: "pw" }));
+    const svc = new QuotaService({
+      authFilePath: path.join(dir, "auth.json"),
+      quotaConfigPath: path.join(dir, "quota.json"),
+      opencodeServicePaths: [path.join(dir, "service.json")],
+      fetchFn: async () => {
+        throw new TypeError("fetch failed");
+      },
+    });
+
+    const oc = (await svc.fetchAll()).providers.find((p) => p.providerId === "opencode")!;
+    expect(oc.configured).toBe(false);
+    expect(oc.error).toBeNull();
+  });
+
+  it("derives the loopback URL from a port-only descriptor (config-root service file)", async () => {
+    const dir = tmpDir();
+    fs.writeFileSync(path.join(dir, "auth.json"), JSON.stringify({}));
+    fs.writeFileSync(path.join(dir, "service.json"), JSON.stringify({ port: 49374, password: "pw" }));
+    const urls: string[] = [];
+    const svc = new QuotaService({
+      authFilePath: path.join(dir, "auth.json"),
+      quotaConfigPath: path.join(dir, "quota.json"),
+      opencodeServicePaths: [path.join(dir, "service.json")],
+      fetchFn: async (url) => {
+        urls.push(String(url));
+        return String(url).endsWith("/api/credential") ? jsonRes({ data: SERVICE_CREDS }) : jsonRes(GO_USAGE);
+      },
+    });
+
+    await svc.fetchAll();
+    expect(urls[0]).toBe("http://127.0.0.1:49374/api/credential");
+  });
+
+  it("finds a per-channel registration file (service-dev.json) beside a missing service.json", async () => {
+    const dir = tmpDir();
+    fs.writeFileSync(path.join(dir, "auth.json"), JSON.stringify({}));
+    fs.writeFileSync(
+      path.join(dir, "service-dev.json"),
+      JSON.stringify({ url: "http://127.0.0.1:49374", password: "pw" }),
+    );
+    const svc = new QuotaService({
+      authFilePath: path.join(dir, "auth.json"),
+      quotaConfigPath: path.join(dir, "quota.json"),
+      opencodeServicePaths: [path.join(dir, "service.json")],
+      fetchFn: async (url) =>
+        String(url).endsWith("/api/credential") ? jsonRes({ data: SERVICE_CREDS }) : jsonRes(GO_USAGE),
+    });
+
+    const oc = (await svc.fetchAll()).providers.find((p) => p.providerId === "opencode")!;
+    expect(oc.configured).toBe(true);
+    expect(oc.windows).toHaveLength(3);
+  });
+
+  it("defaultOpencodeServicePaths covers the XDG state and config roots (same list on macOS)", () => {
+    expect(defaultOpencodeServicePaths({}, path.join(path.sep, "Users", "me"))).toEqual([
+      path.join(path.sep, "Users", "me", ".local", "state", "opencode", "service.json"),
+      path.join(path.sep, "Users", "me", ".config", "opencode", "service.json"),
+    ]);
+    expect(defaultOpencodeServicePaths({ XDG_STATE_HOME: "/s", XDG_CONFIG_HOME: "/c" }, "/x")).toEqual([
+      path.join("/s", "opencode", "service.json"),
+      path.join("/c", "opencode", "service.json"),
+    ]);
+  });
+
+  it("does not consult the local service when auth.json already carries the key", async () => {
+    const dir = tmpDir();
+    fs.writeFileSync(path.join(dir, "auth.json"), JSON.stringify({ opencode: { type: "api", key: "oc_sk_auth" } }));
+    fs.writeFileSync(path.join(dir, "service.json"), JSON.stringify({ url: "http://127.0.0.1:49374", password: "pw" }));
+    const urls: string[] = [];
+    const svc = new QuotaService({
+      authFilePath: path.join(dir, "auth.json"),
+      quotaConfigPath: path.join(dir, "quota.json"),
+      opencodeServicePaths: [path.join(dir, "service.json")],
+      fetchFn: async (url) => {
+        urls.push(String(url));
+        return jsonRes(GO_USAGE);
+      },
+    });
+
+    await svc.fetchAll();
+    expect(urls).toEqual(["https://opencode.ai/zen/go/v1/usage"]);
+  });
+});
+
 describe("formatQuotaBar — balance-only providers", () => {
   it("colors balance segments by absolute amount: >100 green", () => {
     const bar = formatQuotaBar({
@@ -693,13 +1046,13 @@ describe("QuotaService.fetchAll — snapshot", () => {
     });
 
     const snap = await svc.fetchAll();
-    expect(snap.providers.map((p) => p.providerId)).toEqual(["kimi", "glm", "mimo", "deepseek"]);
+    expect(snap.providers.map((p) => p.providerId)).toEqual(["kimi", "glm", "mimo", "deepseek", "opencode"]);
     expect(snap.fetchedAt).toBe("2026-08-22T12:00:00.000Z");
   });
 });
 
 describe("QuotaService.fetchAll — auth.json 容错", () => {
-  it("auth.json 缺失或损坏时四个 provider 全部未配置，且零网络请求", async () => {
+  it("auth.json 缺失或损坏时五个 provider 全部未配置，且零网络请求", async () => {
     for (const seed of [undefined, "{ not valid json"]) {
       const dir = tmpDir();
       if (seed !== undefined) {
@@ -716,7 +1069,7 @@ describe("QuotaService.fetchAll — auth.json 容错", () => {
       });
 
       const snap = await svc.fetchAll();
-      expect(snap.providers.map((p) => p.configured)).toEqual([false, false, false, false]);
+      expect(snap.providers.map((p) => p.configured)).toEqual([false, false, false, false, false]);
       expect(snap.providers.every((p) => p.error === null)).toBe(true);
       expect(calls).toBe(0);
     }
@@ -1513,7 +1866,7 @@ describe("QuotaService.saveMimoCookie", () => {
 
 describe("normalizeQuotaVisibility", () => {
   it("absent/garbage source yields all-visible", () => {
-    const allVisible = { kimi: true, glm: true, mimo: true, deepseek: true };
+    const allVisible = { kimi: true, glm: true, mimo: true, deepseek: true, opencode: true };
     expect(normalizeQuotaVisibility(undefined)).toEqual(allVisible);
     expect(normalizeQuotaVisibility(null)).toEqual(allVisible);
     expect(normalizeQuotaVisibility("nope")).toEqual(allVisible);
@@ -1522,18 +1875,26 @@ describe("normalizeQuotaVisibility", () => {
   });
 
   it("only a strict false hides; true/absent/invalid values stay visible", () => {
-    expect(normalizeQuotaVisibility({ kimi: false })).toEqual({ kimi: false, glm: true, mimo: true, deepseek: true });
+    expect(normalizeQuotaVisibility({ kimi: false })).toEqual({
+      kimi: false,
+      glm: true,
+      mimo: true,
+      deepseek: true,
+      opencode: true,
+    });
     expect(normalizeQuotaVisibility({ kimi: "false", glm: 0 })).toEqual({
       kimi: true,
       glm: true,
       mimo: true,
       deepseek: true,
+      opencode: true,
     });
     expect(normalizeQuotaVisibility({ unknown: false, mimo: false })).toEqual({
       kimi: true,
       glm: true,
       mimo: false,
       deepseek: true,
+      opencode: true,
     });
   });
 });
@@ -1543,16 +1904,40 @@ describe("readQuotaStatusBarVisibility", () => {
     const dir = tmpDir();
     const file = path.join(dir, "quota.json");
 
-    expect(readQuotaStatusBarVisibility(file, fs)).toEqual({ kimi: true, glm: true, mimo: true, deepseek: true });
+    expect(readQuotaStatusBarVisibility(file, fs)).toEqual({
+      kimi: true,
+      glm: true,
+      mimo: true,
+      deepseek: true,
+      opencode: true,
+    });
 
     fs.writeFileSync(file, JSON.stringify({ statusBar: { kimi: false, glm: true } }));
-    expect(readQuotaStatusBarVisibility(file, fs)).toEqual({ kimi: false, glm: true, mimo: true, deepseek: true });
+    expect(readQuotaStatusBarVisibility(file, fs)).toEqual({
+      kimi: false,
+      glm: true,
+      mimo: true,
+      deepseek: true,
+      opencode: true,
+    });
 
     fs.writeFileSync(file, "{ corrupt");
-    expect(readQuotaStatusBarVisibility(file, fs)).toEqual({ kimi: true, glm: true, mimo: true, deepseek: true });
+    expect(readQuotaStatusBarVisibility(file, fs)).toEqual({
+      kimi: true,
+      glm: true,
+      mimo: true,
+      deepseek: true,
+      opencode: true,
+    });
 
     fs.writeFileSync(file, JSON.stringify({ mimo: { cookie: "x" } }));
-    expect(readQuotaStatusBarVisibility(file, fs)).toEqual({ kimi: true, glm: true, mimo: true, deepseek: true });
+    expect(readQuotaStatusBarVisibility(file, fs)).toEqual({
+      kimi: true,
+      glm: true,
+      mimo: true,
+      deepseek: true,
+      opencode: true,
+    });
   });
 });
 
@@ -1580,11 +1965,11 @@ describe("QuotaService.saveQuotaStatusBarProvider", () => {
 
     const visibility = svc.saveQuotaStatusBarProvider("kimi", false);
 
-    expect(visibility).toEqual({ kimi: false, glm: false, mimo: true, deepseek: true });
+    expect(visibility).toEqual({ kimi: false, glm: false, mimo: true, deepseek: true, opencode: true });
     const saved = JSON.parse(fs.readFileSync(file, "utf8"));
     expect(saved.other).toBe(1);
     expect(saved.mimo.cookie).toBe("api-platform_serviceToken=abc; userId=42");
-    expect(saved.statusBar).toEqual({ kimi: false, glm: false, mimo: true, deepseek: true });
+    expect(saved.statusBar).toEqual({ kimi: false, glm: false, mimo: true, deepseek: true, opencode: true });
   });
 
   it("creating the file fresh (mkdir on demand) and toggling back to visible round-trips", () => {
@@ -1597,9 +1982,10 @@ describe("QuotaService.saveQuotaStatusBarProvider", () => {
       glm: true,
       mimo: true,
       deepseek: true,
+      opencode: true,
     });
     const saved = JSON.parse(fs.readFileSync(path.join(dir, "nested", "quota.json"), "utf8"));
-    expect(saved.statusBar).toEqual({ kimi: true, glm: true, mimo: true, deepseek: true });
+    expect(saved.statusBar).toEqual({ kimi: true, glm: true, mimo: true, deepseek: true, opencode: true });
   });
 
   it.skipIf(process.platform === "win32")("keeps the credential file owner-only (0600) after the atomic write", () => {

@@ -3427,7 +3427,7 @@ function tests(): TestCase[] {
       },
     },
     {
-      name: "quotaRefresh opens the quota panel: 4 unconfigured groups, no auth.json created",
+      name: "quotaRefresh opens the quota panel: 5 unconfigured groups, no auth.json created",
       fn: async () => {
         const dataHome = process.env.XDG_DATA_HOME ?? "";
         const authFile = path.join(dataHome, "opencode", "auth.json");
@@ -3438,9 +3438,9 @@ function tests(): TestCase[] {
         // Boot pushes a full-refresh snapshot even without credentials (all unconfigured,
         // zero network requests).
         await pollUntil(
-          () => quotaSnapshots(bridge).some((message) => message.snapshot.providers.length === 4),
+          () => quotaSnapshots(bridge).some((message) => message.snapshot.providers.length === 5),
           15_000,
-          "quota panel boot must push a 4-provider snapshot",
+          "quota panel boot must push a 5-provider snapshot",
         );
         // Boot assertions read the quotaInit MESSAGE specifically: the panel-open
         // visibility kick fires a quotaSnapshot FIRST (before the webview handshake),
@@ -3455,7 +3455,7 @@ function tests(): TestCase[] {
         }
         assert.deepEqual(
           boot.visibility,
-          { kimi: true, glm: true, mimo: true, deepseek: true },
+          { kimi: true, glm: true, mimo: true, deepseek: true, opencode: true },
           "boot quotaInit must carry the all-visible default",
         );
         assert.equal(fs.existsSync(authFile), false, "no credentials may be created by a credential-free refresh");
@@ -3592,7 +3592,7 @@ function tests(): TestCase[] {
         );
         assert.deepEqual(
           saved.statusBar,
-          { kimi: false, glm: true, mimo: true, deepseek: true },
+          { kimi: false, glm: true, mimo: true, deepseek: true, opencode: true },
           "the persisted record must be the full normalized visibility",
         );
         if (process.platform !== "win32") {
@@ -3637,8 +3637,8 @@ function tests(): TestCase[] {
         await userConfig.update("quota.refreshSeconds", 1, vscode.ConfigurationTarget.Global);
         await pollConfigValue("quota.refreshSeconds", 1, "1s quota interval must be active");
 
-        // Hide ALL four providers (panel open → rounds still fetch all).
-        for (const providerId of ["kimi", "glm", "mimo", "deepseek"] as const) {
+        // Hide ALL five providers (panel open → rounds still fetch all).
+        for (const providerId of ["kimi", "glm", "mimo", "deepseek", "opencode"] as const) {
           bridge.deliver({ type: "quotaSetStatusBar", payload: { providerId, visible: false } });
         }
         await pollUntil(
@@ -3647,11 +3647,11 @@ function tests(): TestCase[] {
               statusBar?: Record<string, boolean>;
             };
             return (
-              Object.values(saved.statusBar ?? {}).length === 4 && Object.values(saved.statusBar!).every((v) => !v)
+              Object.values(saved.statusBar ?? {}).length === 5 && Object.values(saved.statusBar!).every((v) => !v)
             );
           },
           10_000,
-          "all four hidden toggles must persist to quota.json",
+          "all five hidden toggles must persist to quota.json",
         );
 
         // Close the panel: with everything hidden AND no open panel, refresh rounds
@@ -3676,6 +3676,7 @@ function tests(): TestCase[] {
         reopened.deliver({ type: "quotaSetStatusBar", payload: { providerId: "glm", visible: true } });
         reopened.deliver({ type: "quotaSetStatusBar", payload: { providerId: "mimo", visible: true } });
         reopened.deliver({ type: "quotaSetStatusBar", payload: { providerId: "deepseek", visible: true } });
+        reopened.deliver({ type: "quotaSetStatusBar", payload: { providerId: "opencode", visible: true } });
         await pollUntil(
           () =>
             reopened.outbound.some(

@@ -99,8 +99,8 @@ describe("core/types re-exports the protocol canonicals (single source of truth)
 });
 
 describe("shared/protocol quota canon (single source of truth)", () => {
-  it("QUOTA_PROVIDER_IDS is the canonical four-provider order, duplicate-free", () => {
-    expect([...QUOTA_PROVIDER_IDS]).toEqual(["kimi", "glm", "mimo", "deepseek"]);
+  it("QUOTA_PROVIDER_IDS is the canonical five-provider order, duplicate-free", () => {
+    expect([...QUOTA_PROVIDER_IDS]).toEqual(["kimi", "glm", "mimo", "deepseek", "opencode"]);
     expect(new Set(QUOTA_PROVIDER_IDS).size).toBe(QUOTA_PROVIDER_IDS.length);
   });
 
@@ -266,11 +266,18 @@ describe("quota visibility helpers", () => {
       glm: true,
       mimo: true,
       deepseek: true,
+      opencode: true,
     });
   });
 
   it("filterQuotaSnapshotByVisibility keeps visible providers and preserves fetchedAt", () => {
-    const filtered = filterQuotaSnapshotByVisibility(snapshot, { kimi: true, glm: false, mimo: false, deepseek: true });
+    const filtered = filterQuotaSnapshotByVisibility(snapshot, {
+      kimi: true,
+      glm: false,
+      mimo: false,
+      deepseek: true,
+      opencode: false,
+    });
     expect(filtered.providers.map((provider) => provider.providerId)).toEqual(["kimi", "deepseek"]);
     expect(filtered.fetchedAt).toBe("t");
   });
