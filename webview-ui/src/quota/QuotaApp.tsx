@@ -75,6 +75,24 @@ const DEV_SNAPSHOT: QuotaSnapshot = {
   ],
 };
 
+/**
+ * Per-provider credential hint under the group title. OpenCode is the only provider whose
+ * key can come from the local machine instead of auth.json, so its copy names the sources.
+ */
+function credentialHint(providerId: ProviderQuota["providerId"], provider: ProviderQuota | null): string | null {
+  if (providerId === "mimo" || provider === null) {
+    return null;
+  }
+  if (providerId === "opencode") {
+    return provider.configured
+      ? "凭据取自本机 opencode（auth.json／opencode.json／本地服务），更换请在 opencode 重新登录"
+      : "未检测到凭据：请确认 opencode 正在运行并已登录，或在 opencode.json 的 provider.opencode.options.apiKey 填写 Key";
+  }
+  return provider.configured
+    ? "凭据已由 opencode 登录信息检测到（auth.json），更换请运行 opencode auth login"
+    : "终端运行 opencode auth login 登录后自动检测";
+}
+
 function ProviderGroup({
   providerId,
   provider,
@@ -115,12 +133,7 @@ function ProviderGroup({
           : "未配置";
   const showData = provider !== null && (provider.error === null || stale);
   const balance = showData ? balanceText(provider.balances) : null;
-  const credHint =
-    providerId === "mimo" || provider === null
-      ? null
-      : provider.configured
-        ? "凭据已由 opencode 登录信息检测到（auth.json），更换请运行 opencode auth login"
-        : "终端运行 opencode auth login 登录后自动检测";
+  const credHint = credentialHint(providerId, provider);
 
   return (
     <section className="qgroup" ref={groupRef} data-provider={providerId}>
