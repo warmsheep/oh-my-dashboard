@@ -2,6 +2,23 @@
 
 > 版本与日期以 git 历史为准；0.8.0–0.14.0、0.16.x、0.18.0 等中间版本为本地打包、版本号未入库，相关变更归并入下一个入库版本。
 
+## 0.47.2 (2026-10-28)
+
+- **修复「mac 下读不到 OpenCode Go 额度」**：0.47.1 只认一个写死路径 `~/.local/state/opencode/service.json`。改为按 opencode 自身的 XDG 规则枚举候选（state 根与 config 根，随 `$XDG_STATE_HOME`／`$XDG_CONFIG_HOME` 变化，macOS/Windows 同为 XDG 路径无平台分支），并支持同目录下按 channel 命名的 `service-<channel>.json`、以及 config 根只有 `{port, password}` 而无 `url` 的形态（由端口补 loopback url）。凭据解析顺序不变：auth.json → opencode.json[c] → 本机服务；只接受 loopback，服务未启动/401/无匹配仍按「无 Key」静默降级。
+- **面板提示更具体**：OpenCode 分组未检测到凭据时提示「确认 opencode 正在运行并已登录，或在 `opencode.json` 的 `provider.opencode.options.apiKey` 填 Key」。
+
+## 0.47.1 (2026-10-28)
+
+- **修复「检测不到 OpenCode Go 额度」**：0.47.0 只读 `auth.json` 与 `opencode.json[c]`，但 opencode v2 把凭据放进自己的数据库，两处都没有——面板因此显示「未配置」。新增第三级凭据源：本机 opencode 服务（`defaultOpencodeServiceFilePath()` = `$XDG_STATE_HOME/opencode/service.json` 的 `{url,password}` → `GET {url}/api/credential`，HTTP Basic `opencode:<password>`），按 `opencode-go` → `opencode` 取 active 的 key 再查 Go 用量接口。仅接受 loopback URL（该文件含密码）；服务未启动 / 401 / 无匹配凭据一律视为「无 Key」（不发起用量请求、不报错、不参与熔断）。凭据解析顺序：auth.json → opencode.json[c] → 本机服务。
+- 测试：根套件 957（新增 5 例：服务凭据解析与 `opencode-go` 优先、禁用/非 key/空 key 过滤、非 loopback URL 拒绝、服务不可达降级、auth.json 命中时不访问服务）、webview 211 全绿；实机验证：`/api/credential` 取到 `opencode-go` key 后 `/zen/go/v1/usage` 返回 200（rolling 7% / weekly 3% / monthly 1%）。
+
+## 0.47.0 (2026-10-28)
+
+- **新增供应商「OpenCode」额度监控**：额度页/状态栏增加第五个供应商分组，显示 OpenCode Go 套餐的 5 小时（`rolling`）/ 周 / 月三档剩余额度与重置时间。数据源为 `GET https://opencode.ai/zen/go/v1/usage`（Bearer 取自 `auth.json` 的 `opencode`／`opencode-go` 条目），`percent` 按「已用占比」换算为剩余百分比并沿用统一着色规则；响应窗口缺失时只渲染存在的档位。
+- **未订阅 Go 不报错**：Zen 按量计费的 API Key 调该接口返回 403，按「已配置但无窗口数据」处理（分组显示已配置、状态栏不出现该供应商分段），不计入降级/熔断判定；Zen 的按量余额只在 Console 网页可见（无公开接口），未纳入监控。
+- **凭据回退本机配置**：`auth.json` 无 `opencode`／`opencode-go` 条目时，改为读取本机实际生效的 opencode 配置（`ConfigStore.resolveOpencodeConfigPath()`，`provider.opencode(-go).options.apiKey`，JSONC 容错解析），适配把 Key 写在 `opencode.json[c]` 而非 auth.json 的机器；两处都没有则不发起请求。
+- 测试：根套件 952（新增 OpenCode 9 例：三档映射/`opencode-go` 条目兼容/缺档容错/403 语义/401 报错/无凭据零请求/配置回退/凭据优先级/配置损坏降级）、webview 211 全绿；e2e 供应商断言同步为 5 组。
+
 ## 0.46.1 (2026-09-01)
 
 - **「默认智能体」提示文案修正**：原 hint 举例 `build、plan`，但 oh-my-openagent（Sisyphus 启用）会把原生 build/plan 降级为 `mode: "subagent"`，此时把 `default_agent` 设为 build 会让 opencode 在每次内部 prompt 解析默认智能体时抛 `default agent "build" is a subagent`。新 hint 明确 OMO 环境应填 `sisyphus`、原生环境才用 `build`。
