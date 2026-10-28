@@ -12,7 +12,7 @@ import { errorMessage } from "./core/errors";
 import { validate } from "./core/jsoncEditor";
 import { seedLocalModelsFromCatalog } from "./core/modelCatalog";
 import { PresetService } from "./core/presetService";
-import { QuotaService } from "./core/quotaService";
+import { defaultOpencodeServicePaths, QuotaService } from "./core/quotaService";
 import { skillSummaries } from "./core/skillScanner";
 import type { DiscoveredConfig, JsoncError } from "./core/types";
 import { WatchManager } from "./core/watchManager";
@@ -114,6 +114,8 @@ export function activate(ctx: vscode.ExtensionContext): void {
 
   const quotaService = new QuotaService({
     quotaConfigPath: path.join(paths.configDir, "quota.json"),
+    opencodeConfigPath: configStore.resolveOpencodeConfigPath(),
+    opencodeServicePaths: defaultOpencodeServicePaths(),
   });
   const quotaStatusBar = createQuotaStatusBar({ quotaService, log });
   ctx.subscriptions.push(quotaStatusBar);

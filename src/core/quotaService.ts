@@ -22,6 +22,7 @@ import type {
   QuotaWindowKind,
 } from "../shared/protocol";
 import { writeFileAtomic } from "./atomicFile";
+import { parseSafe } from "./jsoncEditor";
 import { resilientFetch } from "./resilientFetch";
 
 // Quota data shapes + shared display helpers live in shared/protocol.ts (single source,
@@ -43,6 +44,17 @@ export interface QuotaServiceOptions {
   /** Extension-owned quota config (<configDir>/quota.json) carrying the MiMo dashboard cookie. */
   quotaConfigPath?: string;
   /**
+   * The opencode base config this machine actually uses (opencode.json[c], see
+   * ConfigStore.resolveOpencodeConfigPath). Read only as a credential fallback for
+   * providers that pin their key there instead of in auth.json.
+   */
+  opencodeConfigPath?: string;
+  /**
+   * Candidate local-service descriptors (see defaultOpencodeServicePaths). Empty = the
+   * local-service credential fallback is off; the extension wires the real candidates.
+   */
+  opencodeServicePaths?: readonly string[];
+  /**
    * Fetch injection for tests. Defaults to the c-ares resilientFetch so a DNS
    * black-hole can never park libuv threadpool threads (see resilientFetch.ts).
    */
@@ -58,6 +70,10 @@ const KIMI_USAGE_URL = "https://api.kimi.com/coding/v1/usages";
 const GLM_QUOTA_URL = "https://open.bigmodel.cn/api/monitor/usage/quota/limit";
 const MIMO_API_BASE = "https://platform.xiaomimimo.com/api/v1";
 const DEEPSEEK_BALANCE_URL = "https://api.deepseek.com/user/balance";
+const OPENCODE_GO_USAGE_URL = "https://opencode.ai/zen/go/v1/usage";
+
+/** Provider ids opencode files the Console/Zen key under in opencode.json[c]. */
+const OPENCODE_PROVIDER_IDS = ["opencode", "opencode-go"] as const;
 
 const KIMI_PLAN_LEVELS: Record<string, string> = {
   LEVEL_BASIC: "Moderato",
@@ -70,6 +86,17 @@ const KIMI_PLAN_LEVELS: Record<string, string> = {
 const GLM_UNIT_DAYS = 1;
 const GLM_UNIT_HOURS = 3;
 const GLM_UNIT_WEEKS = 6;
+
+/**
+ * OpenCode Go allowance meters, keyed as `GET /zen/go/v1/usage` returns them
+ * (`usage.<key>.percent` = share of the window already used). "rolling" is Go's
+ * 5-hour window.
+ */
+const OPENCODE_GO_METERS: readonly { key: string; kind: QuotaWindowKind }[] = [
+  { key: "rolling", kind: "5h" },
+  { key: "weekly", kind: "weekly" },
+  { key: "monthly", kind: "monthly" },
+];
 
 function kimiWindowKind(timeUnit: unknown, duration: number | null): QuotaWindowKind | null {
   if (typeof timeUnit !== "string") {
@@ -180,6 +207,109 @@ function bearerKey(entry: AuthEntry | undefined): string | null {
   const key = entry?.key;
   return typeof key === "string" && key.length > 0 ? key : null;
 }
+
+/**
+ * The Zen/Go key pinned in the local opencode config (`provider.<id>.options.apiKey`).
+ * Machines that declare the key in opencode.json[c] never write auth.json, so the quota
+ * query falls back to the config. JSONC-tolerant read (the file is JSONC); a missing or
+ * broken config just means "no key".
+ */
+function readConfigProviderKey(configPath: string, fsMod: typeof defaultFs): string | null {
+  try {
+    const { value } = parseSafe<Record<string, unknown>>(fsMod.readFileSync(configPath, "utf8"));
+    const providers = value?.provider;
+    if (!providers || typeof providers !== "object" || Array.isArray(providers)) {
+      return null;
+    }
+    for (const id of OPENCODE_PROVIDER_IDS) {
+      const apiKey = (providers as Record<string, { options?: { apiKey?: unknown } }>)[id]?.options?.apiKey;
+      if (typeof apiKey === "string" && apiKey.trim() !== "") {
+        return apiKey.trim();
+      }
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Candidate local-service descriptors, in probe order. opencode has NO platform-specific
+ * directories (its XDG roots are `$XDG_STATE_HOME`/`$XDG_CONFIG_HOME` with `~/.local/state`
+ * and `~/.config` fallbacks on macOS and Windows too), so the same list works everywhere.
+ * The state root holds the registration (`{url, password, pid}`), the config root the
+ * user-facing service config (`{port, password, ...}`); `serviceDescriptorFiles` expands
+ * either directory with its per-channel files. Must stay in sync with opencode's
+ * `packages/util/src/global-roots.ts` + `packages/cli/src/services/service-config.ts`.
+ */
+export function defaultOpencodeServicePaths(env: NodeJS.ProcessEnv = process.env, home = os.homedir()): string[] {
+  const stateHome = env.XDG_STATE_HOME?.trim() || path.join(home, ".local", "state");
+  const configHome = env.XDG_CONFIG_HOME?.trim() || path.join(home, ".config");
+  return [path.join(stateHome, "opencode", "service.json"), path.join(configHome, "opencode", "service.json")];
+}
+
+/**
+ * Each `service.json` plus its per-channel siblings (`service-dev.json`, …) in the same
+ * directory: a dev/beta build writes the registration under a channel-suffixed name.
+ * `shortcut: no legacy `service-<hash>.json` names, add them if a pre-2.x install shows up.
+ */
+function serviceDescriptorFiles(servicePaths: readonly string[], fsMod: typeof defaultFs): string[] {
+  const files: string[] = [];
+  for (const file of servicePaths) {
+    files.push(file);
+    try {
+      for (const name of fsMod.readdirSync(path.dirname(file))) {
+        if (/^service-[^.]+\.json$/.test(name)) {
+          files.push(path.join(path.dirname(file), name));
+        }
+      }
+    } catch {
+      // Missing directory: the primary path already reports "no descriptor".
+    }
+  }
+  return files;
+}
+
+/**
+ * Read the local opencode service endpoint; the first usable descriptor wins. Only loopback
+ * URLs are honoured — the descriptor carries a password, so a tampered file must never turn
+ * this into a request to an arbitrary host. A config-root descriptor may carry only a port.
+ */
+function readServiceEndpoint(
+  servicePaths: readonly string[],
+  fsMod: typeof defaultFs,
+): { url: string; password: string } | null {
+  for (const file of serviceDescriptorFiles(servicePaths, fsMod)) {
+    try {
+      const raw = JSON.parse(fsMod.readFileSync(file, "utf8")) as {
+        url?: unknown;
+        port?: unknown;
+        password?: unknown;
+      };
+      const password = typeof raw.password === "string" ? raw.password : "";
+      const url = typeof raw.url === "string" && raw.url.trim() !== "" ? raw.url.trim() : portUrl(raw.port);
+      if (password !== "" && url !== null && /^http:\/\/(127\.0\.0\.1|localhost|\[::1\]):\d+$/.test(url)) {
+        return { url, password };
+      }
+    } catch {
+      // Unreadable/garbage descriptor: try the next candidate.
+    }
+  }
+  return null;
+}
+
+/** `{port}` form → loopback URL (opencode's config-root service file carries no url). */
+function portUrl(port: unknown): string | null {
+  const value = toFiniteNumber(port);
+  return value !== null && Number.isInteger(value) && value > 0 && value <= 65_535 ? `http://127.0.0.1:${value}` : null;
+}
+
+/**
+ * Where opencode v2 keeps the credential this extension cannot see otherwise: the local
+ * service descriptor (`$XDG_STATE_HOME/opencode/service.json` → `{url, password}`), whose
+ * `GET /api/credential` lists the workspace's keys. Integration ids, in preference order.
+ */
+const OPENCODE_SERVICE_CREDENTIAL_IDS = ["opencode-go", "opencode"] as const;
 
 /** Extract the two cookies MiMo's dashboard needs; anything else is dropped. */
 export function normalizeMimoCookie(raw: unknown): string | null {
@@ -567,6 +697,8 @@ class RequestGate {
 export class QuotaService {
   private readonly authFilePath: string;
   private readonly quotaConfigPath: string;
+  private readonly opencodeConfigPath: string;
+  private readonly opencodeServicePaths: readonly string[];
   private readonly fetchFn: typeof fetch;
   private readonly now: () => Date;
   private readonly timeoutMs: number;
@@ -577,6 +709,8 @@ export class QuotaService {
     const dataHome = process.env.XDG_DATA_HOME?.trim() || path.join(os.homedir(), ".local", "share");
     this.authFilePath = opts.authFilePath ?? path.join(dataHome, "opencode", "auth.json");
     this.quotaConfigPath = opts.quotaConfigPath ?? "";
+    this.opencodeConfigPath = opts.opencodeConfigPath ?? "";
+    this.opencodeServicePaths = opts.opencodeServicePaths ?? [];
     this.fetchFn = opts.fetchFn ?? resilientFetch;
     this.now = opts.now ?? (() => new Date());
     this.timeoutMs = opts.timeoutMs ?? 10_000;
@@ -619,6 +753,9 @@ export class QuotaService {
         return this.fetchMimo(this.quotaConfigPath ? readMimoCookie(this.quotaConfigPath, this.fsMod) : null);
       case "deepseek":
         return this.fetchDeepSeek(bearerKey(entries["deepseek"]));
+      case "opencode":
+        // auth.json first, then the key pinned in this machine's opencode.json[c].
+        return this.fetchOpencode(bearerKey(entries["opencode"]) ?? bearerKey(entries["opencode-go"]));
     }
   }
 
@@ -881,6 +1018,115 @@ export class QuotaService {
       return { ...provider, plan: planCode, windows };
     } catch (error) {
       return errorProvider({ ...base, configured: true }, friendlyRequestError(error));
+    }
+  }
+
+  /**
+   * OpenCode Go allowance: one meter per rolling-5h / weekly / monthly window, each a used
+   * percent (`opencode zen` pay-as-you-go workspaces have no windows at all and answer 403 —
+   * that is a credential without a Go subscription, not a failure, so it stays configured
+   * and simply shows nothing). Pay-as-you-go credit balance is Console-side (browser session)
+   * and out of scope here.
+   *
+   * `authKey` comes from auth.json; when opencode has no such entry the key is resolved from
+   * the local opencode config, then from opencode v2's own service (see resolveOpencodeKey).
+   */
+  async fetchOpencode(authKey: string | null): Promise<ProviderQuota> {
+    const base = emptyProvider("opencode", quotaProviderLabel("opencode"));
+    const apiKey = await this.resolveOpencodeKey(authKey);
+    if (!apiKey) {
+      return base;
+    }
+    try {
+      const res = await this.fetchFn(OPENCODE_GO_USAGE_URL, {
+        headers: { Authorization: `Bearer ${apiKey}`, Accept: "application/json" },
+        signal: AbortSignal.timeout(this.timeoutMs),
+      });
+      if (res.status === 403) {
+        return { ...base, configured: true };
+      }
+      if (!res.ok) {
+        return errorProvider({ ...base, configured: true }, `接口返回 HTTP ${res.status}`);
+      }
+      const data = (await readJsonBody(res)) as { usage?: Record<string, unknown> };
+      const windows: QuotaWindow[] = [];
+      for (const { key, kind } of OPENCODE_GO_METERS) {
+        const meter = (data.usage?.[key] ?? null) as { percent?: unknown; resetsAt?: unknown } | null;
+        const usedPercent = toFiniteNumber(meter?.percent);
+        if (usedPercent === null) {
+          continue;
+        }
+        windows.push({
+          kind,
+          usedPercent: clampPercent(usedPercent),
+          remainingPercent: clampPercent(100 - usedPercent),
+          used: null,
+          limit: null,
+          remaining: null,
+          resetAt: toIsoOrNull(meter?.resetsAt),
+        });
+      }
+      return { ...base, configured: true, windows };
+    } catch (error) {
+      return errorProvider({ ...base, configured: true }, friendlyRequestError(error));
+    }
+  }
+
+  /**
+   * Credential resolution for OpenCode: auth.json → the key pinned in this machine's
+   * opencode.json[c] → the key opencode v2 keeps in its own store (local service). All three
+   * may legitimately be absent (opencode signed in through another client), so "none" is a
+   * normal outcome, not an error.
+   */
+  private async resolveOpencodeKey(authKey: string | null): Promise<string | null> {
+    if (authKey) {
+      return authKey;
+    }
+    const configKey = this.opencodeConfigPath ? readConfigProviderKey(this.opencodeConfigPath, this.fsMod) : null;
+    return configKey ?? (await this.readServiceCredentialKey());
+  }
+
+  /**
+   * The Go/Console key from opencode v2's own store: the local service descriptor names a
+   * loopback endpoint whose `GET /api/credential` (HTTP Basic `opencode:<password>`) lists the
+   * signed-in workspace's keys. A stopped service, rejected auth, or no matching credential
+   * all mean "no key" — opencode not running must never surface as a quota error.
+   */
+  private async readServiceCredentialKey(): Promise<string | null> {
+    const endpoint = readServiceEndpoint(this.opencodeServicePaths, this.fsMod);
+    if (!endpoint) {
+      return null;
+    }
+    try {
+      const res = await this.fetchFn(`${endpoint.url}/api/credential`, {
+        headers: {
+          Authorization: `Basic ${Buffer.from(`opencode:${endpoint.password}`).toString("base64")}`,
+          Accept: "application/json",
+        },
+        signal: AbortSignal.timeout(this.timeoutMs),
+      });
+      if (!res.ok) {
+        return null;
+      }
+      const body = (await readJsonBody(res)) as { data?: unknown };
+      const rows = Array.isArray(body.data) ? (body.data as Record<string, unknown>[]) : [];
+      for (const integrationID of OPENCODE_SERVICE_CREDENTIAL_IDS) {
+        for (const row of rows) {
+          const value = (row.value ?? null) as { type?: unknown; key?: unknown } | null;
+          if (
+            row.integrationID === integrationID &&
+            row.active === true &&
+            value?.type === "key" &&
+            typeof value.key === "string" &&
+            value.key !== ""
+          ) {
+            return value.key;
+          }
+        }
+      }
+      return null;
+    } catch {
+      return null;
     }
   }
 

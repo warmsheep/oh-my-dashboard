@@ -173,7 +173,7 @@ export type WebviewToExt =
 // node:fs dependencies).
 // ---------------------------------------------------------------------------
 
-export type QuotaProviderId = "kimi" | "glm" | "mimo" | "deepseek";
+export type QuotaProviderId = "kimi" | "glm" | "mimo" | "deepseek" | "opencode";
 export type QuotaWindowKind = "5h" | "weekly" | "monthly";
 
 export interface QuotaWindow {
@@ -207,7 +207,7 @@ export interface QuotaSnapshot {
 }
 
 /** Canonical provider order: fetchAll iteration and every quota UI group. */
-export const QUOTA_PROVIDER_IDS: readonly QuotaProviderId[] = ["kimi", "glm", "mimo", "deepseek"];
+export const QUOTA_PROVIDER_IDS: readonly QuotaProviderId[] = ["kimi", "glm", "mimo", "deepseek", "opencode"];
 
 /**
  * Per-provider status-bar visibility. Persisted as the `statusBar` block inside
@@ -232,7 +232,7 @@ export interface ManagerNavigatePayload {
 
 /** All-visible default used when quota.json carries no visibility block. */
 export function defaultQuotaVisibility(): QuotaVisibility {
-  return { kimi: true, glm: true, mimo: true, deepseek: true };
+  return { kimi: true, glm: true, mimo: true, deepseek: true, opencode: true };
 }
 
 /**
@@ -256,6 +256,7 @@ const QUOTA_PROVIDER_LABELS: Record<QuotaProviderId, string> = {
   glm: "GLM",
   mimo: "MiMo",
   deepseek: "DeepSeek",
+  opencode: "OpenCode",
 };
 
 /** Display name of a provider — also the group title before any snapshot arrives. */
